@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+dist/
+.backup-*/
+.pre-rollback-*/
+*.bak
+*.bak-test
+main-test2.js
+shellchat-darwin-arm64/

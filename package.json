@@ -1,0 +1,43 @@
+{
+  "name": "qizi-shell",
+  "version": "0.1.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --mac"
+  },
+  "build": {
+    "appId": "com.qizi.shell",
+    "productName": "QiZiShell",
+    "icon": "build/icon.png",
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity",
+      "identity": null
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "gateway-ws.js",
+      "device-identity.js",
+      "device-auth-store.js",
+      "device-auth-payload.js",
+      "index.html",
+      "style.css",
+      "app.js",
+      "marked.min.js",
+      "assets/icons/**",
+      "tray-icon.png",
+      "ref2.jpeg"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^42.3.3",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "marked": "^18.0.5",
+    "tmp-promise": "^3.0.3",
+    "ws": "^8.21.0"
+  }
+}

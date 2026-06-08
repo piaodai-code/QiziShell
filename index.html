@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>启孜</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <div class="titlebar-left"></div>
+      <div class="titlebar-center">
+        <button type="button" class="titlebar-agent-btn" id="titlebar-agent-btn" title="切换 Agent" aria-label="切换 Agent">
+          <span class="titlebar-agent-avatar" id="titlebar-agent-avatar"></span>
+        </button>
+        <div class="agent-popup" id="agent-popup" hidden></div>
+      </div>
+      <div class="titlebar-right">
+        <span class="status-pill" id="status">连接中…</span>
+        <button class="icon-btn stop-btn" id="stop-btn" title="停止启孜 (Esc)" hidden>⏹</button>
+        <button type="button" class="icon-btn" id="settings-btn" title="设置">⋯</button>
+      </div>
+    </header>
+    <main class="messages" id="messages">
+      <div class="msg-hint">还没有消息，发个试试 👋</div>
+    </main>
+    <footer class="composer" id="composer">
+      <div class="composer-resize" id="composer-resize"></div>
+      <div class="composer-tools">
+        <div class="composer-tools-left">
+          <button type="button" class="icon-btn icon-btn-img" title="表情">
+            <img src="assets/icons/face.png" alt="" aria-hidden="true">
+          </button>
+          <button type="button" class="icon-btn icon-btn-img" id="screenshot-btn" title="截屏 (Cmd+Shift+4 也行)">
+            <img src="assets/icons/scissors.png" alt="" aria-hidden="true">
+          </button>
+          <button type="button" class="icon-btn icon-btn-img" id="pick-image-btn" title="从文件夹选择图片">
+            <img src="assets/icons/picture.png" alt="" aria-hidden="true">
+          </button>
+          <button type="button" class="icon-btn icon-btn-img" id="pick-file-btn" title="从文件夹选择文件">
+            <img src="assets/icons/folder.png" alt="" aria-hidden="true">
+          </button>
+          <button type="button" class="icon-btn icon-btn-img" title="语音">
+            <img src="assets/icons/mic.png" alt="" aria-hidden="true">
+          </button>
+        </div>
+        <div class="context-meter" id="context-meter" title="Context 占用">
+          <div class="context-meter-bar" aria-hidden="true">
+            <div class="context-meter-fill" id="context-meter-fill"></div>
+          </div>
+          <span class="context-meter-text" id="context-meter-text">—</span>
+        </div>
+        <div class="model-picker-wrap">
+          <button type="button" class="model-picker-btn" id="model-picker-btn" title="切换模型">
+            <span id="model-badge">…</span>
+            <span class="model-picker-caret">▴</span>
+          </button>
+          <div class="model-popup" id="model-popup" hidden></div>
+        </div>
+      </div>
+      <div class="cmd-popup" id="cmd-popup" hidden></div>
+      <div class="composer-pending" id="composer-pending" hidden></div>
+      <textarea id="input" placeholder="输入消息，输入 / 看可用命令…" rows="1"></textarea>
+
+    </footer>
+  </div>
+  <!-- 图片放大 modal（点击消息气泡里的图打开） -->
+  <div class="img-modal" id="img-modal" hidden role="dialog" aria-modal="true">
+    <button class="img-modal-close" type="button" title="关闭 (Esc)">×</button>
+    <img class="img-modal-img" id="img-modal-img" alt="" />
+  </div>
+  <!-- 设置 -->
+  <div class="settings-modal" id="settings-modal" hidden role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="settings-panel">
+      <div class="settings-header">
+        <h2 class="settings-title" id="settings-title">设置</h2>
+        <button type="button" class="settings-close" id="settings-close-btn" title="关闭 (Esc)">×</button>
+      </div>
+      <div class="settings-body">
+        <section class="settings-section">
+          <h3 class="settings-section-title">Gateway 连接</h3>
+          <p class="settings-hint" id="settings-source-hint"></p>
+          <label class="settings-field">
+            <span class="settings-label">WSS 地址</span>
+            <input type="url" class="settings-input" id="settings-ws-url" placeholder="向管理员索取，如 wss://host:18789" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="settings-field">
+            <span class="settings-label">Token</span>
+            <div class="settings-token-row">
+              <input type="password" class="settings-input" id="settings-token" placeholder="Gateway 认证 Token" spellcheck="false" autocomplete="off">
+              <button type="button" class="settings-inline-btn" id="settings-token-toggle" title="显示/隐藏">显示</button>
+            </div>
+            <span class="settings-field-note" id="settings-token-note"></span>
+          </label>
+          <div class="settings-row-actions">
+            <button type="button" class="settings-secondary-btn" id="settings-test-btn">测试连接</button>
+            <span class="settings-status" id="settings-status" hidden></span>
+          </div>
+        </section>
+        <section class="settings-section">
+          <h3 class="settings-section-title">应用</h3>
+          <label class="settings-check">
+            <input type="checkbox" id="settings-launch-at-login">
+            <span>登录时启动启孜 Shell</span>
+          </label>
+          <label class="settings-check">
+            <input type="checkbox" id="settings-show-main-on-launch" checked>
+            <span>启动时显示主窗口（关闭后仍保留在菜单栏）</span>
+          </label>
+        </section>
+        <section class="settings-section settings-section-muted">
+          <h3 class="settings-section-title">说明</h3>
+          <ul class="settings-tips">
+            <li>WSS 地址与 Token 均需向 Gateway 管理员索取；</li>
+            <li>首次连接新设备需配对，管理员在 Gateway 批准；</li>
+            <li>Agent、模型可在聊天界面内切换，无需在此配置。</li>
+          </ul>
+        </section>
+      </div>
+      <div class="settings-footer">
+        <button type="button" class="settings-secondary-btn" id="settings-cancel-btn">取消</button>
+        <button type="button" class="settings-primary-btn" id="settings-save-btn">保存</button>
+      </div>
+    </div>
+  </div>
+  <script src="marked.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
