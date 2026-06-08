@@ -27,6 +27,8 @@ if (!app || typeof app.whenReady !== 'function') {
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const https = require('https');
+const http = require('http');
 const { GatewayWsClient } = require('./gateway-ws');
 
 let mainWindow = null;
@@ -42,6 +44,15 @@ const STREAM_TIMEOUT_MS = 15 * 60 * 1000;
 let openClawConfigCache = null;
 let sessionKey = null;
 const DEFAULT_SESSION_KEY = 'agent:main:main';
+const SHELL_SESSION_MAIN_KEY = 'main';
+/** 定时任务/后台会话后缀；Shell 不应自动跟到这些 session */
+const SYSTEM_SESSION_SUFFIXES = new Set([
+  'dreaming',
+  'cron',
+  'memory',
+  'review',
+  'recap',
+]);
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 
@@ -49,6 +60,9 @@ const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 if (process.env.QIZI_DEVTOOLS_PORT) {
   app.commandLine.appendSwitch('remote-debugging-port', process.env.QIZI_DEVTOOLS_PORT);
 }
+// 抑制 Chromium 后台连 Google 等服务的 SSL 握手重试日志（不影响 Gateway 业务连接）
+app.commandLine.appendSwitch('disable-background-networking');
+app.commandLine.appendSwitch('disable-component-update');
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
@@ -79,12 +93,14 @@ function persistSessionKey(key) {
 }
 
 function getSessionKey() {
-  if (sessionKey) return sessionKey;
+  if (sessionKey) return sanitizeSessionKeyForShell(sessionKey);
   const keyPath = getSessionKeyPath();
   try {
     const existing = fs.readFileSync(keyPath, 'utf8').trim();
     if (existing) {
-      sessionKey = existing;
+      const sanitized = sanitizeSessionKeyForShell(existing);
+      sessionKey = sanitized;
+      if (sanitized !== existing) persistSessionKey(sanitized);
       return sessionKey;
     }
   } catch {
@@ -178,7 +194,7 @@ async function fetchSessionCurrentModel(client, sessionKey, defaults = {}) {
   }
 }
 
-function buildAgentSessionKey(agentId, mainKey = 'main') {
+function buildAgentSessionKey(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
   return `agent:${agentId}:${mainKey}`;
 }
 
@@ -187,46 +203,26 @@ function parseAgentIdFromSessionKey(sessionKey) {
   return match ? match[1] : 'main';
 }
 
-async function resolveActiveSessionKeyForAgent(client, agentId, mainKey = 'main') {
-  const defaultKey = buildAgentSessionKey(agentId, mainKey);
-  try {
-    const result = await client.request('sessions.list', { limit: 200 });
-    const prefix = `agent:${agentId}:`;
-    const candidates = (result?.sessions || []).filter(
-      (session) => typeof session?.key === 'string' && session.key.startsWith(prefix),
-    );
-    if (!candidates.length) return defaultKey;
-    candidates.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    return candidates[0]?.key || defaultKey;
-  } catch {
-    return defaultKey;
-  }
+function extractSessionSuffix(sessionKey, agentId) {
+  const prefix = `agent:${agentId}:`;
+  if (!sessionKey || !sessionKey.startsWith(prefix)) return null;
+  return sessionKey.slice(prefix.length);
 }
 
-async function maybeFollowActiveAgentSession(client) {
-  const currentKey = getSessionKey();
-  const agentId = parseAgentIdFromSessionKey(currentKey);
-  const activeKey = await resolveActiveSessionKeyForAgent(client, agentId);
-  if (!activeKey || activeKey === currentKey) {
-    return { changed: false, sessionKey: currentKey };
-  }
+function pinnedSessionKeyForAgent(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
+  return buildAgentSessionKey(agentId, mainKey);
+}
 
-  try {
-    const [currentHist, activeHist] = await Promise.all([
-      client.request('chat.history', { sessionKey: currentKey, limit: 1 }),
-      client.request('chat.history', { sessionKey: activeKey, limit: 1 }),
-    ]);
-    const currentUpdatedAt = currentHist?.sessionInfo?.updatedAt || 0;
-    const activeUpdatedAt = activeHist?.sessionInfo?.updatedAt || 0;
-    if (activeUpdatedAt > currentUpdatedAt + 500) {
-      persistSessionKey(activeKey);
-      return { changed: true, sessionKey: activeKey };
-    }
-  } catch {
-    // keep current session if comparison fails
+function sanitizeSessionKeyForShell(sessionKey, mainKey = SHELL_SESSION_MAIN_KEY) {
+  const trimmed = String(sessionKey || '').trim();
+  if (!trimmed) return DEFAULT_SESSION_KEY;
+  const agentId = parseAgentIdFromSessionKey(trimmed);
+  const suffix = extractSessionSuffix(trimmed, agentId);
+  const pinned = pinnedSessionKeyForAgent(agentId, mainKey);
+  if (!suffix || suffix !== mainKey || SYSTEM_SESSION_SUFFIXES.has(suffix)) {
+    return pinned;
   }
-
-  return { changed: false, sessionKey: currentKey };
+  return trimmed;
 }
 
 /** @type {Map<string, string>} */
@@ -239,6 +235,48 @@ function gatewayHttpBase(wsUrl) {
     .replace(/\/$/, '');
 }
 
+function fetchGatewayResource(url, { headers = {}, timeoutMs = 15000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const mod = parsed.protocol === 'https:' ? https : http;
+    const req = mod.request(
+      {
+        protocol: parsed.protocol,
+        hostname: parsed.hostname,
+        port: parsed.port || (parsed.protocol === 'https:' ? 443 : 80),
+        path: `${parsed.pathname}${parsed.search}`,
+        method: 'GET',
+        headers,
+        timeout: timeoutMs,
+        ...(parsed.protocol === 'https:' ? { rejectUnauthorized: false } : {}),
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            body: Buffer.concat(chunks),
+          });
+        });
+      },
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('timeout'));
+    });
+    req.end();
+  });
+}
+
 async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
   if (!avatarPath || avatarStatus === 'none') return null;
   const cached = agentAvatarCache.get(agentId);
@@ -249,14 +287,11 @@ async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
 
   const url = `${gatewayHttpBase(wsUrl)}${avatarPath.startsWith('/') ? avatarPath : `/${avatarPath}`}`;
   try {
-    const resp = await fetch(url, {
+    const resp = await fetchGatewayResource(url, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(15000),
     });
     if (!resp.ok) return null;
-    const buffer = Buffer.from(await resp.arrayBuffer());
-    const contentType = resp.headers.get('content-type') || 'image/png';
-    const dataUrl = `data:${contentType};base64,${buffer.toString('base64')}`;
+    const dataUrl = `data:image/png;base64,${resp.body.toString('base64')}`;
     agentAvatarCache.set(agentId, dataUrl);
     return dataUrl;
   } catch {
@@ -370,7 +405,7 @@ async function testGatewaySettings({ wsUrl, token }) {
   const client = new GatewayWsClient({
     url,
     token: authToken,
-    clientDisplayName: '启孜 Shell',
+    clientDisplayName: 'QiziShell',
     clientVersion: '0.1.0',
   });
   try {
@@ -455,6 +490,7 @@ function formatTestConnectionError(err) {
     'socket hang up',
     'eproto',
     'wrong version number',
+    'handshake',
     'certificate',
     'cert',
     'ssl',
@@ -473,6 +509,9 @@ function formatTestConnectionError(err) {
 function formatGatewayError(err) {
   const message = err?.message || String(err);
   const detailCode = err?.details?.code || err?.details?.detailCode;
+  if (/handshake failed|self[- ]signed|certificate|ssl|tls/i.test(message)) {
+    return 'Gateway TLS 握手失败，请确认 WSS 地址正确且 Gateway 已启动';
+  }
   if (detailCode === 'PAIRING_REQUIRED' || message.includes('pairing')) {
     return `${message}。请在 Gateway 主机运行: openclaw devices approve`;
   }
@@ -980,7 +1019,7 @@ function ensureGateway() {
     gateway = new GatewayWsClient({
       url: config.wsUrl,
       token: config.token,
-      clientDisplayName: '启孜 Shell',
+      clientDisplayName: 'QiziShell',
       clientVersion: '0.1.0',
     });
     attachGatewayHandlers(gateway);
@@ -1031,7 +1070,7 @@ function createWindow() {
     height,
     minWidth: WINDOW_MIN_WIDTH,
     minHeight: WINDOW_MIN_HEIGHT,
-    title: '启孜 Shell',
+    title: 'QiziShell',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     webPreferences: {
@@ -1132,7 +1171,7 @@ function createTray() {
   if (tray) return;  // 幂等
   const icon = buildTrayIcon();
   tray = new Tray(icon);
-  tray.setToolTip('启孜 Shell');
+  tray.setToolTip('QiziShell');
   tray.setContextMenu(buildTrayMenu());
   // 左键 = toggle 显隐主界面
   tray.on('click', () => toggleMainWindow());
@@ -1263,7 +1302,7 @@ async function switchToAgent(agentId) {
       finishClientRun(clientRunId, { aborted: true });
     }
 
-    const newSessionKey = buildAgentSessionKey(agentId, mainKey);
+    const newSessionKey = pinnedSessionKeyForAgent(agentId, mainKey);
     persistSessionKey(newSessionKey);
     const agent = await enrichAgentEntry(client, found, { defaultId });
     const currentModel = await fetchSessionCurrentModel(client, newSessionKey, {
@@ -1313,15 +1352,15 @@ async function loadChatHistory() {
   try {
     const client = ensureGateway();
     await client.waitForConnect();
-    const followed = await maybeFollowActiveAgentSession(client);
+    const sessionKey = getSessionKey();
     const result = await client.request('chat.history', {
-      sessionKey: getSessionKey(),
+      sessionKey,
       limit: 200,
     });
     return {
       ok: true,
-      sessionKey: result?.sessionKey || getSessionKey(),
-      sessionKeyChanged: followed.changed,
+      sessionKey,
+      sessionKeyChanged: false,
       messages: convertHistoryMessages(result?.messages || []),
     };
   } catch (err) {

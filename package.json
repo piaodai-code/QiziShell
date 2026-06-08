@@ -8,7 +8,7 @@
   },
   "build": {
     "appId": "com.qizi.shell",
-    "productName": "QiZiShell",
+    "productName": "QiziShell",
     "icon": "build/icon.png",
     "mac": {
       "target": "dmg",

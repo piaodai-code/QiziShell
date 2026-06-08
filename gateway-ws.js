@@ -25,6 +25,19 @@ const OPERATOR_SCOPES = [
   'operator.pairing',
 ];
 
+function isSecureGatewayUrl(url) {
+  return /^wss:\/\//i.test(String(url || ''));
+}
+
+function buildGatewayWsOptions(url) {
+  const options = { maxPayload: 25 * 1024 * 1024 };
+  // OpenClaw 本地 Gateway 常用自签名证书；Node ws 默认会拒绝，导致 SSL handshake failed
+  if (isSecureGatewayUrl(url)) {
+    options.rejectUnauthorized = false;
+  }
+  return options;
+}
+
 class GatewayWsClient extends EventEmitter {
   constructor(options = {}) {
     super();
@@ -59,7 +72,7 @@ class GatewayWsClient extends EventEmitter {
     this.connectSent = false;
     this.connected = false;
 
-    const ws = new WebSocket(this.url, { maxPayload: 25 * 1024 * 1024 });
+    const ws = new WebSocket(this.url, buildGatewayWsOptions(this.url));
     this.ws = ws;
 
     ws.on('open', () => this.armConnectChallengeTimeout());
