@@ -1,9 +1,27 @@
+const MessageTimeApi = window.MessageTime || {};
+function resolveMessageOriginalSentTime(msg) {
+  if (typeof MessageTimeApi.resolveMessageOriginalSentTime === 'function') {
+    return MessageTimeApi.resolveMessageOriginalSentTime(msg);
+  }
+  return String(msg?.sentTime || msg?.time || '').trim();
+}
+function formatGatewayEnvelopeTime(input) {
+  if (typeof MessageTimeApi.formatGatewayEnvelopeTime === 'function') {
+    return MessageTimeApi.formatGatewayEnvelopeTime(input);
+  }
+  return '';
+}
+
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
 const stopBtn = document.getElementById('stop-btn');
 const cmdPopup = document.getElementById('cmd-popup');
 const composerPendingEl = document.getElementById('composer-pending');
+const composerQuoteEl = document.getElementById('composer-quote');
+const composerQuoteTextEl = document.getElementById('composer-quote-text');
+const composerQuoteRemoveEl = document.getElementById('composer-quote-remove');
+const msgContextMenuEl = document.getElementById('msg-context-menu');
 const modelBadge = document.getElementById('model-badge');
 const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
@@ -27,6 +45,22 @@ const settingsStatusEl = document.getElementById('settings-status');
 const settingsTestBtn = document.getElementById('settings-test-btn');
 const settingsLaunchAtLogin = document.getElementById('settings-launch-at-login');
 const settingsShowMainOnLaunch = document.getElementById('settings-show-main-on-launch');
+const forwardModal = document.getElementById('forward-modal');
+const forwardAgentsListEl = document.getElementById('forward-agents-list');
+const forwardPreviewMetaEl = document.getElementById('forward-preview-meta');
+const forwardPreviewScrollEl = document.getElementById('forward-preview-scroll');
+const forwardPreviewTextEl = document.getElementById('forward-preview-text');
+const forwardPreviewEllipsisEl = document.getElementById('forward-preview-ellipsis');
+const forwardInputEl = document.getElementById('forward-input');
+const forwardCancelBtn = document.getElementById('forward-cancel-btn');
+const forwardSendBtn = document.getElementById('forward-send-btn');
+const composerSendBtn = document.getElementById('composer-send-btn');
+const composerBodyEl = document.getElementById('composer-body');
+const composerMultiselectEl = document.getElementById('composer-multiselect');
+const multiselectHintEl = document.getElementById('multiselect-hint');
+const multiselectCancelBtn = document.getElementById('multiselect-cancel-btn');
+const multiselectExportBtn = document.getElementById('multiselect-export-btn');
+const multiselectSendBtn = document.getElementById('multiselect-send-btn');
 
 let pendingModelUpdate = false;
 let currentModelQualified = null;
@@ -35,6 +69,7 @@ let modelCatalogExpiresAt = 0;
 const MODEL_CATALOG_TTL_MS = 60_000;
 
 const SLASH_COMMANDS = [
+  { cmd: '/stop', desc: '停止当前回复' },
   { cmd: '/new', desc: '开始新会话' },
   { cmd: '/reset', desc: '重置当前会话' },
   { cmd: '/status', desc: '查看会话状态' },
@@ -73,6 +108,17 @@ const MAX_PENDING_FILES = 10;
 const MAX_PENDING_ATTACHMENTS = 10;
 // 用户主动 abort 标志：true 时 processQueue 不启动（清队列后重置）
 let userAborted = false;
+/** @type {{ who: 'me'|'them', authorLabel: string, text: string, time?: string } | null} */
+let pendingQuote = null;
+let contextMenuTargetIndex = -1;
+let forwardTargetMessage = null;
+let forwardSelectedAgentIds = new Set();
+let forwardBatchMode = false;
+let multiSelectMode = false;
+let multiSelectedIndices = new Set();
+const LOCAL_USER_LABEL = '用户';
+const BATCH_FORWARD_SOFT_WARN_BYTES = 256 * 1024;
+const BATCH_FORWARD_HARD_MAX_BYTES = 2 * 1024 * 1024;
 
 const STORAGE_PREFIX = 'qizi-shell-messages:';
 const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
@@ -224,6 +270,7 @@ function renderPendingAttachments() {
     chip.appendChild(removeBtn);
     composerPendingEl.appendChild(chip);
   });
+  updateComposerSendBtn();
 }
 
 function renderPendingImages() {
@@ -245,24 +292,70 @@ function getMarkedParser() {
   return null;
 }
 
-function parseMarkdown(text) {
+function wrapMarkdownTables(html) {
+  return String(html || '').replace(/<table\b[\s\S]*?<\/table>/gi, (tableHtml) => (
+    `<div class="msg-table-wrap">${tableHtml}</div>`
+  ));
+}
+
+function parseMarkdown(text, options = {}) {
   const parse = getMarkedParser();
   if (parse) {
     try {
-      const result = parse(String(text || ''));
-      if (typeof result === 'string' && result.trim()) return result;
+      const result = parse(String(text || ''), {
+        async: false,
+        gfm: true,
+        breaks: options.breaks === true,
+        ...options.markedOptions,
+      });
+      if (typeof result === 'string' && result.trim()) {
+        return wrapMarkdownTables(result);
+      }
     } catch (e) {
       console.warn('[qizi] markdown parse failed:', e);
     }
   }
-  return String(text || '')
+  return wrapMarkdownTables(String(text || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\n/g, '<br>');
+    .replace(/\n/g, '<br>'));
+}
+
+function sanitizeExportHtml(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '')
+    .replace(/\son\w+='[^']*'/gi, '');
+}
+
+function renderExportQuoteBlock(label, text) {
+  const author = escapeHtml(label || '未知');
+  const bodyHtml = parseMarkdown(text, { breaks: true });
+  return `<div class="export-quote"><div class="export-quote-author">${author}</div>${bodyHtml}</div>`;
+}
+
+function renderExportMessageHtml(msg) {
+  if (!msg) return '';
+  const parts = [];
+  const forwardRef = resolveMessageForwardRef(msg);
+  if (forwardRef?.text) {
+    parts.push(renderExportQuoteBlock(`转发 · ${forwardRef.authorLabel || '未知'}`, forwardRef.text));
+  } else if (msg.quote?.text) {
+    parts.push(renderExportQuoteBlock(`引用 · ${msg.quote.authorLabel || '未知'}`, msg.quote.text));
+  }
+
+  let bodySource = msg.who === 'me'
+    ? getUserMessageDisplayText(msg)
+    : String(msg.text || '');
+  bodySource = bodySource.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n').trim();
+  if (bodySource) {
+    parts.push(`<div class="export-body">${parseMarkdown(bodySource, { breaks: true })}</div>`);
+  }
+  return sanitizeExportHtml(parts.join(''));
 }
 
 function shouldUseStreamingPlainText(message) {
@@ -318,6 +411,19 @@ function isAttachmentPlaceholder(text) {
 }
 
 const DEFAULT_INPUT_HEIGHT = 'calc(90px + 6mm)';
+const composerEl = document.getElementById('composer');
+const emojiBtn = document.getElementById('emoji-btn');
+const emojiPickerEl = document.getElementById('emoji-picker');
+let composerResized = false;
+
+function resetInputHeight() {
+  if (composerResized) {
+    inputEl.style.height = '';
+    inputEl.style.maxHeight = '';
+    return;
+  }
+  inputEl.style.height = DEFAULT_INPUT_HEIGHT;
+}
 let streamPollTimer = null;
 let streamPollStableCount = 0;
 let sessionWatchTimer = null;
@@ -352,10 +458,830 @@ function renderMessageFilesHtml(files) {
   return `<div class="msg-files">${items}</div>`;
 }
 
-function renderMessageBubbleContent(m) {
+function getQuotePreviewLine(text) {
+  const line = String(text || '').split(/\r?\n/).find((entry) => entry.trim()) || '';
+  const trimmed = line.trim();
+  if (!trimmed) return '';
+  if (trimmed.length <= 96) return trimmed;
+  return `${trimmed.slice(0, 96)}…`;
+}
+
+function getMessageAuthorLabel(msg) {
+  if (!msg) return '未知';
+  if (msg.who === 'me') return LOCAL_USER_LABEL;
+  return formatAgentLabel(getCurrentAgentInfo());
+}
+
+function extractQuoteTextFromMessage(msg) {
+  if (!msg) return '';
+  const { plainText } = renderMessageContent(msg.text || '');
+  let body = plainText.trim();
+  if (!body && Array.isArray(msg.images) && msg.images.length > 0) {
+    body = '（图片）';
+  }
+  if (!body && Array.isArray(msg.files) && msg.files.length > 0) {
+    body = msg.files.map((file) => file.name).filter(Boolean).join('、') || '（附件）';
+  }
+  return body;
+}
+
+function buildClientReplyToMeta(ref) {
+  const author = ref?.authorLabel || '未知';
+  const role = ref?.who === 'me' ? 'user' : 'assistant';
+  const time = resolveMessageOriginalSentTime(ref)
+    || (typeof ref?.time === 'string' && ref.time.trim() ? formatGatewayEnvelopeTime(ref.time) : '');
+  return {
+    label: author,
+    role,
+    time,
+  };
+}
+
+function formatQuoteForAgent(quote, userText) {
+  const quotedBody = String(quote?.text || '').trim();
+  const replyTo = buildClientReplyToMeta(quote);
+  const meta = {
+    label: replyTo.label,
+    role: replyTo.role,
+    kind: 'quoted-message',
+    replyTo,
+  };
+  const parts = [
+    'Sender (untrusted metadata):',
+    '```json',
+    JSON.stringify(meta),
+    '```',
+    '',
+    '【引用开始】',
+    quotedBody,
+    '【引用结束】',
+  ];
+  const tail = String(userText || '').trim();
+  if (tail) {
+    parts.push('', '【回复】', tail);
+  }
+  return parts.join('\n');
+}
+
+function formatOutboundUserText(userMsg) {
+  const typed = String(userMsg?.text || '').trim();
+  if (userMsg?.quote) {
+    return formatQuoteForAgent(userMsg.quote, typed);
+  }
+  return typed;
+}
+
+function parseSenderMetadataFromOutbound(body) {
+  let authorLabel = '未知';
+  let who = 'them';
+  let time = '';
+  const metaMatch = String(body || '').match(/Sender \(untrusted metadata\):\s*```json\s*([\s\S]*?)\s*```/);
+  if (metaMatch) {
+    try {
+      const meta = JSON.parse(metaMatch[1]);
+      const replyTo = meta.replyTo && typeof meta.replyTo === 'object' ? meta.replyTo : null;
+      if (typeof replyTo?.label === 'string' && replyTo.label.trim()) {
+        authorLabel = replyTo.label.trim();
+      } else if (typeof meta.label === 'string' && meta.label.trim()) {
+        authorLabel = meta.label.trim();
+      }
+      if (replyTo?.role === 'user' || meta.role === 'user') who = 'me';
+      else if (replyTo?.role === 'assistant' || meta.role === 'assistant') who = 'them';
+      if (typeof replyTo?.time === 'string' && replyTo.time.trim()) {
+        time = replyTo.time.trim();
+      } else if (typeof meta.time === 'string' && meta.time.trim()) {
+        time = meta.time.trim();
+      }
+    } catch {
+      // ignore malformed metadata
+    }
+  }
+  return { authorLabel, who, time };
+}
+
+const QUOTE_START_MARKER = '【引用开始】';
+const QUOTE_END_MARKER = '【引用结束】';
+const FORWARD_START_MARKER = '【转发开始】';
+const FORWARD_END_MARKER = '【转发结束】';
+
+function extractMarkedBlock(body, startMarker, endMarker) {
+  const text = String(body || '');
+  const startIdx = text.indexOf(startMarker);
+  if (startIdx < 0) return null;
+  const contentStart = startIdx + startMarker.length;
+  const endIdx = text.lastIndexOf(endMarker);
+  if (endIdx < contentStart) return null;
+  return {
+    content: text.slice(contentStart, endIdx).trim(),
+    endIdx,
+    endMarkerLength: endMarker.length,
+  };
+}
+
+function parseStoredQuoteMessage(text) {
+  const body = String(text || '');
+  const block = extractMarkedBlock(body, QUOTE_START_MARKER, QUOTE_END_MARKER);
+  if (!block) return null;
+
+  const { authorLabel, who, time } = parseSenderMetadataFromOutbound(body);
+
+  let reply = '';
+  const afterBlock = block.endIdx + block.endMarkerLength;
+  const replyMarker = body.indexOf('【回复】', afterBlock);
+  if (replyMarker >= 0) {
+    reply = body.slice(replyMarker + '【回复】'.length).trim();
+  }
+
+  return {
+    reply,
+    quote: {
+      who,
+      authorLabel,
+      text: block.content,
+      time,
+    },
+  };
+}
+
+function parseStoredForwardMessage(text) {
+  const body = String(text || '');
+  const block = extractMarkedBlock(body, FORWARD_START_MARKER, FORWARD_END_MARKER);
+  if (!block) return null;
+
+  const { authorLabel, who, time } = parseSenderMetadataFromOutbound(body);
+
+  let comment = '';
+  const afterBlock = block.endIdx + block.endMarkerLength;
+  const commentMarker = body.indexOf('【留言】', afterBlock);
+  if (commentMarker >= 0) {
+    comment = body.slice(commentMarker + '【留言】'.length).trim();
+  }
+
+  return {
+    comment,
+    forward: {
+      who,
+      authorLabel,
+      text: block.content,
+      time,
+    },
+  };
+}
+
+function extractReplyTextFromOutbound(text) {
+  const parsed = parseStoredQuoteMessage(text);
+  if (parsed) return parsed.reply;
+  return String(text || '');
+}
+
+function extractCommentTextFromForwardOutbound(text) {
+  const parsed = parseStoredForwardMessage(text);
+  if (parsed) return parsed.comment;
+  return String(text || '');
+}
+
+function resolveMessageForwardRef(m) {
+  if (!m || m.who !== 'me') return null;
+  if (m.forward?.text) return m.forward;
+  return parseStoredForwardMessage(m.text)?.forward || null;
+}
+
+function getUserMessageDisplayText(m) {
+  if (!m || m.who !== 'me') return m?.text || '';
+  if (m.forward) {
+    const raw = String(m.text || '').trim();
+    if (raw.includes('【转发开始】')) return extractCommentTextFromForwardOutbound(raw);
+    return m.text || '';
+  }
+  if (m.quote) {
+    const raw = String(m.text || '').trim();
+    if (raw.includes('【引用开始】')) return extractReplyTextFromOutbound(raw);
+    return m.text || '';
+  }
+  const forwardParsed = parseStoredForwardMessage(m.text);
+  if (forwardParsed?.forward) return forwardParsed.comment;
+  const parsed = parseStoredQuoteMessage(m.text);
+  if (parsed?.quote) return parsed.reply;
+  return m.text || '';
+}
+
+function normalizeUserMessageRecord(msg, localFallback = null) {
+  const base = { ...msg, streaming: false };
+  if (base.who !== 'me') return base;
+
+  if (localFallback?.forward) {
+    return {
+      ...base,
+      forward: localFallback.forward,
+      text: localFallback.text ?? extractCommentTextFromForwardOutbound(base.text),
+      images: localFallback.images ?? base.images,
+      files: localFallback.files ?? base.files,
+      time: localFallback.time || base.time,
+      runId: localFallback.runId ?? base.runId,
+    };
+  }
+
+  if (localFallback?.quote) {
+    return {
+      ...base,
+      quote: localFallback.quote,
+      text: localFallback.text ?? extractReplyTextFromOutbound(base.text),
+      images: localFallback.images ?? base.images,
+      files: localFallback.files ?? base.files,
+      time: localFallback.time || base.time,
+      runId: localFallback.runId ?? base.runId,
+    };
+  }
+
+  const forwardParsed = parseStoredForwardMessage(base.text);
+  if (forwardParsed?.forward) {
+    return {
+      ...base,
+      forward: forwardParsed.forward,
+      text: forwardParsed.comment,
+    };
+  }
+
+  const parsed = parseStoredQuoteMessage(base.text);
+  if (parsed?.quote) {
+    return {
+      ...base,
+      quote: parsed.quote,
+      text: parsed.reply,
+    };
+  }
+
+  if (String(base.text || '').includes('【转发开始】')) {
+    return { ...base, text: extractCommentTextFromForwardOutbound(base.text) };
+  }
+
+  if (String(base.text || '').includes('【引用开始】')) {
+    return { ...base, text: extractReplyTextFromOutbound(base.text) };
+  }
+
+  return base;
+}
+
+function findLocalUserMessageForServer(server, localList) {
+  const serverText = String(server?.text || '').trim();
+  if (!serverText) return null;
+  const serverParsed = parseStoredQuoteMessage(serverText);
+  const serverReply = serverParsed?.reply ?? serverText;
+
+  for (const candidate of localList) {
+    if (candidate.who !== 'me') continue;
+    if (candidate.quote) {
+      const outbound = formatQuoteForAgent(candidate.quote, candidate.text || '').trim();
+      if (serverText === outbound || serverReply === String(candidate.text || '').trim()) {
+        return candidate;
+      }
+      continue;
+    }
+    const localText = String(candidate.text || '').trim();
+    if (localText && (localText === serverText || localText === serverReply)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+function quoteNeedsExpandToggle(text) {
+  const body = String(text || '');
+  const lines = body.split(/\r?\n/);
+  if (lines.length > 3) return true;
+  return body.length > 120 || lines.some((line) => line.length > 42);
+}
+
+function renderQuoteRefHtml(quote, msgIndex) {
+  if (!quote?.text) return '';
+  const author = escapeHtml(quote.authorLabel || '未知');
+  const fullText = escapeHtml(quote.text);
+  const quoteKey = String(msgIndex);
+  const needsToggle = quoteNeedsExpandToggle(quote.text);
+  const toggleBtn = needsToggle
+    ? `<button type="button" class="msg-quote-toggle" data-quote-key="${quoteKey}" aria-expanded="false" aria-label="展开引用">▼</button>`
+    : '';
+  const collapsedClass = needsToggle ? ' is-collapsed' : '';
+  return `<div class="msg-quote-card${collapsedClass}" data-quote-key="${quoteKey}"><div class="msg-quote-author">${author}</div><div class="msg-quote-body"><div class="msg-quote-text">${fullText}</div>${toggleBtn}</div></div>`;
+}
+
+function toggleQuoteCard(card, btn) {
+  if (!card || !btn) return;
+  const expanding = card.classList.contains('is-collapsed');
+  if (expanding) {
+    card.classList.remove('is-collapsed');
+    btn.textContent = '▲';
+    btn.setAttribute('aria-expanded', 'true');
+    btn.setAttribute('aria-label', '收起引用');
+  } else {
+    card.classList.add('is-collapsed');
+    btn.textContent = '▼';
+    btn.setAttribute('aria-expanded', 'false');
+    btn.setAttribute('aria-label', '展开引用');
+  }
+}
+
+function renderComposerQuote() {
+  if (!composerQuoteEl || !composerQuoteTextEl) return;
+  if (!pendingQuote?.text) {
+    composerQuoteEl.hidden = true;
+    composerQuoteTextEl.textContent = '';
+    updateComposerSendBtn();
+    return;
+  }
+  const preview = getQuotePreviewLine(pendingQuote.text);
+  composerQuoteTextEl.textContent = `${pendingQuote.authorLabel}：${preview}`;
+  composerQuoteEl.hidden = false;
+  updateComposerSendBtn();
+}
+
+function clearPendingQuote() {
+  pendingQuote = null;
+  renderComposerQuote();
+  updateComposerSendBtn();
+}
+
+function setPendingQuoteFromMessage(msg) {
+  const text = extractQuoteTextFromMessage(msg);
+  if (!text) {
+    setStatus('该消息没有可引用的文字', 'error');
+    return false;
+  }
+  pendingQuote = {
+    who: msg.who,
+    authorLabel: getMessageAuthorLabel(msg),
+    text,
+    time: resolveMessageOriginalSentTime(msg),
+    sentAtMs: msg.sentAtMs,
+    sentTime: msg.sentTime,
+  };
+  renderComposerQuote();
+  inputEl?.focus();
+  return true;
+}
+
+function getForwardSourceText(msg) {
+  if (!msg) return '';
+  if (msg.who === 'me') {
+    const parts = [];
+    if (msg.quote?.text) {
+      parts.push(`[引用 ${msg.quote.authorLabel || '未知'}]\n${msg.quote.text}`);
+    }
+    const reply = getUserMessageDisplayText(msg);
+    if (reply) parts.push(reply);
+    const combined = parts.join('\n\n').trim();
+    if (combined) return combined;
+  }
+  return extractQuoteTextFromMessage(msg);
+}
+
+function buildForwardSnapshot(msg) {
+  if (!msg) {
+    return { who: 'them', authorLabel: '未知', text: '', time: '' };
+  }
+  if (msg.isMergedForward) {
+    return {
+      who: msg.who || 'them',
+      authorLabel: msg.authorLabel || '已选消息',
+      text: String(msg.text || '').trim(),
+      time: msg.time || '',
+      sentAtMs: msg.sentAtMs,
+      sentTime: msg.sentTime,
+    };
+  }
+  return {
+    who: msg.who,
+    authorLabel: getMessageAuthorLabel(msg),
+    text: getForwardSourceText(msg),
+    time: resolveMessageOriginalSentTime(msg),
+    sentAtMs: msg.sentAtMs,
+    sentTime: msg.sentTime,
+  };
+}
+
+function utf8ByteLength(text) {
+  try {
+    return new TextEncoder().encode(String(text || '')).length;
+  } catch {
+    return String(text || '').length;
+  }
+}
+
+function getMessageSelectableText(msg) {
+  if (!msg) return '';
+  const parts = [];
+  const forwardRef = resolveMessageForwardRef(msg);
+  if (forwardRef?.text) {
+    parts.push(`[转发 ${forwardRef.authorLabel || '未知'}]\n${forwardRef.text}`);
+  } else if (msg.quote?.text) {
+    parts.push(`[引用 ${msg.quote.authorLabel || '未知'}]\n${msg.quote.text}`);
+  }
+  const body = msg.who === 'me' ? getUserMessageDisplayText(msg) : extractQuoteTextFromMessage(msg);
+  if (body) parts.push(body);
+  return parts.join('\n\n').trim();
+}
+
+function isMessageSelectable(msg) {
+  if (!msg || msg.streaming) return false;
+  return Boolean(getMessageSelectableText(msg));
+}
+
+function buildMergedForwardSnapshot(indices) {
+  const sorted = [...indices].sort((a, b) => a - b);
+  const blocks = [];
+  let earliestTime = '';
+  let earliestSentAtMs;
+  for (const idx of sorted) {
+    const msg = messages[idx];
+    if (!isMessageSelectable(msg)) continue;
+    const text = getMessageSelectableText(msg);
+    const author = getMessageAuthorLabel(msg);
+    const stamp = msg.time ? ` · ${msg.time}` : '';
+    blocks.push(`【${author}${stamp}】\n${text}`);
+    const originalTime = resolveMessageOriginalSentTime(msg);
+    if (!earliestTime && originalTime) earliestTime = originalTime;
+    if (earliestSentAtMs == null && msg.sentAtMs) earliestSentAtMs = msg.sentAtMs;
+  }
+  return {
+    isMergedForward: true,
+    who: 'them',
+    authorLabel: `已选 ${sorted.length} 条消息`,
+    text: blocks.join('\n\n'),
+    time: earliestTime,
+    sentAtMs: earliestSentAtMs,
+  };
+}
+
+function buildExportEntryForMessage(msg) {
+  const text = getMessageSelectableText(msg);
+  return {
+    author: getMessageAuthorLabel(msg),
+    time: msg.time || '',
+    text,
+    html: renderExportMessageHtml(msg),
+  };
+}
+
+function buildExportEntries(indices) {
+  const sorted = [...indices].sort((a, b) => a - b);
+  return sorted
+    .map((idx) => buildExportEntryForMessage(messages[idx]))
+    .filter((entry) => entry.text || entry.html);
+}
+
+async function exportMessagesToWord(entries, { exitMultiSelectOnSuccess = false } = {}) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    setStatus('没有可导出的文字', 'error');
+    return;
+  }
+  if (!window.qizi?.exportMessagesWord) {
+    setStatus('导出功能不可用', 'error');
+    return;
+  }
+  setStatus('正在导出…', 'pending');
+  try {
+    const result = await window.qizi.exportMessagesWord(entries);
+    if (result?.cancelled) {
+      setStatus('', '');
+      return;
+    }
+    if (!result?.ok) {
+      setStatus(result?.error || '导出失败', 'error');
+      return;
+    }
+    setStatus('已导出', 'ok');
+    if (exitMultiSelectOnSuccess) exitMultiSelectMode();
+  } catch (err) {
+    setStatus(err.message || '导出失败', 'error');
+  }
+}
+
+async function exportMessageAtIndex(index) {
+  const msg = messages[index];
+  if (!isMessageSelectable(msg)) {
+    setStatus('该消息没有可导出的文字', 'error');
+    return;
+  }
+  hideMessageContextMenu();
+  await exportMessagesToWord([buildExportEntryForMessage(msg)]);
+}
+
+function updateMultiSelectBar() {
+  const count = multiSelectedIndices.size;
+  if (multiselectHintEl) {
+    multiselectHintEl.textContent = count > 0 ? `已选 ${count} 条` : '请选择消息';
+  }
+  const enabled = count > 0;
+  if (multiselectExportBtn) multiselectExportBtn.disabled = !enabled;
+  if (multiselectSendBtn) multiselectSendBtn.disabled = !enabled;
+}
+
+function setMultiSelectMode(enabled) {
+  multiSelectMode = enabled;
+  if (!enabled) multiSelectedIndices = new Set();
+  if (messagesEl) messagesEl.classList.toggle('is-multiselect', enabled);
+  if (composerBodyEl) composerBodyEl.hidden = enabled;
+  if (composerMultiselectEl) composerMultiselectEl.hidden = !enabled;
+  hideMessageContextMenu();
+  updateMultiSelectBar();
+  render();
+}
+
+function toggleMultiSelectIndex(index) {
+  if (!multiSelectMode || index < 0 || index >= messages.length) return;
+  const msg = messages[index];
+  if (!isMessageSelectable(msg)) return;
+  if (multiSelectedIndices.has(index)) {
+    multiSelectedIndices.delete(index);
+  } else {
+    multiSelectedIndices.add(index);
+  }
+  updateMultiSelectBar();
+  render();
+}
+
+function enterMultiSelectMode(initialIndex = -1) {
+  setMultiSelectMode(true);
+  if (initialIndex >= 0 && isMessageSelectable(messages[initialIndex])) {
+    multiSelectedIndices.add(initialIndex);
+    updateMultiSelectBar();
+    render();
+  }
+}
+
+function exitMultiSelectMode() {
+  setMultiSelectMode(false);
+}
+
+function renderMessageSelectCheckHtml(index) {
+  if (!multiSelectMode) return '';
+  const msg = messages[index];
+  if (!isMessageSelectable(msg)) {
+    return '<button type="button" class="msg-select-check" hidden aria-hidden="true" tabindex="-1"></button>';
+  }
+  const selected = multiSelectedIndices.has(index);
+  return `<button type="button" class="msg-select-check${selected ? ' selected' : ''}" data-msg-index="${index}" aria-label="${selected ? '取消选择' : '选择消息'}" aria-pressed="${selected ? 'true' : 'false'}">✓</button>`;
+}
+
+function formatForwardForAgent(forward, userText) {
+  const forwardedBody = String(forward?.text || '').trim();
+  const replyTo = buildClientReplyToMeta(forward);
+  const meta = {
+    label: replyTo.label,
+    role: replyTo.role,
+    kind: 'forwarded-message',
+    replyTo,
+  };
+  const parts = [
+    'Sender (untrusted metadata):',
+    '```json',
+    JSON.stringify(meta),
+    '```',
+    '',
+    '【转发开始】',
+    forwardedBody,
+    '【转发结束】',
+  ];
+  const tail = String(userText || '').trim();
+  if (tail) {
+    parts.push('', '【留言】', tail);
+  }
+  return parts.join('\n');
+}
+
+function updateForwardPreviewEllipsis() {
+  if (!forwardPreviewScrollEl || !forwardPreviewEllipsisEl) return;
+  const overflow = forwardPreviewScrollEl.scrollHeight > forwardPreviewScrollEl.clientHeight + 1;
+  forwardPreviewEllipsisEl.hidden = !overflow;
+}
+
+function scheduleForwardPreviewEllipsisCheck() {
+  requestAnimationFrame(() => {
+    updateForwardPreviewEllipsis();
+    requestAnimationFrame(updateForwardPreviewEllipsis);
+  });
+}
+
+function updateForwardSendButton() {
+  if (!forwardSendBtn) return;
+  forwardSendBtn.disabled = forwardSelectedAgentIds.size === 0;
+}
+
+function renderForwardAgentList(agents) {
+  if (!forwardAgentsListEl) return;
+  if (!agents.length) {
+    forwardAgentsListEl.innerHTML = '<div class="forward-agents-empty">暂无可用 Agent</div>';
+    return;
+  }
+  forwardAgentsListEl.innerHTML = '';
+  for (const agent of agents) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'forward-agent-item' + (forwardSelectedAgentIds.has(agent.id) ? ' selected' : '');
+    btn.dataset.agentId = agent.id;
+
+    const check = document.createElement('span');
+    check.className = 'forward-agent-check';
+    check.textContent = '✓';
+    check.setAttribute('aria-hidden', 'true');
+
+    const avatarWrap = document.createElement('span');
+    avatarWrap.innerHTML = buildAgentAvatarInner(agent, 'menu');
+
+    const body = document.createElement('span');
+    body.className = 'forward-agent-body';
+
+    const nameRow = document.createElement('span');
+    nameRow.className = 'forward-agent-name';
+    nameRow.textContent = formatAgentLabel(agent);
+
+    const meta = document.createElement('span');
+    meta.className = 'forward-agent-meta';
+    meta.textContent = formatAgentCurrentModel(agent);
+
+    body.appendChild(nameRow);
+    body.appendChild(meta);
+    btn.appendChild(check);
+    btn.appendChild(avatarWrap.firstElementChild || avatarWrap);
+    btn.appendChild(body);
+    btn.addEventListener('click', () => {
+      if (forwardSelectedAgentIds.has(agent.id)) {
+        forwardSelectedAgentIds.delete(agent.id);
+      } else {
+        forwardSelectedAgentIds.add(agent.id);
+      }
+      btn.classList.toggle('selected', forwardSelectedAgentIds.has(agent.id));
+      updateForwardSendButton();
+    });
+    forwardAgentsListEl.appendChild(btn);
+  }
+}
+
+function closeForwardModal() {
+  if (!forwardModal) return;
+  forwardModal.hidden = true;
+  forwardTargetMessage = null;
+  forwardBatchMode = false;
+  forwardSelectedAgentIds = new Set();
+  if (forwardInputEl) forwardInputEl.value = '';
+  if (forwardPreviewTextEl) forwardPreviewTextEl.textContent = '';
+  if (forwardPreviewMetaEl) forwardPreviewMetaEl.textContent = '';
+  if (forwardPreviewEllipsisEl) forwardPreviewEllipsisEl.hidden = true;
+  updateForwardSendButton();
+}
+
+async function openForwardModalWithSnapshot(snapshot, previewLabel, options = {}) {
+  if (!forwardModal) return;
+  const text = String(snapshot?.text || '').trim();
+  if (!text) {
+    setStatus('没有可转发的文字', 'error');
+    return;
+  }
+
+  const bytes = utf8ByteLength(text);
+  if (bytes > BATCH_FORWARD_HARD_MAX_BYTES) {
+    setStatus(`合并内容约 ${Math.round(bytes / 1024)}KB，超过 2MB 上限`, 'error');
+    return;
+  }
+  if (bytes > BATCH_FORWARD_SOFT_WARN_BYTES) {
+    setStatus(`合并内容约 ${Math.round(bytes / 1024)}KB，可能接近 Gateway 上下文上限`, 'pending');
+  }
+
+  hideAgentPopup();
+  hideModelPopup();
+  hideMessageContextMenu();
+
+  forwardTargetMessage = snapshot;
+  forwardBatchMode = options.isBatch === true;
+  forwardSelectedAgentIds = new Set();
+  if (forwardInputEl) forwardInputEl.value = '';
+  if (forwardPreviewMetaEl) {
+    forwardPreviewMetaEl.textContent = previewLabel || `${snapshot.authorLabel || '未知'} · 转发内容`;
+  }
+  if (forwardPreviewTextEl) forwardPreviewTextEl.textContent = text;
+  updateForwardSendButton();
+  forwardModal.hidden = false;
+  scheduleForwardPreviewEllipsisCheck();
+
+  if (forwardAgentsListEl) {
+    forwardAgentsListEl.innerHTML = '<div class="forward-agents-loading">加载 Agent…</div>';
+  }
+
+  if (!connected) {
+    await checkConnection();
+  }
+
+  try {
+    const result = await window.qizi.listAgents();
+    if (!result?.ok) {
+      if (forwardAgentsListEl) {
+        forwardAgentsListEl.innerHTML = `<div class="forward-agents-error">${escapeHtml(result?.error || '加载失败')}</div>`;
+      }
+      return;
+    }
+    const agents = Array.isArray(result.agents) ? result.agents : [];
+    applyAgentCatalog(agents);
+    renderForwardAgentList(agents);
+    scheduleForwardPreviewEllipsisCheck();
+    forwardInputEl?.focus();
+  } catch (err) {
+    if (forwardAgentsListEl) {
+      forwardAgentsListEl.innerHTML = `<div class="forward-agents-error">${escapeHtml(err.message || '加载失败')}</div>`;
+    }
+  }
+}
+
+async function openForwardModal(msg) {
+  const snapshot = buildForwardSnapshot(msg);
+  if (!snapshot.text) {
+    setStatus('该消息没有可转发的文字', 'error');
+    return;
+  }
+  await openForwardModalWithSnapshot(
+    snapshot,
+    `${getMessageAuthorLabel(msg)} · 转发内容`,
+    { isBatch: false },
+  );
+}
+
+async function openForwardModalForSelection() {
+  if (multiSelectedIndices.size === 0) return;
+  const snapshot = buildMergedForwardSnapshot(multiSelectedIndices);
+  if (!snapshot.text) {
+    setStatus('所选消息没有可转发的文字', 'error');
+    return;
+  }
+  await openForwardModalWithSnapshot(
+    snapshot,
+    `已选 ${multiSelectedIndices.size} 条消息 · 转发预览`,
+    { isBatch: true },
+  );
+}
+
+async function exportSelectedMessages() {
+  if (multiSelectedIndices.size === 0) return;
+  const entries = buildExportEntries(multiSelectedIndices);
+  await exportMessagesToWord(entries, { exitMultiSelectOnSuccess: true });
+}
+
+async function submitForward() {
+  if (!forwardTargetMessage || forwardSelectedAgentIds.size === 0) return;
+  const comment = forwardInputEl?.value || '';
+  const outbound = formatForwardForAgent(buildForwardSnapshot(forwardTargetMessage), comment);
+  if (!outbound.trim()) {
+    setStatus('转发内容为空', 'error');
+    return;
+  }
+
+  if (forwardSendBtn) forwardSendBtn.disabled = true;
+  setStatus('正在转发…', 'pending');
+  try {
+    const result = await window.qizi.forwardMessage({
+      agentIds: [...forwardSelectedAgentIds],
+      message: outbound,
+    });
+    if (!result?.ok) {
+      setStatus(result?.error || '转发失败', 'error');
+      updateForwardSendButton();
+      return;
+    }
+    const failed = Array.isArray(result.results)
+      ? result.results.filter((entry) => !entry.ok)
+      : [];
+    if (failed.length > 0) {
+      setStatus(`部分转发失败（${failed.length}）`, 'error');
+    } else {
+      setStatus('已转发', 'ok');
+    }
+    closeForwardModal();
+    if (forwardBatchMode) exitMultiSelectMode();
+  } catch (err) {
+    setStatus(err.message || '转发失败', 'error');
+    updateForwardSendButton();
+  }
+}
+
+function hideMessageContextMenu() {
+  if (!msgContextMenuEl) return;
+  msgContextMenuEl.hidden = true;
+  contextMenuTargetIndex = -1;
+}
+
+function showMessageContextMenu(x, y, msgIndex) {
+  if (!msgContextMenuEl) return;
+  contextMenuTargetIndex = msgIndex;
+  msgContextMenuEl.hidden = false;
+  const menuRect = msgContextMenuEl.getBoundingClientRect();
+  const maxX = window.innerWidth - menuRect.width - 8;
+  const maxY = window.innerHeight - menuRect.height - 8;
+  msgContextMenuEl.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
+  msgContextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+}
+
+function renderMessageBubbleContent(m, msgIndex = -1) {
   const extraImages = Array.isArray(m.images) ? m.images : [];
   const files = Array.isArray(m.files) ? m.files : [];
-  let text = m.text || '';
+  let text = m.who === 'me' ? getUserMessageDisplayText(m) : (m.text || '');
   const trimmed = text.trim();
   if ((extraImages.length > 0 || files.length > 0) && isAttachmentPlaceholder(trimmed)) {
     text = '';
@@ -369,6 +1295,12 @@ function renderMessageBubbleContent(m) {
   });
   if (files.length > 0) {
     content.html = renderMessageFilesHtml(files) + content.html;
+  }
+  const forwardRef = resolveMessageForwardRef(m);
+  if (forwardRef) {
+    content.html = renderQuoteRefHtml(forwardRef, msgIndex) + content.html;
+  } else if (m.quote) {
+    content.html = renderQuoteRefHtml(m.quote, msgIndex) + content.html;
   }
   return content;
 }
@@ -390,8 +1322,24 @@ function mergeMessagePair(local, server) {
     merged.text = localText.length >= serverText.length ? localText : serverText;
   } else if (isAttachmentPlaceholder(serverText)) {
     merged.text = localText;
+  } else if (local?.forward) {
+    merged.text = localText || extractCommentTextFromForwardOutbound(serverText);
+  } else if (local?.quote) {
+    merged.text = localText || extractReplyTextFromOutbound(serverText);
   } else {
-    merged.text = serverText || localText;
+    const forwardParsed = parseStoredForwardMessage(serverText);
+    if (forwardParsed?.forward) {
+      merged.text = forwardParsed.comment || localText;
+      merged.forward = forwardParsed.forward;
+    } else {
+      const parsed = parseStoredQuoteMessage(serverText);
+      if (parsed?.quote) {
+        merged.text = parsed.reply || localText;
+        merged.quote = parsed.quote;
+      } else {
+        merged.text = serverText || localText;
+      }
+    }
   }
 
   if (Array.isArray(local?.images) && local.images.length > 0) {
@@ -411,7 +1359,51 @@ function mergeMessagePair(local, server) {
     merged.files = server.files;
   }
 
+  if (who === 'me' && local?.forward) {
+    merged.forward = local.forward;
+  }
+
+  if (who === 'me' && local?.quote) {
+    merged.quote = local.quote;
+  }
+
+  if (local?.sentAtMs) {
+    merged.sentAtMs = local.sentAtMs;
+    merged.sentTime = local.sentTime || merged.sentTime;
+  } else if (server?.sentAtMs) {
+    merged.sentAtMs = server.sentAtMs;
+    merged.sentTime = server.sentTime;
+  } else if (local?.sentTime) {
+    merged.sentTime = local.sentTime;
+  } else if (server?.sentTime) {
+    merged.sentTime = server.sentTime;
+  }
+
   return merged;
+}
+
+function assistantTextsMatch(a, b) {
+  return String(a?.text || '').trim() === String(b?.text || '').trim();
+}
+
+function dedupeAssistantMessages(list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  const out = [];
+  for (const msg of list) {
+    if (msg?.who !== 'them') {
+      out.push(msg);
+      continue;
+    }
+    const prev = out.length > 0 ? out[out.length - 1] : null;
+    if (prev?.who === 'them' && assistantTextsMatch(prev, msg) && !prev.streaming && !msg.streaming) {
+      if (!prev.runId && msg.runId) {
+        out[out.length - 1] = { ...msg, streaming: false };
+      }
+      continue;
+    }
+    out.push(msg);
+  }
+  return out;
 }
 
 function mergeHistories(localMessages, serverMessages) {
@@ -456,12 +1448,15 @@ function mergeHistories(localMessages, serverMessages) {
   if (localMessages.length > serverMessages.length) {
     for (let i = serverMessages.length; i < localMessages.length; i += 1) {
       const local = localMessages[i];
-      if (local?.text || local?.images?.length || local?.files?.length) {
-        merged.push({ ...local, streaming: false });
+      if (!local?.text && !local?.images?.length && !local?.files?.length) continue;
+      if (local.who === 'them') {
+        const lastThem = [...merged].reverse().find((m) => m.who === 'them');
+        if (lastThem && assistantTextsMatch(lastThem, local)) continue;
       }
+      merged.push({ ...local, streaming: false });
     }
   }
-  return merged;
+  return dedupeAssistantMessages(merged);
 }
 
 function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages) {
@@ -476,18 +1471,21 @@ function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages)
   let attachmentUserIdx = 0;
 
   return serverMessages.map((server) => {
-    const copy = { ...server, streaming: false };
-    const serverText = (copy.text || '').trim();
-    let local = null;
+    const serverText = String(server?.text || '').trim();
+    let local = findLocalUserMessageForServer(server, localList);
 
-    for (const candidate of localList) {
-      if (candidate.who !== 'me') continue;
-      const localText = (candidate.text || '').trim();
-      if (localText && serverText && localText === serverText) {
-        local = candidate;
-        break;
+    if (!local && server.who === 'me') {
+      for (const candidate of localList) {
+        if (candidate.who !== 'me') continue;
+        const localText = (candidate.text || '').trim();
+        if (localText && serverText && localText === serverText) {
+          local = candidate;
+          break;
+        }
       }
     }
+
+    let copy = normalizeUserMessageRecord(server, local);
 
     if (!local && copy.who === 'me' && isAttachmentPlaceholder(serverText)) {
       while (attachmentUserIdx < localAttachmentUsers.length) {
@@ -513,7 +1511,8 @@ function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages)
   });
 }
 
-function clearStaleStreamingState() {
+function clearStaleStreamingState(options = {}) {
+  const force = options.force === true;
   let cleared = false;
   for (const message of messages) {
     if (message.streaming) {
@@ -521,13 +1520,34 @@ function clearStaleStreamingState() {
       cleared = true;
     }
   }
-  if (cleared && !isLocalOwnedActiveRun()) {
+  if (cleared && (force || !isLocalOwnedActiveRun())) {
     stopStreamHistoryPoll();
     setBusy(false);
     activeRunId = null;
     externalSessionRunId = null;
   }
   return cleared;
+}
+
+function isStopCommand(text) {
+  const normalized = String(text || '').trim().toLowerCase();
+  return normalized === '/stop' || normalized === '/abort';
+}
+
+async function handleStopCommand() {
+  if (busy) {
+    await abortRun();
+    return;
+  }
+  try {
+    await window.qizi.abortChat();
+  } catch {
+    // ignore
+  }
+  clearStaleStreamingState({ force: true });
+  userAborted = false;
+  flushSaveMessages();
+  render();
 }
 
 function applyLoadedSessionKey(result) {
@@ -545,14 +1565,14 @@ function splitMessageForSend(userMsg) {
   const inlineFiles = Array.isArray(userMsg.files) ? userMsg.files : [];
   if (inlineImages.length > 0 || inlineFiles.length > 0) {
     return {
-      message: (userMsg.text || '').trim(),
+      message: formatOutboundUserText(userMsg) || (userMsg.text || '').trim(),
       images: inlineImages,
       files: inlineFiles,
     };
   }
   const { plainText, images } = renderMessageContent(userMsg.text || '');
   return {
-    message: plainText,
+    message: formatOutboundUserText(userMsg) || plainText,
     images,
     files: [],
   };
@@ -684,6 +1704,10 @@ function saveMessages(force) {
     const payload = messages.map((m) => ({
       who: m.who,
       text: m.text,
+      quote: m.quote || undefined,
+      forward: m.forward || undefined,
+      sentTime: m.sentTime || undefined,
+      sentAtMs: m.sentAtMs ?? undefined,
       images: Array.isArray(m.images) && m.images.length > 0 ? m.images : undefined,
       files: Array.isArray(m.files) && m.files.length > 0
         ? m.files.map(({ name, mimeType, size }) => ({ name, mimeType, size }))
@@ -728,7 +1752,7 @@ function loadMessages() {
     }
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
-      messages = parsed.map((m) => ({ ...m, streaming: false }));
+      messages = parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }));
     }
   } catch {
     messages = [];
@@ -743,7 +1767,8 @@ function render() {
     return;
   }
   messagesEl.innerHTML = '';
-  for (const m of messages) {
+  for (let i = 0; i < messages.length; i += 1) {
+    const m = messages[i];
     try {
       const row = document.createElement('div');
       row.className = 'msg ' + m.who;
@@ -754,8 +1779,9 @@ function render() {
           <div class="msg-bubble"></div>
           <div class="msg-meta">${m.time || ''}${m.streaming ? ' · 输入中…' : ''}</div>
         </div>
+        ${renderMessageSelectCheckHtml(i)}
       `;
-      row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m).html;
+      row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m, i).html;
       messagesEl.appendChild(row);
     } catch (e) {
       console.error('render error:', e);
@@ -766,7 +1792,8 @@ function render() {
 
 function updateStreamingBubble(runId) {
   if (!messagesEl || runId == null) return;
-  const m = messages.find((msg) => msg.runId === runId && msg.streaming);
+  const msgIndex = messages.findIndex((msg) => msg.runId === runId && msg.streaming);
+  const m = msgIndex >= 0 ? messages[msgIndex] : null;
   if (!m) {
     render();
     return;
@@ -779,7 +1806,7 @@ function updateStreamingBubble(runId) {
   }
   const bubble = row.querySelector('.msg-bubble');
   if (bubble) {
-    bubble.innerHTML = renderMessageBubbleContent(m).html;
+    bubble.innerHTML = renderMessageBubbleContent(m, msgIndex).html;
   }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
@@ -935,6 +1962,7 @@ function applyStreamingDelta(delta, runId, replace) {
 function userMessageHasPayload(m) {
   return m?.who === 'me' && (
     Boolean(m.text)
+    || Boolean(m.quote?.text)
     || (Array.isArray(m.images) && m.images.length > 0)
     || (Array.isArray(m.files) && m.files.length > 0)
   );
@@ -991,6 +2019,8 @@ async function syncHistoryFromGateway() {
         }
         return;
       }
+      // 本地 run 仍标记 busy 时，不做全量 merge，避免停止输出后重复追加助手气泡
+      return;
     }
 
     clearStaleStreamingState();
@@ -998,7 +2028,9 @@ async function syncHistoryFromGateway() {
     if (result.messages.length === 0 && messages.length > 0) return;
 
     if (!isLocalOwnedActiveRun()) {
-      messages = overlayLocalAttachmentsOntoServerHistory(result.messages, messages);
+      messages = dedupeAssistantMessages(
+        overlayLocalAttachmentsOntoServerHistory(result.messages, messages),
+      );
     } else {
       messages = mergeHistories(messages, result.messages);
     }
@@ -1111,6 +2143,7 @@ function finishAssistant({ error, runId, text } = {}) {
     clearTimeout(streamRenderTimer);
     streamRenderTimer = null;
   }
+  if (userAborted && !error) return;
   let target = null;
   if (runId != null) {
     target = findAssistantStreamTarget(runId);
@@ -1557,36 +2590,57 @@ async function checkConnection() {
   }
 }
 
+function composerHasSendableContent() {
+  const text = inputEl?.value?.trim() || '';
+  return Boolean(
+    text || pendingQuote || pendingImages.length > 0 || pendingFiles.length > 0,
+  );
+}
+
+function updateComposerSendBtn() {
+  if (!composerSendBtn) return;
+  const canSend = composerHasSendableContent();
+  composerSendBtn.classList.toggle('is-stop', busy);
+  composerSendBtn.disabled = !busy && !canSend;
+  const label = busy ? '停止' : '发送';
+  composerSendBtn.title = label;
+  composerSendBtn.setAttribute('aria-label', label);
+}
+
 function setBusy(value) {
   busy = value;
   if (stopBtn) stopBtn.hidden = !value;
+  updateComposerSendBtn();
 }
 
 async function abortRun() {
   if (!busy) return;
   userAborted = true;
+  stopStreamHistoryPoll();
+  const staleRunId = activeRunId;
   // 清空队列里的所有 pending 消息，把它们从 messages 里也删掉
   for (const m of pendingQueue) {
     const idx = messages.indexOf(m);
     if (idx >= 0) messages.splice(idx, 1);
   }
   pendingQueue = [];
+  const target = staleRunId != null
+    ? messages.find((m) => m.who === 'them' && Number(m.runId) === Number(staleRunId))
+    : null;
+  if (target) {
+    target.streaming = false;
+  }
+  setBusy(false);
+  activeRunId = null;
   flushSaveMessages();
   render();
   try {
     await window.qizi.abortChat();
   } catch (e) { /* ignore */ }
-  // 立即保存已输出的部分内容，不等待 500ms
-  const staleRunId = activeRunId;
-  const t = messages.find((m) => m.runId === staleRunId && m.streaming);
-  if (t) {
-    // 保留已输出的内容，不替换为错误信息
-    t.streaming = false;
-    flushSaveMessages();
-    render();
-  }
-  setBusy(false);
-  activeRunId = null;
+  try {
+    await syncHistoryFromGateway();
+  } catch (e) { /* ignore */ }
+  userAborted = false;
 }
 
 
@@ -1622,7 +2676,14 @@ function hideCommandPopup() {
 
 async function send() {
   const text = inputEl.value.trim();
-  if (!text && pendingImages.length === 0 && pendingFiles.length === 0) return;
+  if (!text && !pendingQuote && pendingImages.length === 0 && pendingFiles.length === 0) return;
+  if (text && isStopCommand(text)) {
+    inputEl.value = '';
+    resetInputHeight();
+    hideCommandPopup();
+    await handleStopCommand();
+    return;
+  }
   if (!connected) {
     await checkConnection();
     if (!connected) return;
@@ -1656,17 +2717,25 @@ async function send() {
   currentRunId += 1;
   const myRunId = currentRunId;
 
+  const quoteSnapshot = pendingQuote ? { ...pendingQuote } : undefined;
+  const sentAtMs = Date.now();
+
   // 立刻把 user 消息 push + 渲染（不卡 UI，方案 A3）
   messages.push({
     who: 'me',
     text,
+    quote: quoteSnapshot,
     images: outgoingImages.length > 0 ? outgoingImages : undefined,
     files: outgoingFiles.length > 0 ? outgoingFiles : undefined,
     time: now(),
+    sentTime: formatGatewayEnvelopeTime(sentAtMs),
+    sentAtMs,
   });
   inputEl.value = '';
-  inputEl.style.height = DEFAULT_INPUT_HEIGHT;
+  resetInputHeight();
+  clearPendingQuote();
   hideCommandPopup();
+  updateComposerSendBtn();
   setStatus('', ''); // 清掉 “截屏完成，可发送” 之类的提示（发完了就没用了）
 
   // 给 user 消息留个对应的 assistant 占位（启孜回复的）
@@ -1703,6 +2772,7 @@ async function send() {
 async function runStream(assistantMsg) {
   const myRunId = assistantMsg.runId;
   activeRunId = myRunId;
+  startStreamHistoryPoll(myRunId);
 
   try {
     const payload = toChatPayload(assistantMsg);
@@ -1731,8 +2801,6 @@ async function runStream(assistantMsg) {
 // 队列处理器：从队列里取下一条，标记 streaming 状态，跑 stream
 function processQueue() {
   if (userAborted) {
-    // 主动 abort 后不启动队列
-    userAborted = false;
     setBusy(false);
     activeRunId = null;
     return;
@@ -1809,6 +2877,94 @@ window.qizi.onChatError((message, runId) => {
   finishAssistant({ error: message, runId });
 });
 
+if (messagesEl) {
+  messagesEl.addEventListener('click', (e) => {
+    const selectBtn = e.target.closest('.msg-select-check');
+    if (selectBtn && multiSelectMode) {
+      e.preventDefault();
+      e.stopPropagation();
+      const idx = Number(selectBtn.dataset.msgIndex);
+      if (Number.isFinite(idx)) toggleMultiSelectIndex(idx);
+      return;
+    }
+    if (multiSelectMode) {
+      const row = e.target.closest('.msg');
+      if (row && !e.target.closest('.msg-quote-toggle, a, .msg-bubble img')) {
+        const rows = [...messagesEl.querySelectorAll('.msg')];
+        const idx = rows.indexOf(row);
+        if (idx >= 0) {
+          e.preventDefault();
+          toggleMultiSelectIndex(idx);
+          return;
+        }
+      }
+    }
+    const toggleBtn = e.target.closest('.msg-quote-toggle');
+    if (!toggleBtn) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const card = toggleBtn.closest('.msg-quote-card');
+    toggleQuoteCard(card, toggleBtn);
+  });
+  messagesEl.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.msg');
+    if (!row || !messagesEl.contains(row)) return;
+    e.preventDefault();
+    const rows = [...messagesEl.querySelectorAll('.msg')];
+    const msgIndex = rows.indexOf(row);
+    if (msgIndex < 0 || msgIndex >= messages.length) return;
+    const msg = messages[msgIndex];
+    if (msg.streaming) {
+      setStatus('生成中的消息暂不可操作', 'error');
+      return;
+    }
+    showMessageContextMenu(e.clientX, e.clientY, msgIndex);
+  });
+  messagesEl.addEventListener('scroll', hideMessageContextMenu);
+}
+
+if (msgContextMenuEl) {
+  msgContextMenuEl.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-action]');
+    if (!item || item.disabled) return;
+    const action = item.dataset.action;
+    if (action === 'quote') {
+      const msg = messages[contextMenuTargetIndex];
+      if (msg) setPendingQuoteFromMessage(msg);
+      hideMessageContextMenu();
+      return;
+    }
+    if (action === 'forward') {
+      const msg = messages[contextMenuTargetIndex];
+      if (msg) openForwardModal(msg);
+      else hideMessageContextMenu();
+      return;
+    }
+    if (action === 'multiselect') {
+      enterMultiSelectMode(contextMenuTargetIndex);
+      return;
+    }
+    if (action === 'export') {
+      exportMessageAtIndex(contextMenuTargetIndex);
+      return;
+    }
+    hideMessageContextMenu();
+  });
+}
+
+document.addEventListener('click', (e) => {
+  if (!msgContextMenuEl || msgContextMenuEl.hidden) return;
+  if (e.target.closest('#msg-context-menu')) return;
+  hideMessageContextMenu();
+});
+
+if (composerQuoteRemoveEl) {
+  composerQuoteRemoveEl.addEventListener('click', () => {
+    clearPendingQuote();
+    inputEl?.focus();
+  });
+}
+
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     if (e.isComposing || e.keyCode === 229) return;
@@ -1818,6 +2974,21 @@ inputEl.addEventListener('keydown', (e) => {
     return;
   }
   if (e.key === 'Escape') {
+    if (multiSelectMode) {
+      e.preventDefault();
+      exitMultiSelectMode();
+      return;
+    }
+    if (msgContextMenuEl && !msgContextMenuEl.hidden) {
+      e.preventDefault();
+      hideMessageContextMenu();
+      return;
+    }
+    if (pendingQuote) {
+      e.preventDefault();
+      clearPendingQuote();
+      return;
+    }
     if (busy) {
       e.preventDefault();
       abortRun();
@@ -1835,8 +3006,11 @@ inputEl.addEventListener('input', () => {
   } else {
     hideCommandPopup();
   }
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(Math.max(inputEl.scrollHeight, 90), 200) + 'px';
+  if (!composerResized) {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = `${Math.min(Math.max(inputEl.scrollHeight, 90), 200)}px`;
+  }
+  updateComposerSendBtn();
 });
 
 inputEl.addEventListener('blur', () => {
@@ -1845,6 +3019,16 @@ inputEl.addEventListener('blur', () => {
 
 if (stopBtn) {
   stopBtn.addEventListener('click', () => abortRun());
+}
+
+if (composerSendBtn) {
+  composerSendBtn.addEventListener('click', () => {
+    if (busy) {
+      abortRun();
+      return;
+    }
+    send();
+  });
 }
 
 const screenshotBtn = document.getElementById('screenshot-btn');
@@ -1950,23 +3134,171 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+const EMOJI_CATEGORIES = [
+  { label: '笑脸', emojis: ['😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂', '🙂', '🙃', '😉'] },
+  { label: '大笑', emojis: ['😊', '😇', '🥰', '😍', '🤩', '😘', '😗', '☺️', '😚', '😙', '🥲'] },
+  { label: '爱心', emojis: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔', '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝'] },
+  { label: '亲亲', emojis: ['😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🤫', '🤔', '🤐', '🤨', '😐', '😑', '😶'] },
+  { label: '眼镜', emojis: ['😏', '😒', '🙄', '😬', '🤥', '😌', '😔', '😪', '🤤', '😴', '😷', '🤒', '🤕', '🤢', '🤮', '🤧', '🥵', '🥶'] },
+  { label: '调皮', emojis: ['🥴', '😵', '🤯', '🤠', '🥳', '🥸', '😎', '🤓', '🧐', '😕', '😟', '🙁', '☹️', '😮', '😯', '😲', '😳', '🥺'] },
+  { label: '惊讶', emojis: ['😦', '😧', '😨', '😰', '😥', '😢', '😭', '😱', '😖', '😣', '😞', '😓', '😩', '😫', '🥱', '😤', '😡', '😠'] },
+  { label: '难过', emojis: ['🤬', '😈', '👿', '💀', '☠️', '💩', '🤡', '👹', '👺', '👻', '👽', '👾', '🤖', '😺', '😸', '😹', '😻', '😼'] },
+  { label: '生气', emojis: ['😽', '🙀', '😿', '😾', '🙈', '🙉', '🙊', '💋', '💯', '💢', '💥', '💫', '💦', '💨', '🕳️', '💣', '💬', '👁️‍🗨️'] },
+  { label: '生病', emojis: ['🗨️', '🗯️', '💭', '💤', '👋', '🤚', '🖐️', '✋', '🖖', '👌', '🤌', '🤏', '✌️', '🤞', '🤟', '🤘', '🤙', '👈'] },
+  { label: '恶魔', emojis: ['👉', '👆', '🖕', '👇', '☝️', '👍', '👎', '✊', '👊', '🤛', '🤜', '👏', '🙌', '👐', '🤲', '🤝', '🙏', '✍️'] },
+  { label: '手势', emojis: ['💅', '🤳', '💪', '🦾', '🦿', '🦵', '🦶', '👂', '🦻', '👃', '🧠', '🫀', '🫁', '🦷', '🦴', '👀', '👁️', '👅'] },
+  { label: 'OK', emojis: ['👄', '👶', '🧒', '👦', '👧', '🧑', '👱', '👨', '🧔', '👩', '🧓', '👴', '👵', '🙍', '🙎', '🙅', '🙆', '💁'] },
+  { label: '挥手', emojis: ['🙋', '🧏', '🙇', '🤦', '🤷', '👮', '🕵️', '💂', '🥷', '👷', '🤴', '👸', '👳', '👲', '🧕', '🤵', '👰', '🤰'] },
+  { label: '身体', emojis: ['🤱', '👼', '🎅', '🤶', '🦸', '🦹', '🧙', '🧚', '🧛', '🧜', '🧝', '🧞', '🧟', '💆', '💇', '🚶', '🧍', '🧎'] },
+  { label: '人物', emojis: ['🏃', '💃', '🕺', '🕴️', '👯', '🧖', '🧗', '🤸', '🏌️', '🏇', '⛷️', '🏂', '🏋️', '🤼', '🤽', '🤾', '🤺', '⛹️'] },
+  { label: '家庭', emojis: ['🏊', '🚣', '🧘', '🛀', '🛌', '👭', '👫', '👬', '💏', '💑', '👪', '👨‍👩‍👧', '👨‍👩‍👧‍👦', '👨‍👩‍👦‍👦', '👨‍👩‍👧‍👧', '👩‍👩‍👧', '👨‍👨‍👦', '👩‍👩‍👦'] },
+  { label: '职业', emojis: ['🧑‍💻', '👨‍💻', '👩‍💻', '🧑‍🎓', '👨‍🎓', '👩‍🎓', '🧑‍🏫', '👨‍🏫', '👩‍🏫', '🧑‍⚕️', '👨‍⚕️', '👩‍⚕️', '🧑‍🔬', '👨‍🔬', '👩‍🔬', '🧑‍🎨', '👨‍🎨', '👩‍🎨'] },
+  { label: '动物', emojis: ['🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐻‍❄️', '🐨', '🐯', '🦁', '🐮', '🐷', '🐽', '🐸', '🐵', '🙈'] },
+  { label: '哺乳', emojis: ['🙉', '🙊', '🐒', '🐔', '🐧', '🐦', '🐤', '🐣', '🐥', '🦆', '🦅', '🦉', '🦇', '🐺', '🐗', '🐴', '🦄', '🐝'] },
+  { label: '鸟类', emojis: ['🪱', '🐛', '🦋', '🐌', '🐞', '🐜', '🪰', '🪲', '🪳', '🦟', '🦗', '🕷️', '🕸️', '🦂', '🐢', '🐍', '🦎', '🦖'] },
+  { label: '海洋', emojis: ['🦕', '🐙', '🦑', '🦐', '🦞', '🦀', '🐡', '🐠', '🐟', '🐬', '🐳', '🐋', '🦈', '🐊', '🐅', '🐆', '🦓', '🦍'] },
+  { label: '昆虫', emojis: ['🦧', '🦣', '🐘', '🦛', '🦏', '🐪', '🐫', '🦒', '🦘', '🦬', '🐃', '🐂', '🐄', '🐎', '🐖', '🐏', '🐑', '🦙'] },
+  { label: '植物', emojis: ['🐐', '🦌', '🐕', '🐩', '🦮', '🐕‍🦺', '🐈', '🐈‍⬛', '🪶', '🐓', '🦃', '🦤', '🦚', '🦜', '🦢', '🦩', '🕊️', '🐇'] },
+  { label: '花卉', emojis: ['🦝', '🦨', '🦡', '🦫', '🦦', '🦥', '🐁', '🐀', '🐿️', '🦔', '🐾', '🐉', '🐲', '🌵', '🎄', '🌲', '🌳', '🌴'] },
+  { label: '水果', emojis: ['🌱', '🌿', '☘️', '🍀', '🎍', '🎋', '🍃', '🍂', '🍁', '🍄', '🌾', '💐', '🌷', '🌹', '🥀', '🌺', '🌸', '🌼'] },
+  { label: '蔬菜', emojis: ['🌻', '🌞', '🌝', '🌛', '🌜', '🌚', '🌕', '🌖', '🌗', '🌘', '🌑', '🌒', '🌓', '🌔', '🍎', '🍏', '🍐', '🍊'] },
+  { label: '主食', emojis: ['🍋', '🍌', '🍉', '🍇', '🍓', '🫐', '🍈', '🍒', '🍑', '🥭', '🍍', '🥥', '🥝', '🍅', '🍆', '🥑', '🥦', '🥬'] },
+  { label: '甜点', emojis: ['🥒', '🌶️', '🫑', '🌽', '🥕', '🫒', '🧄', '🧅', '🥔', '🍠', '🥐', '🥯', '🍞', '🥖', '🥨', '🧀', '🥚', '🍳'] },
+  { label: '饮料', emojis: ['🧈', '🥞', '🧇', '🥓', '🥩', '🍗', '🍖', '🦴', '🌭', '🍔', '🍟', '🍕', '🫓', '🥪', '🥙', '🧆', '🌮', '🌯'] },
+  { label: '运动', emojis: ['🫔', '🥗', '🥘', '🫕', '🍝', '🍜', '🍲', '🍛', '🍣', '🍱', '🥟', '🦪', '🍤', '🍙', '🍚', '🍘', '🍥', '🥠'] },
+  { label: '交通', emojis: ['🥮', '🍢', '🍡', '🍧', '🍨', '🍦', '🥧', '🧁', '🍰', '🎂', '🍮', '🍭', '🍬', '🍫', '🍿', '🍩', '🍪', '🌰'] },
+  { label: '物品', emojis: ['🥜', '🍯', '🥛', '🍼', '☕', '🫖', '🍵', '🧃', '🥤', '🧋', '🍶', '🍺', '🍻', '🥂', '🍷', '🥃', '🍸', '🍹'] },
+  { label: '符号', emojis: ['🧉', '🍾', '🧊', '⚽', '🏀', '🏈', '⚾', '🥎', '🎾', '🏐', '🏉', '🥏', '🎱', '🪀', '🏓', '🏸', '🏒', '🏑', '✨', '⭐', '🌟', '💫', '🔥', '💧', '🌈', '☀️', '⛅', '☁️', '❄️', '⚡', '☔', '⛈️', '✅', '❌', '❓', '❗', '💯', '🔔', '🎵', '🎶', '♻️', '⚠️', '🚫', '🔴', '🟠', '🟡', '🟢', '🔵', '🟣', '⚫', '⚪'] },
+];
+
+function buildEmojiPicker() {
+  if (!emojiPickerEl) return;
+  const frag = document.createDocumentFragment();
+  EMOJI_CATEGORIES.forEach((cat) => {
+    const section = document.createElement('section');
+    section.className = 'emoji-category';
+    const title = document.createElement('h4');
+    title.className = 'emoji-category-title';
+    title.textContent = cat.label;
+    const grid = document.createElement('div');
+    grid.className = 'emoji-grid';
+    cat.emojis.forEach((emoji) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'emoji-item';
+      btn.textContent = emoji;
+      btn.title = emoji;
+      btn.addEventListener('click', () => {
+        insertEmojiAtCursor(emoji);
+        hideEmojiPicker();
+      });
+      grid.appendChild(btn);
+    });
+    section.appendChild(title);
+    section.appendChild(grid);
+    frag.appendChild(section);
+  });
+  emojiPickerEl.appendChild(frag);
+}
+
+function normalizeUtf16CaretIndex(value, index) {
+  let i = Math.max(0, Math.min(index ?? 0, value.length));
+  if (i > 0 && i < value.length) {
+    const prev = value.charCodeAt(i - 1);
+    const curr = value.charCodeAt(i);
+    if (prev >= 0xD800 && prev <= 0xDBFF && curr >= 0xDC00 && curr <= 0xDFFF) {
+      i += 1;
+    }
+  }
+  return i;
+}
+
+function insertEmojiAtCursor(emoji) {
+  const value = inputEl.value;
+  const start = normalizeUtf16CaretIndex(value, inputEl.selectionStart ?? value.length);
+  const end = normalizeUtf16CaretIndex(value, inputEl.selectionEnd ?? start);
+  const safeStart = start <= end ? start : end;
+  const safeEnd = start <= end ? end : start;
+  const before = value.slice(0, safeStart);
+  const after = value.slice(safeEnd);
+  inputEl.value = before + emoji + after;
+  const pos = safeStart + emoji.length;
+  inputEl.setSelectionRange(pos, pos);
+  inputEl.focus();
+  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function positionEmojiPicker() {
+  if (!emojiBtn || !emojiPickerEl || emojiPickerEl.hidden) return;
+  const rect = emojiBtn.getBoundingClientRect();
+  const panelW = emojiPickerEl.offsetWidth;
+  const panelH = emojiPickerEl.offsetHeight;
+  const gap = 6;
+  let top = rect.top - panelH - gap;
+  if (top < 8) top = 8;
+  const maxLeft = window.innerWidth - panelW - 8;
+  const left = Math.max(8, Math.min(rect.left, maxLeft));
+  emojiPickerEl.style.left = `${left}px`;
+  emojiPickerEl.style.top = `${top}px`;
+}
+
+function showEmojiPicker() {
+  if (!emojiPickerEl) return;
+  hideModelPopup();
+  emojiPickerEl.hidden = false;
+  positionEmojiPicker();
+  requestAnimationFrame(positionEmojiPicker);
+  if (emojiBtn) {
+    emojiBtn.classList.add('open');
+    emojiBtn.setAttribute('aria-expanded', 'true');
+  }
+}
+
+function hideEmojiPicker() {
+  if (!emojiPickerEl || emojiPickerEl.hidden) return;
+  emojiPickerEl.hidden = true;
+  if (emojiBtn) {
+    emojiBtn.classList.remove('open');
+    emojiBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function toggleEmojiPicker() {
+  if (!emojiPickerEl) return;
+  if (emojiPickerEl.hidden) showEmojiPicker();
+  else hideEmojiPicker();
+}
+
+buildEmojiPicker();
+
+if (emojiBtn) {
+  emojiBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleEmojiPicker();
+  });
+}
+
 (function () {
-  const composer = document.getElementById('composer');
   const handle = document.getElementById('composer-resize');
+  if (!handle || !composerEl) return;
   let startY;
   let startH;
   handle.addEventListener('mousedown', (e) => {
     e.preventDefault();
     startY = e.clientY;
-    startH = composer.offsetHeight;
+    startH = composerEl.offsetHeight;
     document.addEventListener('mousemove', onDrag);
     document.addEventListener('mouseup', onUp);
   });
   function onDrag(e) {
     const delta = startY - e.clientY;
-    const newH = Math.max(100, Math.min(startH + delta, window.innerHeight * 0.6));
-    composer.style.height = newH + 'px';
-    inputEl.style.height = (newH - 40) + 'px';
+    const newH = Math.max(120, Math.min(startH + delta, window.innerHeight * 0.6));
+    composerResized = true;
+    composerEl.classList.add('composer--resized');
+    composerEl.style.height = `${newH}px`;
+    inputEl.style.height = '';
+    inputEl.style.maxHeight = '';
+    positionEmojiPicker();
   }
   function onUp() {
     document.removeEventListener('mousemove', onDrag);
@@ -1974,8 +3306,8 @@ document.addEventListener('keydown', (e) => {
   }
 })();
 
-// 强制 textarea 初始高度（防止 composer-resize 把空 textarea 拖小后无法恢复）
-inputEl.style.height = DEFAULT_INPUT_HEIGHT;
+resetInputHeight();
+updateComposerSendBtn();
 
 // ===== 拖拽图片到输入区 =====
 let dragCounter = 0;
@@ -2088,6 +3420,11 @@ document.addEventListener('click', (e) => {
   if (modelPopup && !modelPopup.hidden) {
     if (!e.target.closest('.model-picker-wrap')) hideModelPopup();
   }
+  if (emojiPickerEl && !emojiPickerEl.hidden) {
+    if (!e.target.closest('.emoji-picker-wrap') && !e.target.closest('.emoji-picker')) {
+      hideEmojiPicker();
+    }
+  }
   if (agentPopup && !agentPopup.hidden) {
     if (!e.target.closest('.titlebar-center')) hideAgentPopup();
   }
@@ -2095,13 +3432,48 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (multiSelectMode) {
+      exitMultiSelectMode();
+      return;
+    }
+    if (forwardModal && !forwardModal.hidden) {
+      closeForwardModal();
+      return;
+    }
     if (settingsModal && !settingsModal.hidden) {
       closeSettingsModal();
       return;
     }
     if (modelPopup && !modelPopup.hidden) hideModelPopup();
+    if (emojiPickerEl && !emojiPickerEl.hidden) hideEmojiPicker();
     if (agentPopup && !agentPopup.hidden) hideAgentPopup();
   }
+});
+
+if (multiselectCancelBtn) {
+  multiselectCancelBtn.addEventListener('click', exitMultiSelectMode);
+}
+if (multiselectExportBtn) {
+  multiselectExportBtn.addEventListener('click', exportSelectedMessages);
+}
+if (multiselectSendBtn) {
+  multiselectSendBtn.addEventListener('click', openForwardModalForSelection);
+}
+
+if (forwardCancelBtn) {
+  forwardCancelBtn.addEventListener('click', closeForwardModal);
+}
+if (forwardSendBtn) {
+  forwardSendBtn.addEventListener('click', submitForward);
+}
+if (forwardModal) {
+  forwardModal.addEventListener('click', (e) => {
+    if (e.target === forwardModal) closeForwardModal();
+  });
+}
+window.addEventListener('resize', () => {
+  if (forwardModal && !forwardModal.hidden) updateForwardPreviewEllipsis();
+  positionEmojiPicker();
 });
 
 /* ---------------- 设置 ---------------- */

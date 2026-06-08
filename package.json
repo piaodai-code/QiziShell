@@ -1,9 +1,10 @@
 {
   "name": "qizi-shell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "restart": "bash scripts/restart-dev.sh",
     "build": "electron-builder --mac"
   },
   "build": {
@@ -25,6 +26,7 @@
       "index.html",
       "style.css",
       "app.js",
+      "message-time.js",
       "marked.min.js",
       "assets/icons/**",
       "tray-icon.png",

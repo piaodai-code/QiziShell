@@ -47,6 +47,8 @@ contextBridge.exposeInMainWorld('qizi', {
   abortChat: () => ipcRenderer.invoke('openclaw:abort'),
   getSessionKey: () => ipcRenderer.invoke('openclaw:getSessionKey'),
   listAgents: () => ipcRenderer.invoke('openclaw:agents:list'),
+  forwardMessage: (payload) => ipcRenderer.invoke('openclaw:forward', payload),
+  exportMessagesWord: (entries) => ipcRenderer.invoke('openclaw:export:word', { entries }),
   switchAgent: (agentId) => ipcRenderer.invoke('openclaw:session:switch', agentId),
   listModels: () => ipcRenderer.invoke('openclaw:models:list'),
   getCurrentModel: () => ipcRenderer.invoke('openclaw:models:current'),

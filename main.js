@@ -30,6 +30,7 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const { GatewayWsClient } = require('./gateway-ws');
+const { extractMessageSentTimeFromRaw } = require('./message-time');
 
 let mainWindow = null;
 let tray = null;
@@ -405,7 +406,6 @@ async function testGatewaySettings({ wsUrl, token }) {
   const client = new GatewayWsClient({
     url,
     token: authToken,
-    clientDisplayName: 'QiziShell',
     clientVersion: '0.1.0',
   });
   try {
@@ -622,12 +622,18 @@ function convertHistoryMessages(serverMessages) {
         resolvedText = `[错误] ${m.errorMessage}`;
       }
       if (!resolvedText && images.length === 0 && files.length === 0) return null;
+      const sent = extractMessageSentTimeFromRaw(m);
+      const displayTime = sent.time
+        ? sent.time.match(/\d{2}:\d{2}/)?.[0] || sent.time
+        : '';
       return {
         who: role === 'user' ? 'me' : 'them',
         text: resolvedText,
         images: images.length > 0 ? images : undefined,
         files: files.length > 0 ? files : undefined,
-        time: '',
+        time: displayTime,
+        sentTime: sent.time || undefined,
+        sentAtMs: sent.sentAtMs ?? undefined,
         streaming: false,
       };
     })
@@ -1019,7 +1025,6 @@ function ensureGateway() {
     gateway = new GatewayWsClient({
       url: config.wsUrl,
       token: config.token,
-      clientDisplayName: 'QiziShell',
       clientVersion: '0.1.0',
     });
     attachGatewayHandlers(gateway);
@@ -1538,6 +1543,69 @@ async function buildChatAttachments(images = [], files = []) {
   return attachments;
 }
 
+async function forwardMessageToAgents({ agentIds, message }) {
+  const ids = Array.isArray(agentIds)
+    ? [...new Set(agentIds.filter((id) => typeof id === 'string' && id.trim()))]
+    : [];
+  if (ids.length === 0) {
+    return { ok: false, error: '请至少选择一个 Agent' };
+  }
+  const trimmed = typeof message === 'string' ? message.trim() : '';
+  if (!trimmed) {
+    return { ok: false, error: '转发内容为空' };
+  }
+
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const result = await client.request('agents.list', {});
+    const mainKey = result?.mainKey || 'main';
+    const rawAgents = Array.isArray(result?.agents) ? result.agents : [];
+    const idSet = new Set(ids);
+    const targets = rawAgents.filter((agent) => idSet.has(agent.id));
+    if (targets.length === 0) {
+      return { ok: false, error: '未找到所选 Agent' };
+    }
+
+    const results = [];
+    for (const agent of targets) {
+      const sessionKey = pinnedSessionKeyForAgent(agent.id, mainKey);
+      const idempotencyKey = `qizi-fwd-${agent.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        const ack = await client.request('chat.send', {
+          sessionKey,
+          message: trimmed,
+          deliver: false,
+          idempotencyKey,
+        });
+        results.push({
+          agentId: agent.id,
+          ok: true,
+          runId: (ack && ack.runId) || idempotencyKey,
+        });
+      } catch (err) {
+        results.push({
+          agentId: agent.id,
+          ok: false,
+          error: formatGatewayError(err),
+        });
+      }
+    }
+
+    const failed = results.filter((entry) => !entry.ok);
+    if (failed.length === results.length) {
+      return {
+        ok: false,
+        error: failed.map((entry) => entry.error).filter(Boolean).join('；') || '转发失败',
+        results,
+      };
+    }
+    return { ok: true, results };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
 async function streamChat(event, { message, attachments, runId }) {
   const client = ensureGateway();
   await client.waitForConnect();
@@ -1573,7 +1641,10 @@ async function streamChat(event, { message, attachments, runId }) {
       },
     });
     const run = activeRuns.get(runId);
-    if (run) armRunTimeout(runId, run);
+    if (run) {
+      armRunTimeout(runId, run);
+      pollRunRecovery(runId, 0);
+    }
   });
 }
 
@@ -1606,6 +1677,7 @@ ipcMain.handle('openclaw:open-settings', () => {
 });
 ipcMain.handle('openclaw:getSessionKey', () => getSessionKey());
 ipcMain.handle('openclaw:agents:list', () => listAgents());
+ipcMain.handle('openclaw:forward', (_event, payload) => forwardMessageToAgents(payload || {}));
 ipcMain.handle('openclaw:session:switch', (_event, agentId) => switchToAgent(agentId));
 ipcMain.handle('openclaw:history', () => loadChatHistory());
 ipcMain.handle('openclaw:models:list', () => listModels());
@@ -1719,6 +1791,97 @@ ipcMain.handle('openclaw:pickImages', async (event) => {
     return { ok: true, images };
   } catch (err) {
     return { ok: false, error: `读取图片失败: ${err.message}` };
+  }
+});
+
+function escapeExportHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+const EXPORT_WORD_STYLES = `
+body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.7; color: #222; }
+.export-entry { margin-bottom: 22px; page-break-inside: avoid; }
+.export-entry-header { margin: 0 0 10px 0; font-size: 13px; }
+.export-entry-header strong { font-weight: 600; }
+.export-entry-time { color: #888; font-size: 12px; }
+.export-entry-body { font-size: 14px; line-height: 1.7; }
+.export-quote { margin: 0 0 10px 0; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; background: #f7f7f7; }
+.export-quote-author { font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px; }
+.export-body p { margin: 0 0 8px 0; }
+.export-body p:last-child { margin-bottom: 0; }
+.export-body strong { font-weight: 600; }
+.export-body em { font-style: italic; }
+.export-body code { font-family: Menlo, Consolas, monospace; font-size: 12px; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
+.export-body pre { margin: 8px 0; padding: 10px 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+.export-body pre code { background: transparent; padding: 0; }
+.export-body table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: 100%; }
+.export-body th, .export-body td, .export-quote th, .export-quote td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
+.export-body th, .export-quote th { background: #f5f5f5; font-weight: 600; }
+.export-body blockquote, .export-quote blockquote { border-left: 3px solid #ccc; margin: 8px 0; padding: 4px 12px; color: #666; }
+.export-body ul, .export-body ol, .export-quote ul, .export-quote ol { margin: 4px 0; padding-left: 22px; }
+.export-body li, .export-quote li { margin: 2px 0; }
+.export-body h1, .export-body h2, .export-body h3, .export-quote h1, .export-quote h2, .export-quote h3 { margin: 12px 0 6px 0; font-weight: 600; }
+.export-body h1, .export-quote h1 { font-size: 16px; }
+.export-body h2, .export-quote h2 { font-size: 15px; }
+.export-body h3, .export-quote h3 { font-size: 14px; }
+.export-body a, .export-quote a { color: #1976d2; text-decoration: underline; }
+.export-divider { border: none; border-top: 1px solid #ddd; margin: 18px 0; }
+`;
+
+function buildExportWordHtml(entries) {
+  const blocks = (Array.isArray(entries) ? entries : []).map((entry) => {
+    const author = escapeExportHtml(entry?.author || '未知');
+    const time = entry?.time
+      ? `<span class="export-entry-time"> ${escapeExportHtml(entry.time)}</span>`
+      : '';
+    const body = typeof entry?.html === 'string' && entry.html.trim()
+      ? entry.html
+      : escapeExportHtml(entry?.text || '').replace(/\r?\n/g, '<br/>');
+    return [
+      '<div class="export-entry">',
+      `<p class="export-entry-header"><strong>${author}</strong>${time}</p>`,
+      `<div class="export-entry-body">${body}</div>`,
+      '</div>',
+    ].join('');
+  });
+  return [
+    '<!DOCTYPE html>',
+    '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">',
+    '<head>',
+    '<meta charset="utf-8">',
+    '<title>QiziShell Export</title>',
+    `<style>${EXPORT_WORD_STYLES}</style>`,
+    '</head>',
+    '<body>',
+    blocks.join('<hr class="export-divider"/>'),
+    '</body></html>',
+  ].join('');
+}
+
+ipcMain.handle('openclaw:export:word', async (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) return { ok: false, error: '找不到主窗口' };
+  const entries = Array.isArray(payload?.entries) ? payload.entries : [];
+  if (!entries.length) return { ok: false, error: '没有可导出的消息' };
+  const stamp = new Date().toISOString().slice(0, 10);
+  const result = await dialog.showSaveDialog(win, {
+    title: '保存为 Word 文档',
+    defaultPath: `qizi-export-${stamp}.doc`,
+    filters: [{ name: 'Word 文档', extensions: ['doc', 'docx'] }],
+  });
+  if (result.canceled || !result.filePath) {
+    return { ok: false, cancelled: true };
+  }
+  try {
+    const html = buildExportWordHtml(entries);
+    fs.writeFileSync(result.filePath, `\ufeff${html}`, 'utf8');
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, error: err.message || '保存失败' };
   }
 });
 

@@ -26,11 +26,14 @@
     </main>
     <footer class="composer" id="composer">
       <div class="composer-resize" id="composer-resize"></div>
+      <div class="composer-body" id="composer-body">
       <div class="composer-tools">
         <div class="composer-tools-left">
-          <button type="button" class="icon-btn icon-btn-img" title="表情">
-            <img src="assets/icons/face.png" alt="" aria-hidden="true">
-          </button>
+          <div class="emoji-picker-wrap">
+            <button type="button" class="icon-btn icon-btn-img" id="emoji-btn" title="表情" aria-expanded="false" aria-haspopup="true">
+              <img src="assets/icons/face.png" alt="" aria-hidden="true">
+            </button>
+          </div>
           <button type="button" class="icon-btn icon-btn-img" id="screenshot-btn" title="截屏 (Cmd+Shift+4 也行)">
             <img src="assets/icons/scissors.png" alt="" aria-hidden="true">
           </button>
@@ -60,11 +63,69 @@
       </div>
       <div class="cmd-popup" id="cmd-popup" hidden></div>
       <div class="composer-pending" id="composer-pending" hidden></div>
-      <textarea id="input" placeholder="输入消息，输入 / 看可用命令…" rows="1"></textarea>
-
+      <div class="composer-quote" id="composer-quote" hidden>
+        <button type="button" class="composer-quote-remove" id="composer-quote-remove" title="移除引用" aria-label="移除引用">×</button>
+        <span class="composer-quote-text" id="composer-quote-text"></span>
+      </div>
+      <div class="composer-input-wrap">
+        <textarea id="input" placeholder="输入消息，输入 / 看可用命令…" rows="1"></textarea>
+        <button type="button" class="composer-send-btn" id="composer-send-btn" title="发送" aria-label="发送" disabled>
+          <svg class="composer-send-icon composer-send-icon-send" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M8 3.25 3.75 11.75h8.5L8 3.25Z"/>
+          </svg>
+          <svg class="composer-send-icon composer-send-icon-stop" viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
+            <rect fill="currentColor" x="4" y="4" width="8" height="8" rx="1.2"/>
+          </svg>
+        </button>
+      </div>
+      </div>
+      <div class="emoji-picker" id="emoji-picker" hidden role="dialog" aria-label="选择表情"></div>
+      <div class="composer-multiselect" id="composer-multiselect" hidden>
+        <span class="composer-multiselect-hint" id="multiselect-hint">已选 0 条</span>
+        <div class="composer-multiselect-actions">
+          <button type="button" class="multiselect-btn" id="multiselect-cancel-btn">取消</button>
+          <button type="button" class="multiselect-btn" id="multiselect-export-btn" disabled>输出</button>
+          <button type="button" class="multiselect-btn multiselect-btn-primary" id="multiselect-send-btn" disabled>发送</button>
+        </div>
+      </div>
     </footer>
   </div>
   <!-- 图片放大 modal（点击消息气泡里的图打开） -->
+  <div class="msg-context-menu" id="msg-context-menu" hidden role="menu">
+    <button type="button" class="msg-context-item" data-action="quote" role="menuitem">引用</button>
+    <button type="button" class="msg-context-item" data-action="forward" role="menuitem">转发</button>
+    <button type="button" class="msg-context-item" data-action="multiselect" role="menuitem">多选</button>
+    <button type="button" class="msg-context-item" data-action="export" role="menuitem">输出</button>
+  </div>
+  <div class="forward-modal" id="forward-modal" hidden role="dialog" aria-modal="true" aria-labelledby="forward-modal-title">
+    <div class="forward-panel">
+      <div class="forward-header">
+        <h2 class="forward-title" id="forward-modal-title">转发消息</h2>
+      </div>
+      <div class="forward-layout">
+        <aside class="forward-agents">
+          <div class="forward-agents-title">选择 Agent</div>
+          <div class="forward-agents-list" id="forward-agents-list"></div>
+        </aside>
+        <section class="forward-right">
+          <div class="forward-preview-wrap">
+            <div class="forward-preview-meta" id="forward-preview-meta"></div>
+            <div class="forward-preview-scroll" id="forward-preview-scroll">
+              <div class="forward-preview-text" id="forward-preview-text"></div>
+            </div>
+            <div class="forward-preview-ellipsis" id="forward-preview-ellipsis" hidden>…</div>
+          </div>
+          <div class="forward-compose">
+            <textarea id="forward-input" placeholder="添加留言（可选）" rows="3"></textarea>
+            <div class="forward-actions">
+              <button type="button" class="forward-btn forward-btn-secondary" id="forward-cancel-btn">取消</button>
+              <button type="button" class="forward-btn forward-btn-primary" id="forward-send-btn">发送</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
   <div class="img-modal" id="img-modal" hidden role="dialog" aria-modal="true">
     <button class="img-modal-close" type="button" title="关闭 (Esc)">×</button>
     <img class="img-modal-img" id="img-modal-img" alt="" />
@@ -124,6 +185,7 @@
     </div>
   </div>
   <script src="marked.min.js"></script>
+  <script src="message-time.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

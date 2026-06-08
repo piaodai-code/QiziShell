@@ -14,8 +14,11 @@ const {
 } = require('./device-auth-store');
 
 const PROTOCOL_VERSION = 4;
-const CLIENT_ID = 'gateway-client';
-const CLIENT_MODE = 'backend';
+// operator UI 客户端（TUI / Control UI）在 chat.send 时不写入 SenderId/SenderName，
+// 避免用户消息被标成「QiziShell (gateway-client)」。不用 control-ui：会触发 origin 校验。
+const CLIENT_ID = 'openclaw-tui';
+const CLIENT_MODE = 'cli';
+const CLIENT_CAPS = ['tool-events'];
 const OPERATOR_ROLE = 'operator';
 const OPERATOR_SCOPES = [
   'operator.admin',
@@ -43,7 +46,7 @@ class GatewayWsClient extends EventEmitter {
     super();
     this.url = options.url;
     this.token = options.token;
-    this.clientDisplayName = options.clientDisplayName || '启孜 Shell';
+    this.clientDisplayName = options.clientDisplayName;
     this.clientVersion = options.clientVersion || '0.1.0';
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.connectChallengeTimeoutMs = options.connectChallengeTimeoutMs ?? 10_000;
@@ -259,7 +262,7 @@ class GatewayWsClient extends EventEmitter {
       maxProtocol: PROTOCOL_VERSION,
       client: {
         id: CLIENT_ID,
-        displayName: this.clientDisplayName,
+        ...(this.clientDisplayName ? { displayName: this.clientDisplayName } : {}),
         version: this.clientVersion,
         platform: process.platform,
         mode: CLIENT_MODE,
@@ -267,6 +270,7 @@ class GatewayWsClient extends EventEmitter {
       },
       role,
       scopes,
+      caps: CLIENT_CAPS,
       auth: selectedAuth.authToken
         ? {
             token: selectedAuth.authToken,
