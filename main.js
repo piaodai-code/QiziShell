@@ -31,8 +31,17 @@ const https = require('https');
 const http = require('http');
 const { GatewayWsClient } = require('./gateway-ws');
 const { extractMessageSentTimeFromRaw } = require('./message-time');
+const {
+  initSttManager,
+  getSttStatus,
+  installStt,
+  uninstallStt,
+  transcribeAudioFile,
+} = require('./stt-manager');
+const { file: tmpFile } = require('tmp-promise');
 
 let mainWindow = null;
+let aboutWindow = null;
 let tray = null;
 let isQuitting = false;
 let gateway = null;
@@ -437,6 +446,35 @@ function openSettings() {
   }
   mainWindow.focus();
   safeSendTo(mainWindow.webContents, 'openclaw:open-settings');
+}
+
+function openAbout() {
+  if (aboutWindow && !aboutWindow.isDestroyed()) {
+    aboutWindow.focus();
+    return;
+  }
+  const { version } = require('./package.json');
+  aboutWindow = new BrowserWindow({
+    width: 360,
+    height: 440,
+    resizable: false,
+    minimizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    title: 'About QiziShell',
+    backgroundColor: '#1a2421',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  aboutWindow.setMenu(null);
+  aboutWindow.loadFile(path.join(__dirname, 'about.html'), {
+    query: { version },
+  });
+  aboutWindow.on('closed', () => {
+    aboutWindow = null;
+  });
 }
 
 function formatTestConnectionError(err) {
@@ -1161,11 +1199,23 @@ function buildTrayIcon() {
   return img;
 }
 
+function trayMenuIcon(filename) {
+  const iconPath = path.join(__dirname, 'assets', 'icons', filename);
+  try {
+    const img = nativeImage.createFromPath(iconPath);
+    if (img.isEmpty()) return undefined;
+    return img.resize({ width: 16, height: 16 });
+  } catch {
+    return undefined;
+  }
+}
+
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
-    { label: '设置', click: () => openSettings() },
+    { label: '设置', icon: trayMenuIcon('gear.png'), click: () => openSettings() },
+    { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: () => openAbout() },
     { type: 'separator' },
-    { label: '退出', click: () => {
+    { label: '退出', icon: trayMenuIcon('exit.png'), click: () => {
       isQuitting = true;
       app.quit();
     } },
@@ -1675,6 +1725,46 @@ ipcMain.handle('openclaw:open-settings', () => {
   openSettings();
   return { ok: true };
 });
+
+ipcMain.handle('openclaw:stt:status', () => getSttStatus());
+
+ipcMain.handle('openclaw:stt:install', async (event) => {
+  const sender = event.sender;
+  return installStt((payload) => {
+    safeSendTo(sender, 'openclaw:stt:progress', payload);
+  });
+});
+
+ipcMain.handle('openclaw:stt:uninstall', () => uninstallStt());
+
+ipcMain.handle('openclaw:stt:transcribe', async (_event, payload) => {
+  const audioPath = payload?.audioPath;
+  if (audioPath && fs.existsSync(audioPath)) {
+    return transcribeAudioFile(audioPath);
+  }
+  const data = payload?.data;
+  const ext = payload?.ext || 'webm';
+  if (!data || typeof data !== 'string') {
+    return { ok: false, error: '缺少音频数据' };
+  }
+  let tmp;
+  try {
+    tmp = await tmpFile({ postfix: `.${ext.replace(/^\./, '')}` });
+    fs.writeFileSync(tmp.path, Buffer.from(data, 'base64'));
+    return await transcribeAudioFile(tmp.path);
+  } catch (err) {
+    return { ok: false, error: err.message || '识别失败' };
+  } finally {
+    if (tmp?.cleanup) {
+      try {
+        await tmp.cleanup();
+      } catch {
+        // ignore
+      }
+    }
+  }
+});
+
 ipcMain.handle('openclaw:getSessionKey', () => getSessionKey());
 ipcMain.handle('openclaw:agents:list', () => listAgents());
 ipcMain.handle('openclaw:forward', (_event, payload) => forwardMessageToAgents(payload || {}));
@@ -1991,6 +2081,7 @@ ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId })
 });
 
 app.whenReady().then(() => {
+  initSttManager(app);
   createWindow();
   createTray();
   const shellSettings = loadShellSettings();

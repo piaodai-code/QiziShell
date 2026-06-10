@@ -17,7 +17,6 @@
       </div>
       <div class="titlebar-right">
         <span class="status-pill" id="status">连接中…</span>
-        <button class="icon-btn stop-btn" id="stop-btn" title="停止启孜 (Esc)" hidden>⏹</button>
         <button type="button" class="icon-btn" id="settings-btn" title="设置">⋯</button>
       </div>
     </header>
@@ -43,7 +42,7 @@
           <button type="button" class="icon-btn icon-btn-img" id="pick-file-btn" title="从文件夹选择文件">
             <img src="assets/icons/folder.png" alt="" aria-hidden="true">
           </button>
-          <button type="button" class="icon-btn icon-btn-img" title="语音">
+          <button type="button" class="icon-btn icon-btn-img icon-btn-mic" id="mic-btn" title="语音输入（请先在设置中安装语音识别）" disabled aria-disabled="true">
             <img src="assets/icons/mic.png" alt="" aria-hidden="true">
           </button>
         </div>
@@ -67,7 +66,19 @@
         <button type="button" class="composer-quote-remove" id="composer-quote-remove" title="移除引用" aria-label="移除引用">×</button>
         <span class="composer-quote-text" id="composer-quote-text"></span>
       </div>
-      <div class="composer-input-wrap">
+      <div class="stt-recording-bar" id="stt-recording-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="stt-recording-title">
+        <div class="stt-recording-panel">
+          <p class="stt-recording-title" id="stt-recording-title">请说话</p>
+          <div class="stt-recording-wave-wrap">
+            <canvas class="stt-recording-wave" id="stt-recording-wave" width="320" height="56" aria-hidden="true"></canvas>
+          </div>
+          <div class="stt-recording-actions">
+            <button type="button" class="stt-recording-cancel-btn" id="stt-recording-cancel-btn">取消</button>
+            <button type="button" class="stt-recording-stop-btn" id="stt-recording-stop-btn">完成</button>
+          </div>
+        </div>
+      </div>
+      <div class="composer-input-wrap" id="composer-input-wrap">
         <textarea id="input" placeholder="输入消息，输入 / 看可用命令…" rows="1"></textarea>
         <button type="button" class="composer-send-btn" id="composer-send-btn" title="发送" aria-label="发送" disabled>
           <svg class="composer-send-icon composer-send-icon-send" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -92,10 +103,22 @@
   </div>
   <!-- 图片放大 modal（点击消息气泡里的图打开） -->
   <div class="msg-context-menu" id="msg-context-menu" hidden role="menu">
-    <button type="button" class="msg-context-item" data-action="quote" role="menuitem">引用</button>
-    <button type="button" class="msg-context-item" data-action="forward" role="menuitem">转发</button>
-    <button type="button" class="msg-context-item" data-action="multiselect" role="menuitem">多选</button>
-    <button type="button" class="msg-context-item" data-action="export" role="menuitem">输出</button>
+    <button type="button" class="msg-context-item" data-action="quote" role="menuitem">
+      <img src="assets/icons/quotation.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>引用</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="forward" role="menuitem">
+      <img src="assets/icons/forward.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>转发</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="multiselect" role="menuitem">
+      <img src="assets/icons/selection.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>多选</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="export" role="menuitem">
+      <img src="assets/icons/word.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>输出</span>
+    </button>
   </div>
   <div class="forward-modal" id="forward-modal" hidden role="dialog" aria-modal="true" aria-labelledby="forward-modal-title">
     <div class="forward-panel">
@@ -137,9 +160,13 @@
         <h2 class="settings-title" id="settings-title">设置</h2>
         <button type="button" class="settings-close" id="settings-close-btn" title="关闭 (Esc)">×</button>
       </div>
+      <div class="settings-tabs" role="tablist" aria-label="设置分类">
+        <button type="button" class="settings-tab is-active" id="settings-tab-gateway" role="tab" aria-selected="true" aria-controls="settings-panel-gateway" data-settings-tab="gateway">Gateway 连接</button>
+        <button type="button" class="settings-tab" id="settings-tab-stt" role="tab" aria-selected="false" aria-controls="settings-panel-stt" data-settings-tab="stt">语音识别</button>
+      </div>
       <div class="settings-body">
+        <div class="settings-tab-panel is-active" id="settings-panel-gateway" role="tabpanel" aria-labelledby="settings-tab-gateway" data-settings-panel="gateway">
         <section class="settings-section">
-          <h3 class="settings-section-title">Gateway 连接</h3>
           <p class="settings-hint" id="settings-source-hint"></p>
           <label class="settings-field">
             <span class="settings-label">WSS 地址</span>
@@ -177,6 +204,43 @@
             <li>Agent、模型可在聊天界面内切换，无需在此配置。</li>
           </ul>
         </section>
+        </div>
+        <div class="settings-tab-panel" id="settings-panel-stt" role="tabpanel" aria-labelledby="settings-tab-stt" data-settings-panel="stt" hidden>
+        <section class="settings-section" id="settings-stt-section">
+          <p class="settings-hint" id="settings-stt-hint"></p>
+          <span class="settings-status" id="settings-stt-status" hidden></span>
+          <div class="settings-stt-unsupported" id="settings-stt-unsupported" hidden></div>
+          <div class="settings-stt-install-panel" id="settings-stt-install-panel" hidden>
+            <p class="settings-stt-intro">将自动安装 <strong>mlx-whisper-small</strong>（Apple Silicon 本地识别，无需选模型）。安装内容如下：</p>
+            <ul class="settings-stt-components" id="settings-stt-components"></ul>
+            <p class="settings-stt-total" id="settings-stt-total"></p>
+            <div class="settings-row-actions">
+              <button type="button" class="settings-primary-btn" id="settings-stt-install-btn">安装语音识别</button>
+            </div>
+            <div class="settings-stt-progress" id="settings-stt-progress" hidden>
+              <div class="settings-stt-progress-bar"><div class="settings-stt-progress-fill" id="settings-stt-progress-fill"></div></div>
+              <span class="settings-stt-progress-text" id="settings-stt-progress-text"></span>
+            </div>
+          </div>
+          <div class="settings-stt-ready-panel" id="settings-stt-ready-panel" hidden>
+            <p class="settings-stt-ready-msg">✓ 本地语音识别已就绪（mlx-whisper-small）</p>
+            <div class="settings-stt-test">
+              <div class="settings-stt-test-header">
+                <span class="settings-label">测试识别（最长 30 秒）</span>
+                <span class="settings-stt-timer" id="settings-stt-timer">00:00</span>
+              </div>
+              <div class="settings-row-actions settings-stt-record-row">
+                <button type="button" class="settings-secondary-btn" id="settings-stt-record-btn">开始录音</button>
+                <span class="settings-stt-record-result" id="settings-stt-record-result" hidden></span>
+              </div>
+              <textarea class="settings-stt-result" id="settings-stt-result" readonly placeholder="识别结果将显示在这里…" rows="3"></textarea>
+            </div>
+          </div>
+        </section>
+        </div>
+      </div>
+      <div class="settings-stt-uninstall-bar" id="settings-stt-uninstall-bar" hidden>
+        <button type="button" class="settings-secondary-btn settings-stt-uninstall-btn" id="settings-stt-uninstall-btn">卸载语音识别</button>
       </div>
       <div class="settings-footer">
         <button type="button" class="settings-secondary-btn" id="settings-cancel-btn">取消</button>

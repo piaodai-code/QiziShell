@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>About QiziShell</title>
+  <link rel="stylesheet" href="about.css">
+</head>
+<body>
+  <main class="about">
+    <img class="about-icon" src="assets/about-icon.png" width="128" height="128" alt="">
+    <h1 class="about-title">Qizi Shell</h1>
+    <p class="about-version">版本 <span id="about-version"></span></p>
+    <p class="about-tagline">QiziShell 为大内容量、频繁交互而生</p>
+    <p class="about-meta">基于 OpenClaw 构建 (MIT License)</p>
+    <p class="about-copy">OpenClaw © OpenClaw Authors</p>
+    <p class="about-copy">QiziShell © 2026 Zhuo Wang</p>
+  </main>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    document.getElementById('about-version').textContent = params.get('version') || '—';
+  </script>
+</body>
+</html>

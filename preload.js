@@ -67,4 +67,13 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:open-settings', handler);
     return () => ipcRenderer.removeListener('openclaw:open-settings', handler);
   },
+  getSttStatus: () => ipcRenderer.invoke('openclaw:stt:status'),
+  installStt: () => ipcRenderer.invoke('openclaw:stt:install'),
+  uninstallStt: () => ipcRenderer.invoke('openclaw:stt:uninstall'),
+  transcribeStt: (payload) => ipcRenderer.invoke('openclaw:stt:transcribe', payload),
+  onSttProgress: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:stt:progress', handler);
+    return () => ipcRenderer.removeListener('openclaw:stt:progress', handler);
+  },
 });

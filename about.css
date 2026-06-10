@@ -1,0 +1,67 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #1a2421;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif;
+  color: #f2f2f2;
+  -webkit-font-smoothing: antialiased;
+}
+
+.about {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 28px 24px 24px;
+  box-sizing: border-box;
+}
+
+.about-icon {
+  width: 128px;
+  height: 128px;
+  object-fit: contain;
+  margin-bottom: 18px;
+}
+
+.about-title {
+  margin: 0 0 10px;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.about-version {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: #bdbdbd;
+}
+
+.about-tagline {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #a8a8a8;
+  max-width: 300px;
+}
+
+.about-meta {
+  margin: 0 0 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #909090;
+  max-width: 300px;
+}
+
+.about-copy {
+  margin: 0 0 4px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #888;
+}
+
+.about-copy:last-child {
+  margin-bottom: 0;
+}

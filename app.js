@@ -15,7 +15,6 @@ function formatGatewayEnvelopeTime(input) {
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
-const stopBtn = document.getElementById('stop-btn');
 const cmdPopup = document.getElementById('cmd-popup');
 const composerPendingEl = document.getElementById('composer-pending');
 const composerQuoteEl = document.getElementById('composer-quote');
@@ -61,6 +60,60 @@ const multiselectHintEl = document.getElementById('multiselect-hint');
 const multiselectCancelBtn = document.getElementById('multiselect-cancel-btn');
 const multiselectExportBtn = document.getElementById('multiselect-export-btn');
 const multiselectSendBtn = document.getElementById('multiselect-send-btn');
+const micBtn = document.getElementById('mic-btn');
+const settingsSttHintEl = document.getElementById('settings-stt-hint');
+const settingsSttUnsupportedEl = document.getElementById('settings-stt-unsupported');
+const settingsSttInstallPanelEl = document.getElementById('settings-stt-install-panel');
+const settingsSttReadyPanelEl = document.getElementById('settings-stt-ready-panel');
+const settingsSttComponentsEl = document.getElementById('settings-stt-components');
+const settingsSttTotalEl = document.getElementById('settings-stt-total');
+const settingsSttInstallBtn = document.getElementById('settings-stt-install-btn');
+const settingsSttProgressEl = document.getElementById('settings-stt-progress');
+const settingsSttProgressFillEl = document.getElementById('settings-stt-progress-fill');
+const settingsSttProgressTextEl = document.getElementById('settings-stt-progress-text');
+const settingsSttStatusEl = document.getElementById('settings-stt-status');
+const settingsSttRecordBtn = document.getElementById('settings-stt-record-btn');
+const settingsSttRecordResultEl = document.getElementById('settings-stt-record-result');
+const settingsSttTimerEl = document.getElementById('settings-stt-timer');
+const settingsSttResultEl = document.getElementById('settings-stt-result');
+const settingsSttUninstallBtn = document.getElementById('settings-stt-uninstall-btn');
+const settingsSttUninstallBarEl = document.getElementById('settings-stt-uninstall-bar');
+const settingsTabGatewayBtn = document.getElementById('settings-tab-gateway');
+const settingsTabSttBtn = document.getElementById('settings-tab-stt');
+const settingsPanelGatewayEl = document.getElementById('settings-panel-gateway');
+const settingsPanelSttEl = document.getElementById('settings-panel-stt');
+const sttRecordingOverlay = document.getElementById('stt-recording-overlay');
+const sttRecordingWaveCanvas = document.getElementById('stt-recording-wave');
+const sttRecordingWaveWrap = sttRecordingWaveCanvas?.closest('.stt-recording-wave-wrap');
+const sttRecordingStopBtn = document.getElementById('stt-recording-stop-btn');
+const sttRecordingCancelBtn = document.getElementById('stt-recording-cancel-btn');
+const composerInputWrapEl = document.getElementById('composer-input-wrap');
+
+let activeSettingsTab = 'gateway';
+
+let sttReady = false;
+let sttRecording = false;
+let sttRecordingMode = null;
+let sttMediaRecorder = null;
+let sttMediaStream = null;
+let sttAudioChunks = [];
+let sttRecordTimer = null;
+let sttRecordStartedAt = 0;
+let sttRecordMaxSec = 30;
+let sttRecordingDiscard = false;
+let sttAudioContext = null;
+let sttAnalyser = null;
+let sttWaveformRaf = null;
+const STT_WAVEFORM_POINTS = 80;
+const STT_WAVEFORM_DRAW_MS = 55;
+const STT_WAVEFORM_AMP = 0.76;
+const STT_WAVEFORM_PEAK_FLOOR = 0.05;
+const STT_WAVEFORM_PEAK_DECAY = 0.9;
+const STT_WAVEFORM_SILENCE_RMS = 0.028;
+const COMPOSER_INPUT_PLACEHOLDER = '输入消息，输入 / 看可用命令…';
+const STT_RECOGNIZING_HINT = '正在识别，请稍候……';
+const SETTINGS_STT_RESULT_PLACEHOLDER = '识别结果将显示在这里…';
+let sttComposerPendingActive = false;
 
 let pendingModelUpdate = false;
 let currentModelQualified = null;
@@ -2609,7 +2662,6 @@ function updateComposerSendBtn() {
 
 function setBusy(value) {
   busy = value;
-  if (stopBtn) stopBtn.hidden = !value;
   updateComposerSendBtn();
 }
 
@@ -3017,10 +3069,6 @@ inputEl.addEventListener('blur', () => {
   setTimeout(hideCommandPopup, 120);
 });
 
-if (stopBtn) {
-  stopBtn.addEventListener('click', () => abortRun());
-}
-
 if (composerSendBtn) {
   composerSendBtn.addEventListener('click', () => {
     if (busy) {
@@ -3390,6 +3438,7 @@ inputEl.addEventListener('paste', async (e) => {
     updateAgentTitleLabel({ id: currentAgentId });
   }
   checkConnection();
+  refreshSttUi();
 })();
 
 window.addEventListener('beforeunload', () => {
@@ -3515,6 +3564,607 @@ function setSettingsStatus(text, kind, fullText) {
   settingsStatusEl.className = `settings-status ${kind || ''}`.trim();
 }
 
+function setSttSettingsStatus(text, kind) {
+  if (!settingsSttStatusEl) return;
+  if (!text) {
+    settingsSttStatusEl.hidden = true;
+    settingsSttStatusEl.textContent = '';
+    settingsSttStatusEl.className = 'settings-status';
+    return;
+  }
+  settingsSttStatusEl.hidden = false;
+  settingsSttStatusEl.textContent = text;
+  settingsSttStatusEl.className = `settings-status ${kind || ''}`.trim();
+}
+
+function setSttRecordTestResult(outcome) {
+  if (!settingsSttRecordResultEl) return;
+  if (outcome === 'success') {
+    settingsSttRecordResultEl.hidden = false;
+    settingsSttRecordResultEl.textContent = '语音识别成功';
+    settingsSttRecordResultEl.className = 'settings-stt-record-result ok';
+    return;
+  }
+  if (outcome === 'failure') {
+    settingsSttRecordResultEl.hidden = false;
+    settingsSttRecordResultEl.textContent = '语音识别失败';
+    settingsSttRecordResultEl.className = 'settings-stt-record-result error';
+    return;
+  }
+  settingsSttRecordResultEl.hidden = true;
+  settingsSttRecordResultEl.textContent = '';
+  settingsSttRecordResultEl.className = 'settings-stt-record-result';
+}
+
+function updateSttUninstallFooterVisibility(ready) {
+  const show = ready === true && activeSettingsTab === 'stt';
+  if (settingsSttUninstallBarEl) settingsSttUninstallBarEl.hidden = !show;
+}
+
+function updateMicButtonState() {
+  if (!micBtn) return;
+  if (sttRecording && sttRecordingMode === 'composer') {
+    micBtn.disabled = false;
+    micBtn.classList.remove('is-disabled');
+    micBtn.classList.add('is-recording');
+    micBtn.title = '点击停止录音并转文字';
+    micBtn.setAttribute('aria-disabled', 'false');
+    return;
+  }
+  micBtn.classList.remove('is-recording');
+  if (sttReady) {
+    micBtn.disabled = false;
+    micBtn.classList.remove('is-disabled');
+    micBtn.title = '语音输入（点击开始，再点结束）';
+    micBtn.setAttribute('aria-disabled', 'false');
+  } else {
+    micBtn.disabled = true;
+    micBtn.classList.add('is-disabled');
+    micBtn.title = '请先在设置中安装语音识别';
+    micBtn.setAttribute('aria-disabled', 'true');
+  }
+}
+
+async function refreshSttUi() {
+  if (!window.qizi?.getSttStatus) return;
+  try {
+    const status = await window.qizi.getSttStatus();
+    sttReady = status?.ready === true;
+  } catch {
+    sttReady = false;
+  }
+  updateMicButtonState();
+  if (settingsModal && !settingsModal.hidden) {
+    await renderSttSettingsPanel();
+  }
+}
+
+async function renderSttSettingsPanel() {
+  if (!window.qizi?.getSttStatus) return;
+  const status = await window.qizi.getSttStatus();
+  sttReady = status?.ready === true;
+  updateMicButtonState();
+
+  if (settingsSttHintEl) {
+    settingsSttHintEl.textContent = status.supported
+      ? 'Apple Silicon Mac 本地识别，数据不上传云端。'
+      : '';
+  }
+
+  if (settingsSttUnsupportedEl) {
+    if (!status.supported) {
+      settingsSttUnsupportedEl.hidden = false;
+      settingsSttUnsupportedEl.textContent = status.message || '当前设备不支持语音识别。';
+    } else {
+      settingsSttUnsupportedEl.hidden = true;
+      settingsSttUnsupportedEl.textContent = '';
+    }
+  }
+
+  if (settingsSttInstallPanelEl) {
+    settingsSttInstallPanelEl.hidden = !status.supported || status.ready;
+  }
+  if (settingsSttReadyPanelEl) {
+    settingsSttReadyPanelEl.hidden = !status.ready;
+  }
+
+  if (settingsSttComponentsEl && Array.isArray(status.components)) {
+    settingsSttComponentsEl.innerHTML = status.components
+      .map((c) => `<li><strong>${escapeHtml(c.label)}</strong> — ${escapeHtml(c.sizeLabel)}</li>`)
+      .join('');
+  }
+  if (settingsSttTotalEl) {
+    settingsSttTotalEl.textContent = status.totalSizeLabel || '';
+  }
+  if (settingsSttInstallBtn) {
+    settingsSttInstallBtn.disabled = status.installing === true;
+  }
+  updateSttUninstallFooterVisibility(status.ready === true);
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result;
+      if (typeof dataUrl !== 'string') {
+        reject(new Error('读取音频失败'));
+        return;
+      }
+      resolve(dataUrl.split(',')[1] || '');
+    };
+    reader.onerror = () => reject(reader.error || new Error('读取音频失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function pickAudioMimeType() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
+  for (const mime of candidates) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
+      return mime;
+    }
+  }
+  return '';
+}
+
+function formatRecordTimer(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const mm = String(Math.floor(s / 60)).padStart(2, '0');
+  const ss = String(s % 60).padStart(2, '0');
+  return `${mm}:${ss}`;
+}
+
+function clearSttRecordTimer() {
+  if (sttRecordTimer) {
+    clearInterval(sttRecordTimer);
+    sttRecordTimer = null;
+  }
+}
+
+function stopSttWaveform() {
+  if (sttWaveformRaf) {
+    cancelAnimationFrame(sttWaveformRaf);
+    sttWaveformRaf = null;
+  }
+  if (sttAudioContext) {
+    sttAudioContext.close().catch(() => {});
+    sttAudioContext = null;
+  }
+  sttAnalyser = null;
+}
+
+function getSttWaveformSize() {
+  const wrap = sttRecordingWaveWrap || sttRecordingWaveCanvas?.parentElement;
+  const cssWidth = Math.max(160, Math.round(wrap?.clientWidth || 320));
+  const cssHeight = Math.max(40, Math.round(wrap?.clientHeight || 56));
+  return { cssWidth, cssHeight };
+}
+
+function startSttWaveform(stream) {
+  if (!sttRecordingWaveCanvas || !stream) return;
+  stopSttWaveform();
+
+  const canvas = sttRecordingWaveCanvas;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const { cssWidth, cssHeight } = getSttWaveformSize();
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssWidth * dpr);
+  canvas.height = Math.round(cssHeight * dpr);
+  canvas.style.width = `${cssWidth}px`;
+  canvas.style.height = `${cssHeight}px`;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+
+  sttAudioContext = new AudioCtx();
+  if (sttAudioContext.state === 'suspended') {
+    sttAudioContext.resume().catch(() => {});
+  }
+  const source = sttAudioContext.createMediaStreamSource(stream);
+  sttAnalyser = sttAudioContext.createAnalyser();
+  sttAnalyser.fftSize = 2048;
+  sttAnalyser.smoothingTimeConstant = 0.72;
+  source.connect(sttAnalyser);
+
+  const bufferLength = sttAnalyser.fftSize;
+  const timeData = new Uint8Array(bufferLength);
+  const pointCount = STT_WAVEFORM_POINTS;
+  const sampleStep = Math.max(1, Math.floor(bufferLength / pointCount));
+  const bucketSamples = new Float32Array(pointCount);
+  const midY = cssHeight / 2;
+  let displayPeak = STT_WAVEFORM_PEAK_FLOOR;
+  let lastDrawAt = 0;
+
+  const draw = (now) => {
+    if (!sttAnalyser) return;
+    sttWaveformRaf = requestAnimationFrame(draw);
+    if (now - lastDrawAt < STT_WAVEFORM_DRAW_MS) return;
+    lastDrawAt = now;
+
+    sttAnalyser.getByteTimeDomainData(timeData);
+    ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.1)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, midY);
+    ctx.lineTo(cssWidth, midY);
+    ctx.stroke();
+
+    let sumSq = 0;
+    for (let i = 0; i < bufferLength; i += 1) {
+      const s = timeData[i] / 128 - 1;
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / bufferLength);
+
+    ctx.strokeStyle = '#1976d2';
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(0, midY);
+
+    if (rms < STT_WAVEFORM_SILENCE_RMS) {
+      displayPeak = STT_WAVEFORM_PEAK_FLOOR;
+      ctx.lineTo(cssWidth, midY);
+      ctx.stroke();
+      return;
+    }
+
+    let framePeak = STT_WAVEFORM_PEAK_FLOOR;
+    for (let p = 0; p < pointCount; p += 1) {
+      const start = p * sampleStep;
+      const end = Math.min(start + sampleStep, bufferLength);
+      let pick = 0;
+      for (let i = start; i < end; i += 1) {
+        const s = timeData[i] / 128 - 1;
+        if (Math.abs(s) >= Math.abs(pick)) pick = s;
+      }
+      bucketSamples[p] = pick;
+      framePeak = Math.max(framePeak, Math.abs(pick));
+    }
+    displayPeak = Math.max(framePeak, displayPeak * STT_WAVEFORM_PEAK_DECAY);
+    const gain = (cssHeight * STT_WAVEFORM_AMP) / (2 * Math.max(displayPeak, STT_WAVEFORM_PEAK_FLOOR));
+
+    const gap = cssWidth / (pointCount - 1);
+    for (let p = 0; p < pointCount; p += 1) {
+      const x = p * gap;
+      const y = midY + bucketSamples[p] * gain;
+      if (p === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  };
+
+  draw(0);
+}
+
+function showSttRecordingOverlay(mode) {
+  if (!sttRecordingOverlay) return;
+  const isModal = mode === 'test';
+  sttRecordingOverlay.classList.toggle('is-modal', isModal);
+  sttRecordingOverlay.hidden = false;
+  if (composerInputWrapEl) {
+    composerInputWrapEl.hidden = !isModal && mode === 'composer';
+  }
+  requestAnimationFrame(() => startSttWaveform(sttMediaStream));
+}
+
+function hideSttRecordingOverlay() {
+  stopSttWaveform();
+  if (sttRecordingOverlay) {
+    sttRecordingOverlay.hidden = true;
+    sttRecordingOverlay.classList.remove('is-modal');
+  }
+  if (composerInputWrapEl) composerInputWrapEl.hidden = false;
+}
+
+function updateSttRecordTimerDisplay() {
+  const elapsed = (Date.now() - sttRecordStartedAt) / 1000;
+  if (settingsSttTimerEl && sttRecordingMode === 'test') {
+    settingsSttTimerEl.textContent = formatRecordTimer(elapsed);
+  }
+  if (elapsed >= sttRecordMaxSec) {
+    stopSttRecording();
+  }
+}
+
+async function stopSttMedia() {
+  if (sttMediaRecorder && sttMediaRecorder.state !== 'inactive') {
+    try {
+      sttMediaRecorder.stop();
+    } catch {
+      // ignore
+    }
+  }
+  if (sttMediaStream) {
+    sttMediaStream.getTracks().forEach((t) => t.stop());
+    sttMediaStream = null;
+  }
+}
+
+async function startSttRecording(mode) {
+  if (sttRecording || !sttReady) return;
+  if (!navigator.mediaDevices?.getUserMedia) {
+    setStatus('当前环境无法访问麦克风', 'error');
+    return;
+  }
+  try {
+    sttMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (err) {
+    const msg = err?.name === 'NotAllowedError'
+      ? '未授予麦克风权限，请在系统设置中允许启孜 Shell 使用麦克风'
+      : (err.message || '无法打开麦克风');
+    if (mode === 'test') setSttRecordTestResult('failure');
+    else setStatus(msg, 'error');
+    return;
+  }
+
+  sttAudioChunks = [];
+  const mimeType = pickAudioMimeType();
+  sttMediaRecorder = mimeType
+    ? new MediaRecorder(sttMediaStream, { mimeType })
+    : new MediaRecorder(sttMediaStream);
+  sttMediaRecorder.ondataavailable = (e) => {
+    if (e.data?.size > 0) sttAudioChunks.push(e.data);
+  };
+  sttMediaRecorder.onstop = () => {
+    if (mode === 'composer' && !sttRecordingDiscard) {
+      showComposerSttPending(true);
+    } else if (mode === 'test' && !sttRecordingDiscard) {
+      showSettingsSttTestPending(true);
+    }
+    finalizeSttRecording(mode, sttMediaRecorder.mimeType || mimeType || 'webm');
+  };
+  sttMediaRecorder.start(250);
+  sttRecording = true;
+  sttRecordingMode = mode;
+  sttRecordStartedAt = Date.now();
+  sttRecordMaxSec = mode === 'test' ? 30 : 300;
+  clearSttRecordTimer();
+  sttRecordTimer = setInterval(updateSttRecordTimerDisplay, 200);
+
+  showSttRecordingOverlay(mode);
+
+  if (mode === 'test') {
+    if (settingsSttRecordBtn) settingsSttRecordBtn.disabled = true;
+    if (settingsSttResultEl) settingsSttResultEl.value = '';
+    if (settingsSttTimerEl) settingsSttTimerEl.textContent = '00:00';
+    setSttRecordTestResult('');
+    setSttSettingsStatus('', '');
+  } else {
+    setStatus('', '');
+  }
+  updateMicButtonState();
+}
+
+function stopSttRecording() {
+  if (!sttRecording) return;
+  clearSttRecordTimer();
+  sttRecording = false;
+  hideSttRecordingOverlay();
+  if (settingsSttRecordBtn) {
+    settingsSttRecordBtn.disabled = false;
+    settingsSttRecordBtn.textContent = '开始录音';
+  }
+  if (sttMediaRecorder && sttMediaRecorder.state !== 'inactive') {
+    sttMediaRecorder.stop();
+  } else {
+    stopSttMedia();
+    sttRecordingMode = null;
+    sttRecordingDiscard = false;
+    updateMicButtonState();
+  }
+}
+
+function cancelSttRecording() {
+  if (!sttRecording) return;
+  sttRecordingDiscard = true;
+  stopSttRecording();
+}
+
+function showComposerSttPending(active) {
+  if (!inputEl) return;
+  sttComposerPendingActive = active;
+  if (composerInputWrapEl) composerInputWrapEl.hidden = false;
+  if (active) {
+    inputEl.value = '';
+    inputEl.disabled = true;
+    inputEl.placeholder = STT_RECOGNIZING_HINT;
+    inputEl.classList.add('is-stt-pending');
+  } else {
+    inputEl.disabled = false;
+    inputEl.placeholder = COMPOSER_INPUT_PLACEHOLDER;
+    inputEl.classList.remove('is-stt-pending');
+  }
+  updateComposerSendBtn();
+}
+
+function showSettingsSttTestPending(active) {
+  if (!settingsSttResultEl) return;
+  if (active) {
+    settingsSttResultEl.value = '';
+    settingsSttResultEl.placeholder = STT_RECOGNIZING_HINT;
+    settingsSttResultEl.classList.add('is-stt-pending');
+  } else {
+    settingsSttResultEl.placeholder = SETTINGS_STT_RESULT_PLACEHOLDER;
+    settingsSttResultEl.classList.remove('is-stt-pending');
+  }
+}
+
+async function finalizeSttRecording(mode, mimeType) {
+  const discard = sttRecordingDiscard;
+  sttRecordingDiscard = false;
+  const chunks = discard ? [] : sttAudioChunks;
+  sttAudioChunks = [];
+  await stopSttMedia();
+  sttMediaRecorder = null;
+  sttRecordingMode = null;
+  updateMicButtonState();
+
+  if (discard) {
+    if (mode === 'test') {
+      showSettingsSttTestPending(false);
+      setSttSettingsStatus('', '');
+    } else showComposerSttPending(false);
+    return;
+  }
+
+  if (!chunks.length) {
+    if (mode === 'test') {
+      showSettingsSttTestPending(false);
+      setSttRecordTestResult('failure');
+    } else showComposerSttPending(false);
+    return;
+  }
+
+  const blob = new Blob(chunks, { type: mimeType || 'audio/webm' });
+  const ext = (mimeType || '').includes('mp4') ? 'mp4' : 'webm';
+
+  if (mode === 'test') {
+    showSettingsSttTestPending(true);
+    if (settingsSttRecordBtn) settingsSttRecordBtn.disabled = true;
+  } else if (micBtn) {
+    micBtn.disabled = true;
+  }
+
+  try {
+    const data = await blobToBase64(blob);
+    const result = await window.qizi.transcribeStt({ data, ext });
+    if (!result?.ok) {
+      const err = result?.error || '识别失败';
+      if (mode === 'test') {
+        showSettingsSttTestPending(false);
+        setSttRecordTestResult('failure');
+      } else {
+        showComposerSttPending(false);
+        setStatus(err, 'error');
+      }
+      return;
+    }
+    const text = String(result.text || '').trim();
+    if (mode === 'test') {
+      showSettingsSttTestPending(false);
+      if (settingsSttResultEl) settingsSttResultEl.value = text;
+      setSttRecordTestResult(text ? 'success' : 'failure');
+    } else if (text) {
+      showComposerSttPending(false);
+      insertTextAtInputCursor(text);
+    } else {
+      showComposerSttPending(false);
+      setStatus('未识别到文字', 'error');
+    }
+  } catch (err) {
+    const errText = err.message || '识别失败';
+    if (mode === 'test') {
+      showSettingsSttTestPending(false);
+      setSttRecordTestResult('failure');
+    } else {
+      showComposerSttPending(false);
+      setStatus(errText, 'error');
+    }
+  } finally {
+    if (settingsSttRecordBtn) settingsSttRecordBtn.disabled = false;
+    if (sttComposerPendingActive) showComposerSttPending(false);
+    if (settingsSttResultEl?.classList.contains('is-stt-pending')) {
+      showSettingsSttTestPending(false);
+    }
+    updateMicButtonState();
+  }
+}
+
+function insertTextAtInputCursor(text) {
+  if (!inputEl || !text) return;
+  const start = inputEl.selectionStart ?? inputEl.value.length;
+  const end = inputEl.selectionEnd ?? start;
+  const before = inputEl.value.slice(0, start);
+  const after = inputEl.value.slice(end);
+  const spacer = before && !before.endsWith(' ') && !before.endsWith('\n') ? ' ' : '';
+  inputEl.value = before + spacer + text + after;
+  const pos = (before + spacer + text).length;
+  inputEl.setSelectionRange(pos, pos);
+  inputEl.focus();
+  inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+  updateComposerSendBtn();
+}
+
+async function installSttFromSettings() {
+  if (!window.qizi?.installStt) return;
+  if (settingsSttInstallBtn) settingsSttInstallBtn.disabled = true;
+  if (settingsSttProgressEl) settingsSttProgressEl.hidden = false;
+  if (settingsSttProgressFillEl) settingsSttProgressFillEl.style.width = '0%';
+  setSttSettingsStatus('准备安装…', 'pending');
+
+  const result = await window.qizi.installStt();
+  if (result?.ok) {
+    setSttSettingsStatus('安装完成', 'ok');
+    if (settingsSttProgressFillEl) settingsSttProgressFillEl.style.width = '100%';
+    await refreshSttUi();
+  } else {
+    if (result?.needsPython) {
+      setSttSettingsStatus(
+        `${result.error || '未检测到 Python 3'} 安装完成后点击「安装语音识别」重试。`,
+        'error',
+      );
+    } else {
+      setSttSettingsStatus(result?.error || '安装失败', 'error');
+    }
+    if (settingsSttInstallBtn) settingsSttInstallBtn.disabled = false;
+  }
+}
+
+async function uninstallSttFromSettings() {
+  if (!window.qizi?.uninstallStt) return;
+  if (!window.confirm('确定卸载语音识别？将删除已下载的模型与依赖，主界面麦克风将不可用。')) return;
+  if (sttRecording) stopSttRecording();
+  setSttSettingsStatus('正在卸载…', 'pending');
+  if (settingsSttUninstallBtn) settingsSttUninstallBtn.disabled = true;
+  const result = await window.qizi.uninstallStt();
+  if (result?.ok) {
+    sttReady = false;
+    setSttSettingsStatus('已卸载', 'ok');
+    if (settingsSttProgressEl) settingsSttProgressEl.hidden = true;
+    await refreshSttUi();
+  } else {
+    setSttSettingsStatus(result?.error || '卸载失败', 'error');
+  }
+  if (settingsSttUninstallBtn) settingsSttUninstallBtn.disabled = false;
+}
+
+function switchSettingsTab(tabId) {
+  const next = tabId === 'stt' ? 'stt' : 'gateway';
+  if (next !== 'stt' && sttRecording && sttRecordingMode === 'test') {
+    stopSttRecording();
+  }
+  activeSettingsTab = next;
+
+  const tabs = [
+    { id: 'gateway', btn: settingsTabGatewayBtn, panel: settingsPanelGatewayEl },
+    { id: 'stt', btn: settingsTabSttBtn, panel: settingsPanelSttEl },
+  ];
+  tabs.forEach(({ id, btn, panel }) => {
+    const active = id === next;
+    if (btn) {
+      btn.classList.toggle('is-active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    }
+    if (panel) {
+      panel.classList.toggle('is-active', active);
+      panel.hidden = !active;
+    }
+  });
+
+  if (next === 'gateway') {
+    requestAnimationFrame(syncSettingsTestStatusLayout);
+  }
+  updateSttUninstallFooterVisibility(sttReady);
+}
+
 async function populateSettingsForm() {
   if (!window.qizi?.getSettings) return;
   const snapshot = await window.qizi.getSettings();
@@ -3540,19 +4190,31 @@ async function populateSettingsForm() {
   if (settingsLaunchAtLogin) settingsLaunchAtLogin.checked = snapshot.launchAtLogin === true;
   if (settingsShowMainOnLaunch) settingsShowMainOnLaunch.checked = snapshot.showMainOnLaunch !== false;
   setSettingsStatus('', '');
+  await renderSttSettingsPanel();
 }
 
 async function openSettingsModal() {
   if (!settingsModal) return;
   hideAgentPopup();
   hideModelPopup();
+  switchSettingsTab('gateway');
   await populateSettingsForm();
   settingsModal.hidden = false;
   requestAnimationFrame(syncSettingsTestStatusLayout);
 }
 
+function clearSttSettingsSession() {
+  showSettingsSttTestPending(false);
+  setSttRecordTestResult('');
+  if (settingsSttResultEl) settingsSttResultEl.value = '';
+  if (settingsSttTimerEl) settingsSttTimerEl.textContent = '00:00';
+  setSttSettingsStatus('', '');
+}
+
 function closeSettingsModal() {
   if (!settingsModal) return;
+  if (sttRecording && sttRecordingMode === 'test') stopSttRecording();
+  clearSttSettingsSession();
   settingsModal.hidden = true;
   setSettingsStatus('', '');
   if (settingsTokenInput) {
@@ -3623,6 +4285,12 @@ if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', closeSettingsMo
 if (settingsCancelBtn) settingsCancelBtn.addEventListener('click', closeSettingsModal);
 if (settingsSaveBtn) settingsSaveBtn.addEventListener('click', saveSettingsFromForm);
 if (settingsTestBtn) settingsTestBtn.addEventListener('click', testSettingsConnection);
+if (settingsTabGatewayBtn) {
+  settingsTabGatewayBtn.addEventListener('click', () => switchSettingsTab('gateway'));
+}
+if (settingsTabSttBtn) {
+  settingsTabSttBtn.addEventListener('click', () => switchSettingsTab('stt'));
+}
 window.addEventListener('resize', syncSettingsTestStatusLayout);
 if (settingsTokenToggle && settingsTokenInput) {
   settingsTokenToggle.addEventListener('click', () => {
@@ -3633,12 +4301,57 @@ if (settingsTokenToggle && settingsTokenInput) {
 }
 if (settingsModal) {
   settingsModal.addEventListener('click', (e) => {
-    if (e.target === settingsModal) closeSettingsModal();
+    e.stopPropagation();
   });
+  const settingsPanel = settingsModal.querySelector('.settings-panel');
+  if (settingsPanel) {
+    settingsPanel.addEventListener('click', (e) => {
+      e.stopPropagation();
+    });
+  }
 }
 if (window.qizi?.onOpenSettings) {
   window.qizi.onOpenSettings(() => {
     openSettingsModal();
+  });
+}
+
+if (window.qizi?.onSttProgress) {
+  window.qizi.onSttProgress((payload) => {
+    if (settingsSttProgressTextEl) {
+      settingsSttProgressTextEl.textContent = payload?.message || '';
+    }
+    if (settingsSttProgressFillEl && typeof payload?.percent === 'number') {
+      settingsSttProgressFillEl.style.width = `${Math.max(0, Math.min(100, payload.percent))}%`;
+    }
+    if (payload?.message) {
+      setSttSettingsStatus(payload.message, 'pending');
+    }
+  });
+}
+
+if (settingsSttInstallBtn) {
+  settingsSttInstallBtn.addEventListener('click', installSttFromSettings);
+}
+if (settingsSttUninstallBtn) {
+  settingsSttUninstallBtn.addEventListener('click', uninstallSttFromSettings);
+}
+if (settingsSttRecordBtn) {
+  settingsSttRecordBtn.addEventListener('click', () => {
+    if (!sttRecording) startSttRecording('test');
+  });
+}
+if (sttRecordingStopBtn) {
+  sttRecordingStopBtn.addEventListener('click', () => stopSttRecording());
+}
+if (sttRecordingCancelBtn) {
+  sttRecordingCancelBtn.addEventListener('click', () => cancelSttRecording());
+}
+if (micBtn) {
+  micBtn.addEventListener('click', () => {
+    if (!sttReady || busy) return;
+    if (sttRecording && sttRecordingMode === 'composer') stopSttRecording();
+    else if (!sttRecording) startSttRecording('composer');
   });
 }
 
