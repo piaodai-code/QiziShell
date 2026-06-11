@@ -6,6 +6,7 @@
     "start": "electron .",
     "restart": "bash scripts/restart-dev.sh",
     "build": "electron-builder --mac --publish never",
+    "ship": "bash scripts/ship.sh",
     "release": "bash scripts/release-mac.sh"
   },
   "build": {
