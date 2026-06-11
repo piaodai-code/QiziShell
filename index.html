@@ -2,6 +2,7 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none';">
   <title>启孜</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -248,6 +249,7 @@
       </div>
     </div>
   </div>
+  <script src="dompurify.min.js"></script>
   <script src="marked.min.js"></script>
   <script src="message-time.js"></script>
   <script src="app.js"></script>

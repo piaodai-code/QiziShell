@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -25,17 +25,21 @@
       "main.js",
       "preload.js",
       "gateway-ws.js",
+      "tls-policy.js",
+      "export-html.js",
       "stt-manager.js",
       "device-identity.js",
       "device-auth-store.js",
       "device-auth-payload.js",
       "index.html",
       "about.html",
+      "about.js",
       "about.css",
       "style.css",
       "app.js",
       "message-time.js",
       "marked.min.js",
+      "dompurify.min.js",
       "assets/icons/**",
       "assets/about-icon.png",
       "tray-icon.png"
@@ -46,6 +50,8 @@
     "electron-builder": "^26.8.1"
   },
   "dependencies": {
+    "dompurify": "^3.4.9",
+    "isomorphic-dompurify": "^3.16.0",
     "marked": "^18.0.5",
     "tmp-promise": "^3.0.3",
     "ws": "^8.21.0"

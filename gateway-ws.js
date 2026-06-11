@@ -12,6 +12,7 @@ const {
   storeDeviceAuthToken,
   clearDeviceAuthToken,
 } = require('./device-auth-store');
+const { rejectUnauthorizedForUrl } = require('./tls-policy');
 
 const PROTOCOL_VERSION = 4;
 // operator UI 客户端（TUI / Control UI）在 chat.send 时不写入 SenderId/SenderName，
@@ -34,9 +35,8 @@ function isSecureGatewayUrl(url) {
 
 function buildGatewayWsOptions(url) {
   const options = { maxPayload: 25 * 1024 * 1024 };
-  // OpenClaw 本地 Gateway 常用自签名证书；Node ws 默认会拒绝，导致 SSL handshake failed
   if (isSecureGatewayUrl(url)) {
-    options.rejectUnauthorized = false;
+    options.rejectUnauthorized = rejectUnauthorizedForUrl(url);
   }
   return options;
 }

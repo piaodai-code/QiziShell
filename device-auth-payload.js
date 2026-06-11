@@ -5,21 +5,25 @@ function normalizeDeviceMetadata(value) {
   return trimmed.replace(/[A-Z]/g, (ch) => String.fromCharCode(ch.charCodeAt(0) + 32));
 }
 
+function sanitizePayloadField(value) {
+  return String(value ?? '').replace(/\|/g, '');
+}
+
 function buildDeviceAuthPayloadV3(params) {
-  const scopes = params.scopes.join(',');
-  const token = params.token ?? '';
+  const scopes = sanitizePayloadField(params.scopes.join(','));
+  const token = sanitizePayloadField(params.token ?? '');
   const platform = normalizeDeviceMetadata(params.platform);
   const deviceFamily = normalizeDeviceMetadata(params.deviceFamily);
   return [
     'v3',
-    params.deviceId,
-    params.clientId,
-    params.clientMode,
-    params.role,
+    sanitizePayloadField(params.deviceId),
+    sanitizePayloadField(params.clientId),
+    sanitizePayloadField(params.clientMode),
+    sanitizePayloadField(params.role),
     scopes,
-    String(params.signedAtMs),
+    sanitizePayloadField(String(params.signedAtMs)),
     token,
-    params.nonce,
+    sanitizePayloadField(params.nonce),
     platform,
     deviceFamily,
   ].join('|');

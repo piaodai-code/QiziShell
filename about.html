@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';">
   <title>About QiziShell</title>
   <link rel="stylesheet" href="about.css">
 </head>
@@ -16,9 +17,6 @@
     <p class="about-copy">OpenClaw © OpenClaw Authors</p>
     <p class="about-copy">QiziShell © 2026 Zhuo Wang</p>
   </main>
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    document.getElementById('about-version').textContent = params.get('version') || '—';
-  </script>
+  <script src="about.js"></script>
 </body>
 </html>

@@ -351,6 +351,23 @@ function wrapMarkdownTables(html) {
   ));
 }
 
+const RICH_HTML_PURIFY_CONFIG = {
+  ALLOWED_TAGS: [
+    'a', 'b', 'blockquote', 'br', 'code', 'div', 'em', 'h1', 'h2', 'h3', 'h4',
+    'hr', 'i', 'img', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'table', 'tbody',
+    'td', 'th', 'thead', 'tr', 'ul',
+  ],
+  ALLOWED_ATTR: ['href', 'title', 'alt', 'src', 'class', 'colspan', 'rowspan'],
+  ALLOW_DATA_ATTR: false,
+};
+
+function sanitizeRichHtml(html) {
+  if (typeof DOMPurify !== 'undefined' && typeof DOMPurify.sanitize === 'function') {
+    return DOMPurify.sanitize(String(html || ''), RICH_HTML_PURIFY_CONFIG);
+  }
+  return escapeHtml(String(html || ''));
+}
+
 function parseMarkdown(text, options = {}) {
   const parse = getMarkedParser();
   if (parse) {
@@ -362,53 +379,20 @@ function parseMarkdown(text, options = {}) {
         ...options.markedOptions,
       });
       if (typeof result === 'string' && result.trim()) {
-        return wrapMarkdownTables(result);
+        return sanitizeRichHtml(wrapMarkdownTables(result));
       }
     } catch (e) {
       console.warn('[qizi] markdown parse failed:', e);
     }
   }
-  return wrapMarkdownTables(String(text || '')
+  return sanitizeRichHtml(wrapMarkdownTables(String(text || '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\n/g, '<br>'));
-}
-
-function sanitizeExportHtml(html) {
-  return String(html || '')
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/\son\w+="[^"]*"/gi, '')
-    .replace(/\son\w+='[^']*'/gi, '');
-}
-
-function renderExportQuoteBlock(label, text) {
-  const author = escapeHtml(label || '未知');
-  const bodyHtml = parseMarkdown(text, { breaks: true });
-  return `<div class="export-quote"><div class="export-quote-author">${author}</div>${bodyHtml}</div>`;
-}
-
-function renderExportMessageHtml(msg) {
-  if (!msg) return '';
-  const parts = [];
-  const forwardRef = resolveMessageForwardRef(msg);
-  if (forwardRef?.text) {
-    parts.push(renderExportQuoteBlock(`转发 · ${forwardRef.authorLabel || '未知'}`, forwardRef.text));
-  } else if (msg.quote?.text) {
-    parts.push(renderExportQuoteBlock(`引用 · ${msg.quote.authorLabel || '未知'}`, msg.quote.text));
-  }
-
-  let bodySource = msg.who === 'me'
-    ? getUserMessageDisplayText(msg)
-    : String(msg.text || '');
-  bodySource = bodySource.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n').trim();
-  if (bodySource) {
-    parts.push(`<div class="export-body">${parseMarkdown(bodySource, { breaks: true })}</div>`);
-  }
-  return sanitizeExportHtml(parts.join(''));
+    .replace(/\n/g, '<br>')));
 }
 
 function shouldUseStreamingPlainText(message) {
@@ -966,20 +950,34 @@ function buildMergedForwardSnapshot(indices) {
 }
 
 function buildExportEntryForMessage(msg) {
-  const text = getMessageSelectableText(msg);
-  return {
+  const forwardRef = resolveMessageForwardRef(msg);
+  const entry = {
     author: getMessageAuthorLabel(msg),
     time: msg.time || '',
-    text,
-    html: renderExportMessageHtml(msg),
+    text: msg.who === 'me'
+      ? getUserMessageDisplayText(msg)
+      : String(msg.text || ''),
   };
+  entry.text = entry.text.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n').trim();
+  if (forwardRef?.text) {
+    entry.forward = {
+      authorLabel: forwardRef.authorLabel || '未知',
+      text: forwardRef.text,
+    };
+  } else if (msg.quote?.text) {
+    entry.quote = {
+      authorLabel: msg.quote.authorLabel || '未知',
+      text: msg.quote.text,
+    };
+  }
+  return entry;
 }
 
 function buildExportEntries(indices) {
   const sorted = [...indices].sort((a, b) => a - b);
   return sorted
     .map((idx) => buildExportEntryForMessage(messages[idx]))
-    .filter((entry) => entry.text || entry.html);
+    .filter((entry) => entry.text || entry.quote?.text || entry.forward?.text);
 }
 
 async function exportMessagesToWord(entries, { exitMultiSelectOnSuccess = false } = {}) {
@@ -1437,6 +1435,15 @@ function mergeMessagePair(local, server) {
 
 function assistantTextsMatch(a, b) {
   return String(a?.text || '').trim() === String(b?.text || '').trim();
+}
+
+// 流式期间仅用 history 中「延续当前正文」的更长片段，避免被无关中间气泡覆盖。
+function shouldPreferHistoryStreamText(localText, serverText) {
+  const local = String(localText || '');
+  const server = String(serverText || '');
+  if (!server || server.length <= local.length) return false;
+  if (!local) return true;
+  return server.startsWith(local);
 }
 
 function dedupeAssistantMessages(list) {
@@ -2065,7 +2072,7 @@ async function syncHistoryFromGateway() {
       if (streamingMsgs.length > 0) {
         for (const sm of streamingMsgs) {
           const lastThem = [...result.messages].reverse().find((m) => m.who === 'them');
-          if (lastThem && (lastThem.text || '').length > (sm.text || '').length) {
+          if (lastThem && shouldPreferHistoryStreamText(sm.text, lastThem.text)) {
             sm.text = lastThem.text;
             scheduleStreamingUpdate(sm.runId);
           }
@@ -2119,7 +2126,7 @@ async function pollStreamHistoryOnce(runId) {
 
     if (historyResult?.ok) {
       const lastThem = [...historyResult.messages].reverse().find((m) => m.who === 'them');
-      if (lastThem && (lastThem.text || '').length > (target.text || '').length) {
+      if (lastThem && shouldPreferHistoryStreamText(target.text, lastThem.text)) {
         target.text = lastThem.text;
         streamPollStableCount = 0;
         scheduleStreamingUpdate(runId);

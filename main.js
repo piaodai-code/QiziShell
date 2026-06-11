@@ -3,12 +3,25 @@ const { spawn } = require('child_process');
 
 const openLinksExternally = !process.argv.includes('--open-links-in-shell');
 
+const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-policy');
+const { buildExportWordHtml } = require('./export-html');
+
+function isSafeExternalHttpUrl(url) {
+  if (typeof url !== 'string') return false;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function isExternalUrl(url) {
-  return typeof url === 'string' && /^https?:\/\//i.test(url);
+  return isSafeExternalHttpUrl(url);
 }
 
 function openExternal(url) {
-  if (isExternalUrl(url)) {
+  if (isSafeExternalHttpUrl(url)) {
     shell.openExternal(url);
     return true;
   }
@@ -41,6 +54,35 @@ const {
 const { file: tmpFile } = require('tmp-promise');
 
 let mainWindow = null;
+
+function getAuthorizedMainWindow(event) {
+  if (!mainWindow || mainWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== mainWindow) return null;
+  return mainWindow;
+}
+
+function forbiddenSenderResult() {
+  return { ok: false, error: '仅主窗口可调用此功能' };
+}
+
+function isAllowedSttAudioPath(audioPath) {
+  if (!audioPath || typeof audioPath !== 'string') return false;
+  let resolved;
+  try {
+    resolved = fs.realpathSync(audioPath);
+  } catch {
+    return false;
+  }
+  const allowedRoots = [
+    app.getPath('temp'),
+    path.join(app.getPath('userData'), 'recordings'),
+  ].map((root) => {
+    const dir = path.resolve(root);
+    return dir.endsWith(path.sep) ? dir : `${dir}${path.sep}`;
+  });
+  return allowedRoots.some((root) => resolved.startsWith(root));
+}
 let aboutWindow = null;
 let tray = null;
 let isQuitting = false;
@@ -79,13 +121,18 @@ if (!gotSingleInstanceLock) {
   process.exit(0);
 }
 app.on('second-instance', () => {
-  // 第二个实例被拒后，主实例被唤醒 → 显示主界面
-  if (mainWindow) {
-    if (!mainWindow.isVisible()) mainWindow.show();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  }
+  showMainWindow();
 });
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+    if (process.platform === 'darwin' && app.dock) app.dock.show();
+  }
+  mainWindow.focus();
+}
 
 function getSessionKeyPath() {
   return path.join(app.getPath('userData'), 'session-key');
@@ -264,7 +311,7 @@ function fetchGatewayResource(url, { headers = {}, timeoutMs = 15000 } = {}) {
         method: 'GET',
         headers,
         timeout: timeoutMs,
-        ...(parsed.protocol === 'https:' ? { rejectUnauthorized: false } : {}),
+        ...(parsed.protocol === 'https:' ? { rejectUnauthorized: rejectUnauthorizedForUrl(url) } : {}),
       },
       (res) => {
         const chunks = [];
@@ -356,8 +403,8 @@ function saveShellSettings(next) {
   };
   if (!merged.wsUrl) delete merged.wsUrl;
   if (!merged.token) delete merged.token;
-  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
-  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2), 'utf8');
+  fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2), { encoding: 'utf8', mode: 0o600 });
   if (process.platform === 'darwin') {
     app.setLoginItemSettings({
       openAtLogin: merged.launchAtLogin === true,
@@ -438,13 +485,7 @@ function restartGatewayAfterSettings() {
 }
 
 function openSettings() {
-  if (!mainWindow || mainWindow.isDestroyed()) createWindow();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  if (!mainWindow.isVisible()) {
-    mainWindow.show();
-    if (process.platform === 'darwin' && app.dock) app.dock.show();
-  }
-  mainWindow.focus();
+  showMainWindow();
   safeSendTo(mainWindow.webContents, 'openclaw:open-settings');
 }
 
@@ -648,9 +689,66 @@ function extractOpenClawFileMeta(message) {
   }));
 }
 
+function normalizeHistoryRole(role) {
+  if (typeof role !== 'string') return '';
+  return role.trim().toLowerCase().replace(/-/g, '_');
+}
+
+function isToolHistoryRole(role) {
+  const flat = normalizeHistoryRole(role).replace(/_/g, '');
+  return flat === 'tool' || flat === 'toolresult' || flat === 'function';
+}
+
+function isToolHistoryMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  const role = normalizeHistoryRole(message.role ?? message.who);
+  if (isToolHistoryRole(role)) return true;
+  if (role === 'user' || role === 'assistant' || role === 'me' || role === 'them') {
+    return false;
+  }
+  if (message.toolCallId || message.tool_call_id) return true;
+  if (message.toolName || message.tool_name) return true;
+  return false;
+}
+
+function looksLikeLeakedToolPayloadText(text) {
+  const raw = String(text || '').trim();
+  if (!raw || raw.length < 40) return false;
+  if (raw.includes('<<<EXTERNAL_UNTRUSTED_CONTENT')) return true;
+  if (!raw.startsWith('{')) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    const ext = parsed.externalContent;
+    if (ext && typeof ext === 'object') {
+      const source = ext.source;
+      if (source === 'web_search' || source === 'web_fetch') return true;
+    }
+    if ('query' in parsed && Array.isArray(parsed.results) && ('provider' in parsed || 'tookMs' in parsed)) {
+      return true;
+    }
+    if ('url' in parsed && 'fetchedAt' in parsed && ('extractMode' in parsed || typeof parsed.text === 'string')) {
+      return true;
+    }
+  } catch {
+    // not JSON tool payload
+  }
+  return false;
+}
+
+function shouldHideHistoryMessage(message) {
+  if (isToolHistoryMessage(message)) return true;
+  const role = normalizeHistoryRole(message?.role ?? message?.who);
+  if (role === 'assistant' || role === 'them' || !role) {
+    return looksLikeLeakedToolPayloadText(extractMessageText(message));
+  }
+  return false;
+}
+
 function convertHistoryMessages(serverMessages) {
   if (!Array.isArray(serverMessages)) return [];
   return serverMessages
+    .filter((m) => !shouldHideHistoryMessage(m))
     .map((m) => {
       const role = m?.role || m?.who;
       const { text, images } = extractMessageParts(m);
@@ -680,7 +778,13 @@ function convertHistoryMessages(serverMessages) {
 
 function resolveDeltaText(currentText, payload) {
   const snapshot = payload.message == null ? null : extractMessageText(payload.message);
+  if (typeof snapshot === 'string' && looksLikeLeakedToolPayloadText(snapshot)) {
+    return currentText;
+  }
   if (typeof payload.deltaText === 'string') {
+    if (looksLikeLeakedToolPayloadText(payload.deltaText)) {
+      return currentText;
+    }
     if (payload.replace === true) return payload.deltaText;
     if (!currentText) return typeof snapshot === 'string' ? snapshot : payload.deltaText;
     if (typeof snapshot === 'string') {
@@ -688,9 +792,15 @@ function resolveDeltaText(currentText, payload) {
       if (prefixLength === currentText.length && snapshot.slice(0, prefixLength) === currentText) {
         return `${currentText}${payload.deltaText}`;
       }
+      if (looksLikeLeakedToolPayloadText(snapshot)) {
+        return currentText;
+      }
       return snapshot;
     }
     return `${currentText}${payload.deltaText}`;
+  }
+  if (typeof snapshot === 'string' && looksLikeLeakedToolPayloadText(snapshot)) {
+    return currentText;
   }
   return typeof snapshot === 'string' ? snapshot : currentText;
 }
@@ -995,7 +1105,11 @@ function handleOwnedGatewayChatEvent(payload, matched) {
 
   if (payload.state === 'final') {
     const finalText = extractMessageText(payload.message);
-    if (finalText && finalText.length >= run.fullText.length) {
+    if (
+      finalText
+      && finalText.length >= run.fullText.length
+      && !looksLikeLeakedToolPayloadText(finalText)
+    ) {
       run.fullText = finalText;
     }
     finishClientRun(clientRunId, { ok: true });
@@ -1120,12 +1234,16 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
-      devTools: true,
+      devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
     },
   });
 
-  mainWindow.webContents.session.setCertificateVerifyProc((_request, callback) => {
-    callback(0);
+  mainWindow.webContents.session.setCertificateVerifyProc((request, callback) => {
+    if (shouldAllowInsecureTls(request.hostname)) {
+      callback(0);
+      return;
+    }
+    callback(-2);
   });
 
   mainWindow.on('resize', saveWindowState);
@@ -1150,15 +1268,25 @@ function createWindow() {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (openLinksExternally && openExternal(url)) {
-      return { action: 'deny' };
+    if (openLinksExternally && isSafeExternalHttpUrl(url)) {
+      openExternal(url);
     }
-    return { action: 'allow' };
+    return { action: 'deny' };
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (openLinksExternally && isExternalUrl(url)) {
+    const currentUrl = mainWindow.webContents.getURL();
+    if (!url || url === currentUrl) return;
+    try {
+      const target = new URL(url);
+      const current = new URL(currentUrl);
+      if (target.href === current.href) return;
+    } catch {
       event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    if (openLinksExternally && isSafeExternalHttpUrl(url)) {
       openExternal(url);
     }
   });
@@ -1179,9 +1307,7 @@ function toggleMainWindow() {
     mainWindow.hide();
     if (process.platform === 'darwin' && app.dock) app.dock.hide();
   } else {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
+    showMainWindow();
   }
 }
 
@@ -1698,10 +1824,20 @@ async function streamChat(event, { message, attachments, runId }) {
   });
 }
 
-ipcMain.handle('openclaw:check', () => checkConnection());
-ipcMain.handle('openclaw:settings:get', () => getSettingsSnapshot());
-ipcMain.handle('openclaw:settings:test', (_event, payload) => testGatewaySettings(payload || {}));
-ipcMain.handle('openclaw:settings:save', (_event, payload) => {
+ipcMain.handle('openclaw:check', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return checkConnection();
+});
+ipcMain.handle('openclaw:settings:get', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getSettingsSnapshot();
+});
+ipcMain.handle('openclaw:settings:test', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return testGatewaySettings(payload || {});
+});
+ipcMain.handle('openclaw:settings:save', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     const current = loadShellSettings();
     const wsUrl = typeof payload?.wsUrl === 'string' ? payload.wsUrl.trim() : current.wsUrl;
@@ -1729,6 +1865,7 @@ ipcMain.handle('openclaw:open-settings', () => {
 ipcMain.handle('openclaw:stt:status', () => getSttStatus());
 
 ipcMain.handle('openclaw:stt:install', async (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   const sender = event.sender;
   return installStt((payload) => {
     safeSendTo(sender, 'openclaw:stt:progress', payload);
@@ -1737,10 +1874,17 @@ ipcMain.handle('openclaw:stt:install', async (event) => {
 
 ipcMain.handle('openclaw:stt:uninstall', () => uninstallStt());
 
-ipcMain.handle('openclaw:stt:transcribe', async (_event, payload) => {
+ipcMain.handle('openclaw:stt:transcribe', async (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   const audioPath = payload?.audioPath;
-  if (audioPath && fs.existsSync(audioPath)) {
-    return transcribeAudioFile(audioPath);
+  if (audioPath) {
+    if (!isAllowedSttAudioPath(audioPath)) {
+      return { ok: false, error: '音频路径无效' };
+    }
+    if (fs.existsSync(audioPath)) {
+      return transcribeAudioFile(audioPath);
+    }
+    return { ok: false, error: '音频文件不存在' };
   }
   const data = payload?.data;
   const ext = payload?.ext || 'webm';
@@ -1765,16 +1909,44 @@ ipcMain.handle('openclaw:stt:transcribe', async (_event, payload) => {
   }
 });
 
-ipcMain.handle('openclaw:getSessionKey', () => getSessionKey());
-ipcMain.handle('openclaw:agents:list', () => listAgents());
-ipcMain.handle('openclaw:forward', (_event, payload) => forwardMessageToAgents(payload || {}));
-ipcMain.handle('openclaw:session:switch', (_event, agentId) => switchToAgent(agentId));
-ipcMain.handle('openclaw:history', () => loadChatHistory());
-ipcMain.handle('openclaw:models:list', () => listModels());
-ipcMain.handle('openclaw:models:current', () => getCurrentModel());
-ipcMain.handle('openclaw:session:info', () => getSessionInfo());
-ipcMain.handle('openclaw:models:set', (_event, qualifiedModel) => setSessionModel(qualifiedModel));
-ipcMain.handle('openclaw:abort', async () => {
+ipcMain.handle('openclaw:getSessionKey', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getSessionKey();
+});
+ipcMain.handle('openclaw:agents:list', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return listAgents();
+});
+ipcMain.handle('openclaw:forward', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return forwardMessageToAgents(payload || {});
+});
+ipcMain.handle('openclaw:session:switch', (event, agentId) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return switchToAgent(agentId);
+});
+ipcMain.handle('openclaw:history', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return loadChatHistory();
+});
+ipcMain.handle('openclaw:models:list', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return listModels();
+});
+ipcMain.handle('openclaw:models:current', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getCurrentModel();
+});
+ipcMain.handle('openclaw:session:info', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getSessionInfo();
+});
+ipcMain.handle('openclaw:models:set', (event, qualifiedModel) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return setSessionModel(qualifiedModel);
+});
+ipcMain.handle('openclaw:abort', async (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   const client = gateway;
   const runs = [...activeRuns.entries()];
 
@@ -1854,8 +2026,8 @@ function mimeFromImagePath(filePath) {
 }
 
 ipcMain.handle('openclaw:pickImages', async (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return { ok: false, error: '找不到主窗口' };
+  const win = getAuthorizedMainWindow(event);
+  if (!win) return forbiddenSenderResult();
   const result = await dialog.showOpenDialog(win, {
     title: '选择图片',
     properties: ['openFile', 'multiSelections'],
@@ -1884,79 +2056,14 @@ ipcMain.handle('openclaw:pickImages', async (event) => {
   }
 });
 
-function escapeExportHtml(text) {
-  return String(text || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-const EXPORT_WORD_STYLES = `
-body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; font-size: 14px; line-height: 1.7; color: #222; }
-.export-entry { margin-bottom: 22px; page-break-inside: avoid; }
-.export-entry-header { margin: 0 0 10px 0; font-size: 13px; }
-.export-entry-header strong { font-weight: 600; }
-.export-entry-time { color: #888; font-size: 12px; }
-.export-entry-body { font-size: 14px; line-height: 1.7; }
-.export-quote { margin: 0 0 10px 0; padding: 8px 10px; border: 1px solid #ddd; border-radius: 8px; background: #f7f7f7; }
-.export-quote-author { font-size: 11px; font-weight: 600; color: #666; margin-bottom: 6px; }
-.export-body p { margin: 0 0 8px 0; }
-.export-body p:last-child { margin-bottom: 0; }
-.export-body strong { font-weight: 600; }
-.export-body em { font-style: italic; }
-.export-body code { font-family: Menlo, Consolas, monospace; font-size: 12px; background: #f0f0f0; padding: 1px 4px; border-radius: 3px; }
-.export-body pre { margin: 8px 0; padding: 10px 12px; background: #f5f5f5; border: 1px solid #ddd; border-radius: 6px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
-.export-body pre code { background: transparent; padding: 0; }
-.export-body table { border-collapse: collapse; margin: 8px 0; font-size: 12px; width: 100%; }
-.export-body th, .export-body td, .export-quote th, .export-quote td { border: 1px solid #ddd; padding: 6px 10px; text-align: left; }
-.export-body th, .export-quote th { background: #f5f5f5; font-weight: 600; }
-.export-body blockquote, .export-quote blockquote { border-left: 3px solid #ccc; margin: 8px 0; padding: 4px 12px; color: #666; }
-.export-body ul, .export-body ol, .export-quote ul, .export-quote ol { margin: 4px 0; padding-left: 22px; }
-.export-body li, .export-quote li { margin: 2px 0; }
-.export-body h1, .export-body h2, .export-body h3, .export-quote h1, .export-quote h2, .export-quote h3 { margin: 12px 0 6px 0; font-weight: 600; }
-.export-body h1, .export-quote h1 { font-size: 16px; }
-.export-body h2, .export-quote h2 { font-size: 15px; }
-.export-body h3, .export-quote h3 { font-size: 14px; }
-.export-body a, .export-quote a { color: #1976d2; text-decoration: underline; }
-.export-divider { border: none; border-top: 1px solid #ddd; margin: 18px 0; }
-`;
-
-function buildExportWordHtml(entries) {
-  const blocks = (Array.isArray(entries) ? entries : []).map((entry) => {
-    const author = escapeExportHtml(entry?.author || '未知');
-    const time = entry?.time
-      ? `<span class="export-entry-time"> ${escapeExportHtml(entry.time)}</span>`
-      : '';
-    const body = typeof entry?.html === 'string' && entry.html.trim()
-      ? entry.html
-      : escapeExportHtml(entry?.text || '').replace(/\r?\n/g, '<br/>');
-    return [
-      '<div class="export-entry">',
-      `<p class="export-entry-header"><strong>${author}</strong>${time}</p>`,
-      `<div class="export-entry-body">${body}</div>`,
-      '</div>',
-    ].join('');
-  });
-  return [
-    '<!DOCTYPE html>',
-    '<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word">',
-    '<head>',
-    '<meta charset="utf-8">',
-    '<title>QiziShell Export</title>',
-    `<style>${EXPORT_WORD_STYLES}</style>`,
-    '</head>',
-    '<body>',
-    blocks.join('<hr class="export-divider"/>'),
-    '</body></html>',
-  ].join('');
-}
-
 ipcMain.handle('openclaw:export:word', async (event, payload) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return { ok: false, error: '找不到主窗口' };
+  const win = getAuthorizedMainWindow(event);
+  if (!win) return forbiddenSenderResult();
   const entries = Array.isArray(payload?.entries) ? payload.entries : [];
   if (!entries.length) return { ok: false, error: '没有可导出的消息' };
+  if (entries.some((entry) => typeof entry?.html === 'string' && entry.html.trim())) {
+    return { ok: false, error: '导出格式无效' };
+  }
   const stamp = new Date().toISOString().slice(0, 10);
   const result = await dialog.showSaveDialog(win, {
     title: '保存为 Word 文档',
@@ -1976,8 +2083,8 @@ ipcMain.handle('openclaw:export:word', async (event, payload) => {
 });
 
 ipcMain.handle('openclaw:pickFiles', async (event) => {
-  const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win) return { ok: false, error: '找不到主窗口' };
+  const win = getAuthorizedMainWindow(event);
+  if (!win) return forbiddenSenderResult();
   const result = await dialog.showOpenDialog(win, {
     title: '选择文件',
     properties: ['openFile', 'multiSelections'],
@@ -2010,7 +2117,8 @@ ipcMain.handle('openclaw:pickFiles', async (event) => {
   }
 });
 
-ipcMain.handle('openclaw:screenshot', async () => {
+ipcMain.handle('openclaw:screenshot', async (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return new Promise((resolve) => {
     const tmpFile = path.join(os.tmpdir(), `qizi-shot-${Date.now()}.png`);
     // -i 交互式选区域；-x 不播快门声；-t png 输出格式
@@ -2042,7 +2150,8 @@ ipcMain.handle('openclaw:screenshot', async () => {
   });
 });
 
-ipcMain.handle('openclaw:normalize-image', async (_event, dataUrl) => {
+ipcMain.handle('openclaw:normalize-image', async (event, dataUrl) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     const normalized = await normalizeImageDataUrl(dataUrl);
     if (!normalized) {
@@ -2059,6 +2168,7 @@ ipcMain.handle('openclaw:normalize-image', async (_event, dataUrl) => {
 });
 
 ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId }) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     const imageList = Array.isArray(images) ? images : [];
     const fileList = Array.isArray(files) ? files : [];
@@ -2105,6 +2215,10 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   // 不调 app.quit() —— 让进程跟着菜单栏图标走
   // 点「退出」菜单时 isQuitting=true + app.quit() 才是真退
+});
+// macOS：点 Dock / 从 Spotlight 唤醒时，恢复已隐藏的主窗口
+app.on('activate', () => {
+  if (process.platform === 'darwin') showMainWindow();
 });
 // 真的退出前清理菜单栏图标，避免 macOS 状态栏残留
 app.on('before-quit', () => {
