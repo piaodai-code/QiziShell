@@ -1,0 +1,27 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Ship Release (一键发版)",
+      "type": "shell",
+      "command": "npm run ship -- ${input:shipVersion}",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated",
+        "focus": true
+      }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "shipVersion",
+      "type": "promptString",
+      "description": "新版本号（留空则用 package.json 当前版本）",
+      "default": ""
+    }
+  ]
+}

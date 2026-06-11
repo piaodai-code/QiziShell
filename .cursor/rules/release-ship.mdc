@@ -1,0 +1,24 @@
+---
+description: 用户说发版/发布/ship 时，由 Agent 直接执行一键发版，禁止让用户自己去终端
+alwaysApply: true
+---
+
+# QiziShell 一键发版（聊天触发）
+
+当用户说 **发版**、**发布**、**ship**、**打包上传**、**release**（可带版本号，如「发版 0.1.4」）时：
+
+1. **不要**让用户自己去终端、不要只给出命令让用户复制执行。
+2. **立即**用 Shell 工具在本机执行 `scripts/ship.sh`（通过 `npm run ship`）。
+3. 若用户给了新版本号，执行：`npm run ship -- <版本>`（不要 `v` 前缀，如 `0.1.4`）。
+4. 若用户只说「发版」未给版本，先确认是否用 `package.json` 当前版本；若上下文明确（如刚改完 version），直接用当前版本执行。
+5. 可选 `-m "说明"`：用户提供了 commit 说明时带上。
+6. 执行后汇报：commit/push 结果、本地 DMG 路径、tag、Release/Actions 链接；失败则读日志并修复，不要甩给用户终端命令。
+
+脚本路径：仓库内 `scripts/ship.sh`（当前根目录 `~/Documents/Code/qizi-shell`）  
+等价命令：在仓库根目录执行 `npm run ship -- <版本>`
+
+发版流程（脚本内部，勿拆给用户做）：
+- 在 `main` 分支 commit + push
+- `npm run build` → 本地 `dist/QiziShell-<version>-arm64.dmg`
+- `git tag v<version>` + push → GitHub Actions 上传
+- 若已安装且登录 `gh`，同时上传到 GitHub Release

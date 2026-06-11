@@ -31,7 +31,7 @@ function openExternal(url) {
 if (!app || typeof app.whenReady !== 'function') {
   console.error(
     '无法加载 Electron 主进程 API。\n' +
-    '请在终端运行: cd ~/Desktop/qizi-shell && npm start\n' +
+    '请在项目目录运行: npm start\n' +
     '(若在 Cursor 内置终端失败，请用系统「终端.app」启动)'
   );
   process.exit(1);

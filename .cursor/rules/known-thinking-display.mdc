@@ -1,0 +1,81 @@
+---
+description: 已知问题：部分 model 会在 QiziShell 泄露 thinking/commentary，暂不修复
+alwaysApply: true
+---
+
+# 已知问题：Thinking 显示（暂不修复）
+
+## 现象
+
+- 同一 session 在 **webchat** 通常不显示英文 thinking/commentary。
+- **QiziShell** 有时会在助手回复里出现大量英文思考过程，且往往出现在**正文之前**。
+- 常见模式：**流式过程中看起来正常**，在**结束/落盘/同步 history** 时 thinking 才出现在正文前。
+- 用户观察：更像 **agent 调用工具时**（搜索、读文件、分析代码）才出现，不是每条消息都有；与 model 的相关性可能是 **间接的**（某些 model 更爱调工具 / 更爱输出英文 commentary），根因待按工具回合验证。
+
+## 当前决策
+
+- **已修复（2026-06）**：`main.js` 的 `convertHistoryMessages` 过滤 `tool`/`tool_result`/`function` 及 search/fetch JSON 形泄漏；`resolveDeltaText` / `final` 加固；`app.js` 流式 history 轮询仅在接受「前缀延续」时覆盖。
+- 若再出现泄露，优先查是否为新工具形态或 assistant 正文内嵌工具输出，勿盲目恢复「按长度取更长 server 文本」。
+
+## 调查备忘（2026-06 结论，未改代码）
+
+**已确认：是「工具回合中间产物」泄露（任意会产出大段文本的工具），不是 model 原生 thinking。**
+
+### 用户实锤样本（伊朗战机损失 / CRS 交叉验证）
+
+同一轮里 QiziShell 在正式中文答复前连续出现多段：
+
+- `{ "query": "...", "provider": "duckduckgo", "results": [...], "externalContent": { "source": "web_search", "untrusted": true } }`
+- `{ "url": "...", "text": "SECURITY NOTICE... <<<EXTERNAL_UNTRUSTED_CONTENT>>>...", "externalContent": { "source": "web_fetch" } }`
+
+特征：
+
+- 结构是 **工具返回值**（含 `query`/`results`/`provider` 或 `url`/`extractMode`/`fetchedAt`），不是散文式 reasoning。
+- `<<<EXTERNAL_UNTRUSTED_CONTENT>>>` 是 OpenClaw 对外部网页内容的 **安全包裹标记**，只出现在 fetch/search 工具输出里。
+- 中间夹杂短中文状态句（「马上做交叉验证」「马上核对原始 CRS 报告」），说明是 **多段 assistant/tool 回合** 被逐条渲染，而非单条 thinking 流。
+- webchat 同 session 正常：工具走 **`agent` / `session.tool` 卡片**，聊天气泡只承担最终答复。
+
+### 用户实锤样本 2（敏感信息扫描 / 读代码，非 search）
+
+同一轮在正式汇总答复前连续出现多段 **终端/探查输出**（20:37–20:38 多条「启孜」气泡）：
+
+- `=== 1. 列出所有 .env / 凭证类文件 ===` + `ls` 目录树（`drwx------`、`total 2152`）
+- `.env.local` 行：`GITHUB_TOKEN=ghp_…`
+- `grep` 命中列表（`./main.js:295: const { wsUrl, token }`）
+- 整文件 dump（`device-identity.js` / `device-auth-store.js` 全文）
+- `git log` / `git ls-files` 输出
+
+特征：
+
+- 形态是 **shell/read/grep 工具 stdout**，不是 search JSON，也没有 `EXTERNAL_UNTRUSTED_CONTENT`。
+- 与样本 1 **同一展示模式**：短中文开场 → 多段工具原始输出 →（最后才是）整理后的结论。
+- **交叉验证**：根因不能收窄到 web_search 单工具，而是 **凡调用会产生大块返回的工具**（exec、read、grep、search、fetch…）都会在 QiziShell 里以助手气泡形式露出。
+
+**更像「工具回合的中间过程泄露」，不是泛化的 model thinking。**
+
+1. **Gateway 侧（OpenClaw）**
+   - 流式 `chat` delta 只广播已投影的可见 assistant 文本；`commentary` phase 在 live chat 里会被抑制。
+   - 带 **tool_use / tool_result** 的 assistant 历史消息走 `projectAssistantTextFromMixedToolContent`：会把该条里 **所有 `type:text` 块** 抽出来展示（**不按 final_answer / commentary 再滤一遍**）。
+   - webchat 用 **`agent` / `session.tool` 事件** 单独渲染工具卡片；聊天气泡只承担最终答复。
+
+2. **QiziShell 侧（当前代码）**
+   - 只处理 `chat` + `sessions.changed`，**没有**工具事件 UI（虽声明了 `tool-events` capability）。
+   - `convertHistoryMessages`：`role !== 'user'` 一律映射为 `who: 'them'` → **`tool` / `tool_result` / `function` 整条历史会当成助手气泡**；Gateway 对 tool payload 还 `preserveExactToolPayload`（不截断），JSON 原样展示。
+   - `extractMessageParts` 只抽 `type:text` 或字符串 `content`；**tool_result 的 JSON / 终端文本会完整进气泡**（不限于 search）。
+   - `pollStreamHistoryOnce`（每 2s）若 `chat.history` 更长就 **覆盖** 流式正文；`mergeMessagePair` 对 assistant 倾向 **保留更长的 server 文本** → 典型现象：**流式时正常，工具回合结束或 sync history 后突然变长**。
+   - `resolveDeltaText` 在 snapshot 对不齐时会 `return snapshot`（`main.js`），可能用含多 text 块的 `payload.message` 覆盖已过滤的 delta。
+
+3. **与 model 的关系（推断）**
+   - 直接原因：**该轮是否调用了 search/read/grep 等工具**，不是 model 名字本身。
+   - 间接相关：爱调工具、或在 tool 前后爱写英文 commentary 的 model，更容易触发。
+
+4. **验证时再抓**
+   - 出问题的一轮：是否伴随 tool 调用；`chat.history` 里该条 assistant 有几个 `type:text` 块、是否含 `textSignature.phase`。
+   - 对比 webchat 同 session：工具是否显示为卡片而非大段英文正文。
+
+## 若用户以后要修（按优先级）
+
+1. **历史过滤（低风险、对症）**：`convertHistoryMessages` 跳过 `role` 为 `tool` / `tool_result` / `toolresult` / `function` 的消息（覆盖 exec/grep/read/search/fetch 等所有工具，不要只拦 search JSON）。
+2. **工具 UI（对齐 webchat）**：订阅 `agent` / `session.tool` 事件，工具结果进折叠卡片，不进主气泡。
+3. **轮询合并**：`pollStreamHistoryOnce` / `mergeMessagePair` 不要用「更长 server 文本」覆盖流式正文；结束后再 sync，且只取 **最后一条可见 assistant 答复**（非 tool_result）。
+4. 验证时抓 `chat.history`：数 `role=tool_result` 条数是否与泄露 JSON 段数一致；对比 webchat 是否把这些藏在工具卡片里。

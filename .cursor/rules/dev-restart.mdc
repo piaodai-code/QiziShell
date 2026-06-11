@@ -1,0 +1,23 @@
+---
+description: After changing QiziShell runtime code, restart the app automatically
+globs: main.js,gateway-ws.js,app.js,preload.js,index.html,style.css
+alwaysApply: false
+---
+
+# QiziShell dev restart
+
+After editing files that affect the running Electron app (`main.js`, `gateway-ws.js`, `app.js`, `preload.js`, `index.html`, `style.css`, etc.):
+
+1. Restart with the detached script (do **not** use bare `npm start` in a Cursor background shell — the shell teardown kills Electron).
+2. Wait for the script to finish and confirm it prints `QiziShell started`.
+3. Only ask the user to start manually if `npm run restart` exits non-zero.
+
+```bash
+npm run restart
+```
+
+（在仓库根目录 `~/Documents/Code/qizi-shell` 执行。）
+
+Use `block_until_ms` ≥ 8000 so the verify loop can complete. Do **not** set `block_until_ms: 0`.
+
+Log file: `$TMPDIR/qizi-shell-dev.log` (or `/tmp/qizi-shell-dev.log`).
