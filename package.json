@@ -5,7 +5,7 @@
   "scripts": {
     "start": "electron .",
     "restart": "bash scripts/restart-dev.sh",
-    "build": "electron-builder --mac",
+    "build": "electron-builder --mac --publish never",
     "release": "bash scripts/release-mac.sh"
   },
   "build": {

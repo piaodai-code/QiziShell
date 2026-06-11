@@ -47,6 +47,8 @@ jobs:
           echo "Release version: ${VERSION}"
 
       - name: Build macOS DMG
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
         run: npm run build
 
       - name: Upload GitHub Release
