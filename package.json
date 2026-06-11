@@ -5,7 +5,8 @@
   "scripts": {
     "start": "electron .",
     "restart": "bash scripts/restart-dev.sh",
-    "build": "electron-builder --mac"
+    "build": "electron-builder --mac",
+    "release": "bash scripts/release-mac.sh"
   },
   "build": {
     "appId": "com.qizi.shell",
