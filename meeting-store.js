@@ -1,11 +1,48 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { app } = require('electron');
 
-const MEETINGS_DIR = path.join(os.homedir(), 'Documents', 'QiziShell', 'meetings');
+const LEGACY_MEETINGS_DIR = path.join(os.homedir(), 'Documents', 'QiziShell', 'meetings');
+let legacyMeetingsMigrated = false;
+
+function getMeetingsDir() {
+  return path.join(app.getPath('userData'), 'meetings');
+}
+
+function migrateLegacyMeetingsDir() {
+  if (legacyMeetingsMigrated) return;
+  legacyMeetingsMigrated = true;
+
+  const nextDir = getMeetingsDir();
+  if (!fs.existsSync(LEGACY_MEETINGS_DIR)) return;
+
+  fs.mkdirSync(nextDir, { recursive: true });
+  const files = fs.readdirSync(LEGACY_MEETINGS_DIR).filter((name) => name.endsWith('.json'));
+  for (const name of files) {
+    const from = path.join(LEGACY_MEETINGS_DIR, name);
+    const to = path.join(nextDir, name);
+    if (fs.existsSync(to)) continue;
+    try {
+      fs.copyFileSync(from, to);
+    } catch {
+      // ignore per-file migration errors
+    }
+  }
+}
 
 function ensureMeetingsDir() {
-  fs.mkdirSync(MEETINGS_DIR, { recursive: true });
+  migrateLegacyMeetingsDir();
+  fs.mkdirSync(getMeetingsDir(), { recursive: true });
+}
+
+function isAllowedMeetingRecordPath(filePath) {
+  const resolved = path.resolve(filePath);
+  const allowedRoots = [
+    path.resolve(getMeetingsDir()),
+    path.resolve(LEGACY_MEETINGS_DIR),
+  ];
+  return allowedRoots.some((dir) => resolved === dir || resolved.startsWith(`${dir}${path.sep}`));
 }
 
 function buildMeetingFilename(meetingId) {
@@ -16,17 +53,17 @@ function buildMeetingFilename(meetingId) {
 function saveMeetingRecord(record) {
   ensureMeetingsDir();
   const filename = buildMeetingFilename(record.id);
-  const filePath = path.join(MEETINGS_DIR, filename);
+  const filePath = path.join(getMeetingsDir(), filename);
   fs.writeFileSync(filePath, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
   return filePath;
 }
 
 function listMeetingRecords(limit = 20) {
   ensureMeetingsDir();
-  const files = fs.readdirSync(MEETINGS_DIR)
+  const files = fs.readdirSync(getMeetingsDir())
     .filter((name) => name.endsWith('.json'))
     .map((name) => {
-      const full = path.join(MEETINGS_DIR, name);
+      const full = path.join(getMeetingsDir(), name);
       const stat = fs.statSync(full);
       return { name, full, mtime: stat.mtimeMs };
     })
@@ -55,12 +92,10 @@ function loadMeetingRecordFile(filePath) {
   if (!filePath || typeof filePath !== 'string') {
     throw new Error('缺少会议记录路径');
   }
-  const resolved = path.resolve(filePath);
-  const dir = path.resolve(MEETINGS_DIR);
-  if (!resolved.startsWith(`${dir}${path.sep}`) && resolved !== dir) {
+  if (!isAllowedMeetingRecordPath(filePath)) {
     throw new Error('无效会议记录路径');
   }
-  const record = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  const record = JSON.parse(fs.readFileSync(path.resolve(filePath), 'utf8'));
   return record;
 }
 
@@ -74,7 +109,7 @@ function loadMeetingRecordById(meetingId) {
 }
 
 module.exports = {
-  MEETINGS_DIR,
+  getMeetingsDir,
   saveMeetingRecord,
   listMeetingRecords,
   loadMeetingRecordFile,
