@@ -7,8 +7,13 @@ const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-poli
 const { buildExportWordHtml } = require('./export-html');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
 const { startMeetingGroupRelay } = require('./meeting-group');
-const { saveMeetingRecord, listMeetingRecords } = require('./meeting-store');
+const { saveMeetingRecord, listMeetingRecords, loadMeetingRecordFile, loadMeetingRecordById } = require('./meeting-store');
 const { isMeetingA2ASessionKey } = require('./meeting-protocol');
+const {
+  findModeratorFinalMessage,
+  buildMeetingForwardPayload,
+  isMeetingClosingStub,
+} = require('./meeting-forward');
 
 function isSafeExternalHttpUrl(url) {
   if (typeof url !== 'string') return false;
@@ -1584,13 +1589,61 @@ async function injectMeetingChatMessage(sessionKey, message, label) {
   });
 }
 
+function resolveExecAgentLabel(config, agentId) {
+  const catalog = config?.agentCatalog || [];
+  const entry = catalog.find((a) => a.id === agentId);
+  return entry?.label || entry?.name || agentId;
+}
+
+async function maybeForwardMeetingConclusion(config, messages) {
+  const agentId = String(config?.postMeetingExecAgentId || '').trim();
+  if (!agentId) return null;
+
+  const finalMsg = findModeratorFinalMessage(messages, config.moderatorAgentId);
+  if (!finalMsg?.text?.trim()) {
+    return {
+      ok: false,
+      agentId,
+      error: '未找到主持最终总结，无法派活',
+    };
+  }
+  if (isMeetingClosingStub(finalMsg.text)) {
+    return {
+      ok: false,
+      agentId,
+      error: '主持仅回复了「会议结束」等收尾语，缺少可派活的最终总结',
+    };
+  }
+
+  try {
+    const outbound = buildMeetingForwardPayload(config, finalMsg);
+    const result = await forwardMessageToAgents({
+      agentIds: [agentId],
+      message: outbound,
+    });
+    return {
+      ok: Boolean(result?.ok),
+      agentId,
+      label: resolveExecAgentLabel(config, agentId),
+      error: result?.ok ? undefined : (result?.error || '转发失败'),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      agentId,
+      label: resolveExecAgentLabel(config, agentId),
+      error: err?.message || String(err),
+    };
+  }
+}
+
 async function runMeetingBriefingFlow(config) {
   meetingBriefingRunning = true;
   meetingBriefingCancelled = false;
   try {
     await startMeetingGroupRelay(config, {
       chatTurn: (sessionKey, message, opts) => runMeetingChatTurn(sessionKey, message, opts || {}),
-      chatTurnStream: (sessionKey, message, { onDelta }) => runMeetingChatTurn(sessionKey, message, { onDelta }),
+      chatTurnStream: (sessionKey, message, opts = {}) => runMeetingChatTurn(sessionKey, message, opts),
       onEvent: (event) => {
         if (event.type === 'briefing_ready' && event.payload) {
           setActiveMeetingMeta({
@@ -1608,7 +1661,21 @@ async function runMeetingBriefingFlow(config) {
           return;
         }
         if (event.type === 'done') {
-          clearActiveMeeting();
+          void (async () => {
+            const forwardResult = await maybeForwardMeetingConclusion(
+              config,
+              event.payload?.messages,
+            );
+            clearActiveMeeting();
+            broadcastMeetingEvent(event);
+            if (forwardResult) {
+              broadcastMeetingEvent({
+                type: 'post_meeting_forward',
+                payload: forwardResult,
+              });
+            }
+          })();
+          return;
         }
         if (event.type === 'error' || event.type === 'cancelled') {
           clearActiveMeeting();
@@ -2551,7 +2618,21 @@ ipcMain.handle('qizi-meeting:status', (event) => {
 
 ipcMain.handle('qizi-meeting:list-records', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
-  return { ok: true, records: listMeetingRecords() };
+  return { ok: true, records: listMeetingRecords(10) };
+});
+
+ipcMain.handle('qizi-meeting:load-record', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  try {
+    const file = payload?.file;
+    const id = payload?.id;
+    const record = file
+      ? loadMeetingRecordFile(file)
+      : loadMeetingRecordById(id);
+    return { ok: true, record };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
 });
 
 ipcMain.handle('qizi-meeting:load-history', async (event, payload) => {

@@ -1,5 +1,7 @@
 (function initMeetingView() {
   const MEETING_AVATAR_SRC = 'assets/icons/meeting-team.png';
+  const HISTORY_LIMIT = 10;
+  const LIVE_RECORD_KEY = '__live__';
 
   const chatScreenEl = document.getElementById('chat-screen');
   const meetingScreenEl = document.getElementById('meeting-screen');
@@ -7,15 +9,20 @@
   const composerEl = document.getElementById('composer');
   const composerBodyEl = document.getElementById('composer-body');
   const observeBarEl = document.getElementById('meeting-observe-bar');
-  const bannerEl = document.getElementById('meeting-banner');
-  const bannerTopicEl = document.getElementById('meeting-banner-topic');
-  const bannerStatusEl = document.getElementById('meeting-banner-status');
-  const exitBtn = document.getElementById('meeting-exit-btn');
+  const toolbarEl = document.getElementById('meeting-toolbar');
+  const historySelectEl = document.getElementById('meeting-history-select');
+  const toolbarStatusEl = document.getElementById('meeting-toolbar-status');
+  const newMeetingBtn = document.getElementById('meeting-new-btn');
+  const leaveHubBtn = document.getElementById('meeting-leave-hub-btn');
+  const endConfirmModal = document.getElementById('meeting-end-confirm-modal');
+  const endConfirmYesBtn = document.getElementById('meeting-end-confirm-yes');
+  const endConfirmNoBtn = document.getElementById('meeting-end-confirm-no');
 
   if (!messagesEl) return;
 
   let running = false;
-  let visible = false;
+  let hubVisible = false;
+  let viewingLive = false;
   /** @type {Array<object>} */
   let meetingMessages = [];
   /** @type {object|null} */
@@ -23,6 +30,13 @@
   /** @type {Map<string, object>} */
   let agentCatalog = new Map();
   let meetingStatus = '';
+  /** @type {string|null} */
+  let liveMeetingId = null;
+  /** @type {string} */
+  let selectedRecordKey = '';
+  /** @type {Array<object>} */
+  let recordList = [];
+  let loadingArchive = false;
 
   function escapeHtml(text) {
     return String(text)
@@ -45,6 +59,23 @@
       return `<pre class="msg-stream-plain">${escapeHtml(plain)}</pre>`;
     }
     return parseMarkdown(plain);
+  }
+
+  function formatRecordDate(iso) {
+    if (!iso) return '';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  function recordOptionLabel(entry, { live = false } = {}) {
+    const topic = String(entry?.topic || '未命名议题').trim();
+    const date = formatRecordDate(entry?.startedAt || entry?.finishedAt);
+    const prefix = live ? '进行中 · ' : '';
+    return date ? `${prefix}${date} · ${topic}` : `${prefix}${topic}`;
   }
 
   function agentInfo(agentId) {
@@ -115,10 +146,17 @@
     return parts.join(' · ');
   }
 
+  function emptyHintText() {
+    if (loadingArchive) return '加载会议记录…';
+    if (running && viewingLive) return '会议进行中，等待发言…';
+    if (recordList.length === 0) return '暂无历史会议，点击「新建会议」开始';
+    return '请选择上方会议记录';
+  }
+
   function render() {
-    if (!visible || !messagesEl) return;
+    if (!hubVisible || !messagesEl) return;
     if (meetingMessages.length === 0) {
-      messagesEl.innerHTML = '<div class="msg-hint">会议进行中，等待发言…</div>';
+      messagesEl.innerHTML = `<div class="msg-hint">${escapeHtml(emptyHintText())}</div>`;
       return;
     }
     messagesEl.innerHTML = '';
@@ -144,7 +182,14 @@
 
   function setStatus(text) {
     meetingStatus = text || '';
-    if (bannerStatusEl) bannerStatusEl.textContent = meetingStatus;
+    if (!toolbarStatusEl) return;
+    if (!text) {
+      toolbarStatusEl.hidden = true;
+      toolbarStatusEl.textContent = '';
+      return;
+    }
+    toolbarStatusEl.hidden = false;
+    toolbarStatusEl.textContent = text;
   }
 
   function buildCatalog(config) {
@@ -155,14 +200,368 @@
     }
   }
 
+  function buildCatalogFromRecord(record) {
+    const catalog = Array.isArray(record?.agentCatalog) ? record.agentCatalog : [];
+    if (catalog.length > 0) {
+      buildCatalog({ agentCatalog: catalog });
+      return;
+    }
+    const agents = new Map();
+    if (record?.moderatorAgentId) {
+      agents.set(record.moderatorAgentId, {
+        id: record.moderatorAgentId,
+        label: record.moderatorLabel || record.moderatorAgentId,
+      });
+    }
+    for (const id of record?.participantAgentIds || []) {
+      if (!agents.has(id)) agents.set(id, { id, label: id });
+    }
+    for (const msg of record?.transcript || []) {
+      if (msg?.speakerAgentId && msg?.speakerLabel) {
+        agents.set(msg.speakerAgentId, {
+          id: msg.speakerAgentId,
+          label: msg.speakerLabel,
+        });
+      }
+    }
+    buildCatalog({ agentCatalog: [...agents.values()] });
+  }
+
+  function configFromRecord(record) {
+    return {
+      topic: record?.topic || '会议',
+      moderatorAgentId: record?.moderatorAgentId,
+      moderatorLabel: record?.moderatorLabel,
+      participantAgentIds: record?.participantAgentIds || [],
+      agentCatalog: record?.agentCatalog || [...agentCatalog.values()],
+      meetingId: record?.id,
+    };
+  }
+
   function applyTranscript(messages) {
     if (!Array.isArray(messages)) return;
     meetingMessages = messages.map((m) => ({ ...m }));
-    if (visible) render();
+    if (hubVisible) render();
   }
 
   function getMessages() {
     return meetingMessages.map((m) => ({ ...m }));
+  }
+
+  function populateHistorySelect() {
+    if (!historySelectEl) return;
+    const previous = selectedRecordKey;
+    historySelectEl.innerHTML = '';
+
+    if (running && liveMeetingId && meetingConfig) {
+      const liveOpt = document.createElement('option');
+      liveOpt.value = LIVE_RECORD_KEY;
+      liveOpt.textContent = recordOptionLabel(meetingConfig, { live: true });
+      historySelectEl.appendChild(liveOpt);
+    }
+
+    if (recordList.length === 0 && !running) {
+      const emptyOpt = document.createElement('option');
+      emptyOpt.value = '';
+      emptyOpt.textContent = '暂无历史会议';
+      historySelectEl.appendChild(emptyOpt);
+      return;
+    }
+
+    for (const entry of recordList) {
+      if (running && entry.id === liveMeetingId) continue;
+      const opt = document.createElement('option');
+      opt.value = entry.file || entry.id || '';
+      opt.textContent = recordOptionLabel(entry);
+      opt.dataset.meetingId = entry.id || '';
+      historySelectEl.appendChild(opt);
+    }
+
+    if (running && viewingLive) {
+      historySelectEl.value = LIVE_RECORD_KEY;
+      selectedRecordKey = LIVE_RECORD_KEY;
+      return;
+    }
+
+    if (previous && [...historySelectEl.options].some((o) => o.value === previous)) {
+      historySelectEl.value = previous;
+      selectedRecordKey = previous;
+      return;
+    }
+
+    if (running) {
+      historySelectEl.value = LIVE_RECORD_KEY;
+      selectedRecordKey = LIVE_RECORD_KEY;
+      return;
+    }
+
+    const first = historySelectEl.options[0];
+    if (first) {
+      historySelectEl.value = first.value;
+      selectedRecordKey = first.value;
+    }
+  }
+
+  async function refreshRecordList() {
+    if (!window.qizi?.listMeetingRecords) {
+      recordList = [];
+      return;
+    }
+    try {
+      const result = await window.qizi.listMeetingRecords();
+      recordList = result?.ok && Array.isArray(result.records)
+        ? result.records.slice(0, HISTORY_LIMIT)
+        : [];
+    } catch {
+      recordList = [];
+    }
+  }
+
+  async function loadArchiveRecord(key) {
+    if (!key || key === LIVE_RECORD_KEY) {
+      if (running) {
+        viewingLive = true;
+        applyTranscript(meetingMessages);
+        setStatus(meetingStatus || '会议进行中…');
+        render();
+      }
+      return;
+    }
+    if (!window.qizi?.loadMeetingRecord) return;
+    loadingArchive = true;
+    viewingLive = false;
+    render();
+    try {
+      const payload = key.includes('/') || key.includes('\\')
+        ? { file: key }
+        : { id: key };
+      const result = await window.qizi.loadMeetingRecord(payload);
+      if (!result?.ok || !result.record) {
+        setStatus(result?.error || '加载失败');
+        meetingMessages = [];
+        render();
+        return;
+      }
+      buildCatalogFromRecord(result.record);
+      meetingConfig = configFromRecord(result.record);
+      applyTranscript(result.record.transcript || []);
+      setStatus('只读');
+    } catch (err) {
+      setStatus(err.message || '加载失败');
+      meetingMessages = [];
+      render();
+    } finally {
+      loadingArchive = false;
+      render();
+    }
+  }
+
+  async function refreshHistorySelectAndLoadDefault() {
+    await refreshRecordList();
+    populateHistorySelect();
+    if (running) {
+      viewingLive = true;
+      selectedRecordKey = LIVE_RECORD_KEY;
+      if (historySelectEl) historySelectEl.value = LIVE_RECORD_KEY;
+      applyMeetingChrome();
+      render();
+      return;
+    }
+    const key = selectedRecordKey || historySelectEl?.value;
+    if (key) {
+      await loadArchiveRecord(key);
+    } else {
+      meetingMessages = [];
+      setStatus('');
+      render();
+    }
+  }
+
+  function applyMeetingChrome() {
+    document.body.classList.add('meeting-mode');
+    if (toolbarEl) toolbarEl.hidden = false;
+    if (composerBodyEl) composerBodyEl.hidden = true;
+    if (observeBarEl) observeBarEl.hidden = !(running && viewingLive);
+    if (composerEl) composerEl.classList.add('composer--meeting');
+    if (newMeetingBtn) newMeetingBtn.disabled = running;
+    if (running && viewingLive) {
+      setStatus(meetingStatus || '会议进行中…');
+    }
+  }
+
+  function clearMeetingChrome() {
+    document.body.classList.remove('meeting-mode');
+    if (toolbarEl) toolbarEl.hidden = true;
+    if (composerBodyEl) composerBodyEl.hidden = false;
+    if (observeBarEl) observeBarEl.hidden = true;
+    if (composerEl) composerEl.classList.remove('composer--meeting');
+    setStatus('');
+  }
+
+  function showMeetingScreen() {
+    if (chatScreenEl) chatScreenEl.hidden = true;
+    if (meetingScreenEl) meetingScreenEl.hidden = false;
+  }
+
+  function hideMeetingScreen() {
+    if (meetingScreenEl) meetingScreenEl.hidden = true;
+    if (chatScreenEl) chatScreenEl.hidden = false;
+  }
+
+  async function openHub() {
+    hubVisible = true;
+    if (running) {
+      viewingLive = true;
+      selectedRecordKey = LIVE_RECORD_KEY;
+    }
+    showMeetingScreen();
+    applyMeetingChrome();
+    await refreshHistorySelectAndLoadDefault();
+    window.dispatchEvent(new CustomEvent('qizi-meeting-hub-opened', {
+      detail: meetingConfig || {},
+    }));
+    if (running) {
+      window.dispatchEvent(new CustomEvent('qizi-meeting-view-shown', { detail: meetingConfig }));
+    }
+  }
+
+  function leaveHub() {
+    if (!hubVisible) return;
+    hubVisible = false;
+    hideMeetingScreen();
+    clearMeetingChrome();
+    window.dispatchEvent(new CustomEvent('qizi-meeting-view-hidden'));
+  }
+
+  function showEndMeetingConfirm() {
+    if (endConfirmModal) endConfirmModal.hidden = false;
+  }
+
+  function hideEndMeetingConfirm() {
+    if (endConfirmModal) endConfirmModal.hidden = true;
+  }
+
+  function requestEndMeeting() {
+    if (running) {
+      showEndMeetingConfirm();
+      return;
+    }
+    void endMeeting();
+  }
+
+  async function endMeeting() {
+    hideEndMeetingConfirm();
+    if (running) {
+      try {
+        if (window.qizi?.cancelMeeting) {
+          await window.qizi.cancelMeeting();
+        }
+      } catch {
+        // ignore
+      }
+      running = false;
+      viewingLive = false;
+      liveMeetingId = null;
+      meetingStatus = '';
+      selectedRecordKey = '';
+      meetingMessages = [];
+      meetingConfig = null;
+      agentCatalog = new Map();
+      if (newMeetingBtn) newMeetingBtn.disabled = false;
+      window.dispatchEvent(new CustomEvent('qizi-meeting-exited'));
+    }
+    leaveHub();
+  }
+
+  function showView() {
+    if (!running) {
+      void openHub();
+      return;
+    }
+    viewingLive = true;
+    selectedRecordKey = LIVE_RECORD_KEY;
+    if (historySelectEl) historySelectEl.value = LIVE_RECORD_KEY;
+    if (!hubVisible) {
+      hubVisible = true;
+      showMeetingScreen();
+    }
+    applyMeetingChrome();
+    render();
+    window.dispatchEvent(new CustomEvent('qizi-meeting-view-shown', { detail: meetingConfig }));
+  }
+
+  function leaveView() {
+    leaveHub();
+  }
+
+  function enter(config) {
+    running = true;
+    viewingLive = true;
+    hubVisible = true;
+    liveMeetingId = null;
+    meetingConfig = config || {};
+    meetingMessages = [];
+    meetingStatus = '';
+    selectedRecordKey = LIVE_RECORD_KEY;
+    buildCatalog(meetingConfig);
+
+    showMeetingScreen();
+    applyMeetingChrome();
+    setStatus('正在发送任务书…');
+    render();
+
+    void refreshRecordList().then(() => populateHistorySelect());
+
+    window.dispatchEvent(new CustomEvent('qizi-meeting-entered', { detail: meetingConfig }));
+  }
+
+  async function exit() {
+    running = false;
+    viewingLive = false;
+    hubVisible = false;
+    liveMeetingId = null;
+    meetingConfig = null;
+    meetingMessages = [];
+    meetingStatus = '';
+    selectedRecordKey = '';
+    agentCatalog = new Map();
+
+    clearMeetingChrome();
+    hideMeetingScreen();
+
+    if (window.qizi?.exitMeeting) {
+      try { await window.qizi.exitMeeting(); } catch { /* ignore */ }
+    }
+    window.dispatchEvent(new CustomEvent('qizi-meeting-exited'));
+  }
+
+  async function abortLiveStart() {
+    running = false;
+    viewingLive = false;
+    liveMeetingId = null;
+    meetingStatus = '';
+    selectedRecordKey = '';
+    meetingMessages = [];
+    if (window.qizi?.exitMeeting) {
+      try { await window.qizi.exitMeeting(); } catch { /* ignore */ }
+    }
+    hubVisible = true;
+    applyMeetingChrome();
+    await refreshHistorySelectAndLoadDefault();
+  }
+
+  async function openNewMeetingSetup() {
+    if (!window.MeetingUI?.openSetup) return;
+    let agents = [];
+    try {
+      const result = await window.qizi?.listAgents?.();
+      if (result?.ok && Array.isArray(result.agents)) {
+        agents = result.agents;
+      }
+    } catch {
+      // ignore
+    }
+    window.MeetingUI.openSetup(agents);
   }
 
   function wireMessageInteractions() {
@@ -192,7 +591,7 @@
     });
 
     messagesEl.addEventListener('contextmenu', (e) => {
-      if (!visible) return;
+      if (!hubVisible) return;
       const row = e.target.closest('.msg');
       if (!row || !messagesEl.contains(row)) return;
       e.preventDefault();
@@ -209,86 +608,6 @@
     });
   }
 
-  function applyMeetingChrome() {
-    const topic = meetingConfig?.topic || '会议模式';
-    document.body.classList.add('meeting-mode');
-    if (bannerEl) bannerEl.hidden = false;
-    if (bannerTopicEl) bannerTopicEl.textContent = topic;
-    if (composerBodyEl) composerBodyEl.hidden = true;
-    if (observeBarEl) observeBarEl.hidden = false;
-    if (composerEl) composerEl.classList.add('composer--meeting');
-    setStatus(meetingStatus || '会议进行中…');
-  }
-
-  function clearMeetingChrome() {
-    document.body.classList.remove('meeting-mode');
-    if (bannerEl) bannerEl.hidden = true;
-    if (composerBodyEl) composerBodyEl.hidden = false;
-    if (observeBarEl) observeBarEl.hidden = true;
-    if (composerEl) composerEl.classList.remove('composer--meeting');
-  }
-
-  function showMeetingScreen() {
-    if (chatScreenEl) chatScreenEl.hidden = true;
-    if (meetingScreenEl) meetingScreenEl.hidden = false;
-  }
-
-  function hideMeetingScreen() {
-    if (meetingScreenEl) meetingScreenEl.hidden = true;
-    if (chatScreenEl) chatScreenEl.hidden = false;
-  }
-
-  function showView() {
-    if (!running) return;
-    visible = true;
-    showMeetingScreen();
-    applyMeetingChrome();
-    render();
-    window.dispatchEvent(new CustomEvent('qizi-meeting-view-shown', { detail: meetingConfig }));
-  }
-
-  function leaveView() {
-    if (!running || !visible) return;
-    visible = false;
-    hideMeetingScreen();
-    clearMeetingChrome();
-    window.dispatchEvent(new CustomEvent('qizi-meeting-view-hidden'));
-  }
-
-  function enter(config) {
-    running = true;
-    visible = true;
-    meetingConfig = config || {};
-    meetingMessages = [];
-    meetingStatus = '';
-    buildCatalog(meetingConfig);
-
-    showMeetingScreen();
-    applyMeetingChrome();
-    setStatus('正在发送任务书…');
-    render();
-
-    window.dispatchEvent(new CustomEvent('qizi-meeting-entered', { detail: meetingConfig }));
-  }
-
-  async function exit() {
-    running = false;
-    visible = false;
-    meetingConfig = null;
-    meetingMessages = [];
-    meetingStatus = '';
-    agentCatalog = new Map();
-
-    clearMeetingChrome();
-    hideMeetingScreen();
-    setStatus('');
-
-    if (window.qizi?.exitMeeting) {
-      try { await window.qizi.exitMeeting(); } catch { /* ignore */ }
-    }
-    window.dispatchEvent(new CustomEvent('qizi-meeting-exited'));
-  }
-
   function handleEvent(event) {
     if (!running || !event) return;
 
@@ -296,11 +615,14 @@
       setStatus('正在准备任务书…');
     }
     if (event.type === 'briefing_ready' && event.payload) {
+      liveMeetingId = event.payload.meetingId || liveMeetingId;
       meetingConfig = {
         ...meetingConfig,
         sessionKey: event.payload.sessionKey,
         meetingId: event.payload.meetingId,
+        startedAt: meetingConfig?.startedAt || new Date().toISOString(),
       };
+      populateHistorySelect();
       setStatus('任务书已发送');
     }
     if (event.type === 'briefing_sending') {
@@ -308,8 +630,12 @@
     }
     if (event.type === 'transcript') {
       applyTranscript(event.payload?.messages);
+      viewingLive = true;
+      selectedRecordKey = LIVE_RECORD_KEY;
+      if (historySelectEl) historySelectEl.value = LIVE_RECORD_KEY;
       const streaming = meetingMessages.some((m) => m.streaming);
       setStatus(streaming ? '发言中…' : '会议进行中 · 群聊');
+      if (observeBarEl) observeBarEl.hidden = false;
     }
     if (event.type === 'relay_started') {
       setStatus('会议 relay 已启动…');
@@ -327,25 +653,107 @@
       setStatus(`${event.payload.label || event.payload.agentId} 发言失败，已跳过 · 请主持继续`);
     }
     if (event.type === 'moderator_nudge') {
-      setStatus(event.payload?.reason === 'idle' ? '请主持 @ 下一位…' : '请主持继续…');
+      const reason = event.payload?.reason;
+      if (reason === 'idle_watchdog') {
+        setStatus('长时间无发言，已提醒主持继续…');
+      } else if (reason === 'idle_force_final') {
+        setStatus('长时间无发言，主持正在强制总结…');
+      } else {
+        setStatus(reason === 'idle' ? '请主持 @ 下一位…' : '请主持继续…');
+      }
+    }
+    if (event.type === 'idle_watchdog' && event.payload) {
+      const { strike = 1, maxStrikes = 3 } = event.payload;
+      setStatus(`长时间无发言，已提醒主持 (${strike}/${maxStrikes})…`);
+    }
+    if (event.type === 'idle_watchdog_force_end' && event.payload) {
+      setStatus('长时间无发言，正在强制提前总结并结束…');
+    }
+    if (event.type === 'moderator_nudge_empty') {
+      setStatus('主持未返回发言，正在重试…');
+    }
+    if (event.type === 'moderator_nudge_error' && event.payload) {
+      setStatus(`主持发言失败，正在重试：${event.payload.error || '未知'}`);
     }
     if (event.type === 'done') {
       if (event.payload?.messages) {
         applyTranscript(event.payload.messages);
       }
-      setStatus('会议已结束');
+      running = false;
+      viewingLive = false;
+      liveMeetingId = event.payload?.meetingId || liveMeetingId;
+      if (observeBarEl) observeBarEl.hidden = true;
+      if (event.payload?.endedEarly || event.payload?.state === 'DONE_EARLY_IDLE') {
+        const reason = event.payload?.endReason || '长时间无反馈';
+        setStatus(`会议已提前结束 · ${reason}`);
+      } else {
+        setStatus('会议已结束');
+      }
+      void refreshHistorySelectAndLoadDefault();
+    }
+    if (event.type === 'post_meeting_forward' && event.payload) {
+      const { ok, label, error } = event.payload;
+      if (ok) {
+        setStatus(`会议已结束 · 已派活至 ${label || 'Agent'}`);
+      } else {
+        setStatus(`会议已结束 · 派活失败：${error || '未知错误'}`);
+      }
     }
     if (event.type === 'error') {
       setStatus(`错误: ${event.payload?.error || '未知'}`);
     }
     if (event.type === 'cancelled') {
-      setStatus('已取消');
+      running = false;
+      viewingLive = false;
+      liveMeetingId = null;
+      meetingStatus = '';
+      if (newMeetingBtn) newMeetingBtn.disabled = false;
+      if (observeBarEl) observeBarEl.hidden = true;
+      setStatus('会议已结束');
     }
   }
 
-  if (exitBtn) {
-    exitBtn.addEventListener('click', () => { void exit(); });
+  if (historySelectEl) {
+    historySelectEl.addEventListener('change', () => {
+      const key = historySelectEl.value;
+      selectedRecordKey = key;
+      if (key === LIVE_RECORD_KEY && running) {
+        viewingLive = true;
+        applyMeetingChrome();
+        render();
+        return;
+      }
+      void loadArchiveRecord(key);
+    });
   }
+
+  if (newMeetingBtn) {
+    newMeetingBtn.addEventListener('click', () => { void openNewMeetingSetup(); });
+  }
+
+  if (leaveHubBtn) {
+    leaveHubBtn.addEventListener('click', () => { requestEndMeeting(); });
+  }
+
+  if (endConfirmNoBtn) {
+    endConfirmNoBtn.addEventListener('click', () => { hideEndMeetingConfirm(); });
+  }
+
+  if (endConfirmYesBtn) {
+    endConfirmYesBtn.addEventListener('click', () => { void endMeeting(); });
+  }
+
+  if (endConfirmModal) {
+    endConfirmModal.addEventListener('click', (e) => {
+      if (e.target === endConfirmModal) hideEndMeetingConfirm();
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && endConfirmModal && !endConfirmModal.hidden) {
+      hideEndMeetingConfirm();
+    }
+  });
 
   if (window.qizi?.onMeetingEvent) {
     window.qizi.onMeetingEvent(handleEvent);
@@ -356,15 +764,22 @@
   window.MeetingView = {
     enter,
     exit,
+    openHub,
+    leaveHub,
+    endMeeting,
+    requestEndMeeting,
     showView,
     leaveView,
+    abortLiveStart,
     handleEvent,
     isRunning: () => running,
-    isVisible: () => visible,
-    isActive: () => visible,
+    isVisible: () => hubVisible,
+    isHubVisible: () => hubVisible,
+    isActive: () => hubVisible,
     getConfig: () => (meetingConfig ? { ...meetingConfig } : null),
     getMessages,
     getAvatarSrc: () => MEETING_AVATAR_SRC,
     render,
+    refreshRecordList,
   };
 })();

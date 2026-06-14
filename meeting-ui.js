@@ -3,6 +3,7 @@
   const topicInput = document.getElementById('meeting-topic');
   const draftInput = document.getElementById('meeting-draft');
   const goalInput = document.getElementById('meeting-goal');
+  const execAgentSelect = document.getElementById('meeting-exec-agent');
   const moderatorSelect = document.getElementById('meeting-moderator');
   const participantsEl = document.getElementById('meeting-participants');
   const startBtn = document.getElementById('meeting-start-btn');
@@ -16,6 +17,25 @@
 
   function agentLabel(agent) {
     return agent?.label || agent?.name || agent?.id || 'Agent';
+  }
+
+  function fillExecAgentOptions(agents) {
+    if (!execAgentSelect) return;
+    const previous = execAgentSelect.value;
+    execAgentSelect.innerHTML = '';
+    const noneOpt = document.createElement('option');
+    noneOpt.value = '';
+    noneOpt.textContent = '无';
+    execAgentSelect.appendChild(noneOpt);
+    for (const agent of agents) {
+      const opt = document.createElement('option');
+      opt.value = agent.id;
+      opt.textContent = agentLabel(agent);
+      execAgentSelect.appendChild(opt);
+    }
+    if (previous && [...execAgentSelect.options].some((opt) => opt.value === previous)) {
+      execAgentSelect.value = previous;
+    }
   }
 
   function fillModeratorOptions(agents) {
@@ -78,6 +98,7 @@
   function openSetup(agents, options = {}) {
     catalogAgents = Array.isArray(agents) ? agents : [];
     fillModeratorOptions(catalogAgents);
+    fillExecAgentOptions(catalogAgents);
     if (moderatorSelect && !moderatorSelect.dataset.bound) {
       moderatorSelect.addEventListener('change', syncParticipantsWithModerator);
       moderatorSelect.dataset.bound = '1';
@@ -101,6 +122,7 @@
     const topic = topicInput?.value?.trim();
     const draft = draftInput?.value?.trim();
     const goal = goalInput?.value?.trim() || '';
+    const postMeetingExecAgentId = execAgentSelect?.value?.trim() || '';
     const moderatorAgentId = moderatorSelect?.value;
     const participantAgentIds = collectParticipants();
     const roundCount = collectRoundCount();
@@ -136,6 +158,7 @@
       topic,
       draft,
       goal,
+      postMeetingExecAgentId,
       moderatorAgentId,
       moderatorLabel: agentLabel(moderator),
       participantAgentIds,
@@ -152,7 +175,7 @@
     if (!result?.ok) {
       starting = false;
       if (startBtn) startBtn.disabled = false;
-      if (window.MeetingView?.exit) await window.MeetingView.exit();
+      if (window.MeetingView?.abortLiveStart) await window.MeetingView.abortLiveStart();
       openSetup(catalogAgents);
       alert(result?.error || '无法启动会议');
     } else {

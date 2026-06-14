@@ -7,10 +7,10 @@ const MEETING_PARTICIPANT_SOFT_CHARS = 450;
 const MEETING_PARTICIPANT_HARD_CHARS = 1200;
 const MEETING_MODERATOR_SOFT_CHARS = 550;
 const MEETING_MODERATOR_HARD_CHARS = 1400;
-const MEETING_MODERATOR_SUMMARY_SOFT_CHARS = 900;
-const MEETING_MODERATOR_SUMMARY_HARD_CHARS = 2800;
-const MEETING_MODERATOR_FINAL_SOFT_CHARS = 1200;
-const MEETING_MODERATOR_FINAL_HARD_CHARS = 3800;
+const MEETING_MODERATOR_SUMMARY_SOFT_CHARS = 500;
+const MEETING_MODERATOR_SUMMARY_HARD_CHARS = 1400;
+const MEETING_MODERATOR_FINAL_SOFT_CHARS = 700;
+const MEETING_MODERATOR_FINAL_HARD_CHARS = 1600;
 /** @deprecated 硬上限别名，供旧引用 */
 const MEETING_MODERATOR_MAX_CHARS = MEETING_MODERATOR_HARD_CHARS;
 const MEETING_PARTICIPANT_MAX_CHARS = MEETING_PARTICIPANT_HARD_CHARS;
@@ -27,11 +27,37 @@ function roundCountLabel(roundCount) {
   return ({ 1: '一', 2: '二', 3: '三' })[roundCount] || String(roundCount);
 }
 
+function moderatorSummaryRules({ final = false } = {}) {
+  const label = final ? '最终总结' : '当轮总结';
+  const formatBlock = final
+    ? [
+      '  - **输出格式**（按顺序，每项一行；不要散文、不要铺垫）：',
+      '    **结论** …（1–3 条编号，写「决定了什么」）',
+      '    **分歧/风险** …（无则写「无」；各一句）',
+      '    **派活** …（执行人与事项）',
+      '    **会议结束**',
+    ]
+    : [
+      '  - **输出格式**（按顺序，不要散文、不要铺垫）：',
+      '    **共识** …（≤2 条编号）',
+      '    **分歧** …（各立场一句，≤3 条；无则写「无」）',
+      '    **下轮焦点** …（≤1 条：下轮要验证/收敛什么；**禁止**抛出新开放议题）',
+    ];
+  return [
+    `- **${label} = 只写结论，不写过程**（硬约束）：`,
+    '  - **禁止**：逐人复述谁说了什么、引用原话、描述讨论先后、铺垫背景、补充新议题、发散性提问或「还可以考虑…」类探索；',
+    '  - **只允许**：已形成的共识、仍未定的分歧（各一句立场）、下轮/执行需盯住的一点；',
+    ...formatBlock,
+  ].join('\n');
+}
+
 function meetingSummaryGuidance(softMax, hardMax, { final = false } = {}) {
   const label = final ? '最终总结' : '当轮总结';
   return [
-    `- **${label}篇幅**：建议 ${softMax} 字以内；需涵盖各 Agent 核心观点、共识与分歧；可分段或编号；**必须在本条内收束完整**；`,
+    moderatorSummaryRules({ final }),
+    `- **${label}篇幅**：建议 ${softMax} 字以内；只写上述格式块；**必须在本条内收束完整**；`,
     `- 系统硬上限约 ${hardMax} 字（仅超出时在完整句处截断）。`,
+    '- 下方群聊记录仅供**提炼结论**；总结中**不得**复述或改写各位的发言过程。',
   ].join('\n');
 }
 
@@ -324,19 +350,32 @@ function isCorrectionMention(text, agentId) {
   return false;
 }
 
-function shouldSkipRelayMention(text, agentId, messages, moderatorAgentId) {
+function hasParticipantReplyAfter(messages, messageIndex, agentId) {
+  if (!Array.isArray(messages) || messageIndex < 0 || !agentId) return false;
+  for (let i = messageIndex + 1; i < messages.length; i += 1) {
+    const msg = messages[i];
+    if (msg.streaming) continue;
+    if (msg.who === 'them' && msg.speakerAgentId === agentId) return true;
+  }
+  return false;
+}
+
+function shouldSkipRelayMention(text, agentId, messages, moderatorAgentId, messageIndex = -1) {
   if (!agentId || agentId === moderatorAgentId) return true;
-  const lastParticipant = getLastParticipantAgentId(messages);
-  if (lastParticipant === agentId) return true;
+  if (messageIndex >= 0 && hasParticipantReplyAfter(messages, messageIndex, agentId)) {
+    return true;
+  }
   if (isCorrectionMention(text, agentId)) return true;
   return false;
 }
 
 /** 一条主持发言里可能有多个 @（列名单）；取正文中第一个有效 @（按出现顺序，不是名单排序） */
-function pickRelayMention(text, mentions, messages, roster, moderatorAgentId) {
+function pickRelayMention(text, mentions, messages, roster, moderatorAgentId, messageIndex = -1) {
   if (!Array.isArray(mentions) || mentions.length === 0) return null;
   for (const mention of mentions) {
-    if (shouldSkipRelayMention(text, mention.agentId, messages, moderatorAgentId)) continue;
+    if (shouldSkipRelayMention(text, mention.agentId, messages, moderatorAgentId, messageIndex)) {
+      continue;
+    }
     return mention;
   }
   return null;
@@ -370,21 +409,24 @@ function buildModeratorContinuePrompt({
   spokenAgentIds = [],
   messages = [],
   roundCount = 2,
+  moderatorAgentId = '',
   speechKind = 'dispatch',
   softChars = MEETING_MODERATOR_SOFT_CHARS,
   hardChars = MEETING_MODERATOR_HARD_CHARS,
 } = {}) {
-  const spoken = new Set(spokenAgentIds);
-  const remaining = (roster || []).filter((entry) => !spoken.has(entry.agentId));
+  const spokeSince = moderatorAgentId
+    ? participantsSpokenSinceLastModerator(messages, roster, moderatorAgentId)
+    : new Set();
+  const remaining = (roster || []).filter((entry) => !spokeSince.has(entry.agentId));
   const dispatchHint = buildModeratorDispatchHint(roster, messages);
   const lastFromTranscript = resolveLastParticipantLabel(roster, messages);
   const lastLabel = lastFromTranscript || lastSpeakerLabel;
   const rounds = normalizeRoundCount(roundCount);
   const roundWord = roundCountLabel(rounds);
   const summaryHint = speechKind === 'final_summary'
-    ? '- 本轮为 **最终总结**：写「会议结束」，**不要 @ 任何人**；'
+    ? '- 所有人已各轮发言完毕：请按 **最终总结格式（仅结论+派活）** 收尾，写「会议结束」，**不要 @ 任何人**；'
     : (speechKind === 'round_summary'
-      ? '- 本轮所有人已发言完毕：请作 **当轮完整总结**，然后 @ 名单第一位开始下一轮反馈；'
+      ? '- 本轮所有人已发言完毕：请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；'
       : '- 若本轮按名单尚未派完，请 @ **下一位** 议事 Agent（**必须**用 agentId，如 @nai_pang；@墨宝 无效）；');
   return [
     '[系统 · QiziShell]',
@@ -397,14 +439,92 @@ function buildModeratorContinuePrompt({
     '- **每条发言只 @ 一位** agentId；QiziShell 会对每个 @agentId 自动 relay——纠正派发时**不要**写 @（写 nai_pang 等纯文字即可）；',
     summaryHint,
     speechKind === 'dispatch'
-      ? '- 若本轮所有人已各发言一次，请作当轮完整总结，然后 @ 名单第一位开始下一轮反馈；'
+      ? '- 若本轮所有人已各发言一次，请作 **当轮总结（仅结论，见格式块）**，然后 @ 名单第一位开始下一轮反馈；'
       : '',
     `- 共 ${rounds} 轮（${roundWord}轮制）；**${rounds} 轮全部结束后**作最终总结并写「会议结束」，**不要 @ 任何人**；`,
     '一次只 @ 一位 Agent。',
     dispatchHint ? `\n${dispatchHint}` : '',
     remaining.length
-      ? `\n（历史统计）尚未在任何轮次发言过：${remaining.map((r) => `${r.label} (@${r.agentId})`).join('、')}`
-      : '\n（历史统计）所有议事 Agent 至少发言过一次——新反馈轮请按名单顺序重新 @。',
+      ? `\n（本轮统计）尚未发言：${remaining.map((r) => `${r.label} (@${r.agentId})`).join('、')}`
+      : '\n（本轮统计）所有议事 Agent 已各发言一次——请作当轮总结或 @ 下一位开始新一轮反馈。',
+    '',
+    '## 当前群聊记录',
+    transcript || '（暂无）',
+  ].filter(Boolean).join('\n');
+}
+
+function buildModeratorIdleWatchdogPrompt({
+  transcript,
+  roster,
+  spokenAgentIds = [],
+  messages = [],
+  roundCount = 2,
+  speechKind = 'dispatch',
+  softChars = MEETING_MODERATOR_SOFT_CHARS,
+  hardChars = MEETING_MODERATOR_HARD_CHARS,
+  strike = 1,
+  maxStrikes = 3,
+  idleMs = 0,
+} = {}) {
+  const spoken = new Set(spokenAgentIds);
+  const remaining = (roster || []).filter((entry) => !spoken.has(entry.agentId));
+  const dispatchHint = buildModeratorDispatchHint(roster, messages);
+  const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
+  const rounds = normalizeRoundCount(roundCount);
+  const idleMin = Math.max(1, Math.round(idleMs / 60_000));
+  const actionHint = speechKind === 'final_summary'
+    ? '请按 **最终总结格式（仅结论+派活）** 收尾并写「会议结束」，**不要 @ 任何人**。'
+    : (speechKind === 'round_summary'
+      ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
+      : (next
+        ? `请立即 @：@${next.agentId}（${next.label}）`
+        : (remaining.length
+          ? `请 @ 以下尚未发言的议事 Agent 之一：${remaining.map((r) => `@${r.agentId}（${r.label}）`).join('、')}`
+          : '请 @ 下一位议事 Agent 或作本轮总结。')));
+  return [
+    '[系统 · QiziShell]',
+    `⚠️ 已约 ${idleMin} 分钟无任何议事 Agent 新发言（空闲提醒 ${strike}/${maxStrikes}）。`,
+    '会议仍在进行：请主动推进——**必须**在正文里写 @agentId（如 @mo_bao）才会触发 relay。',
+    moderatorSpeechGuidance(speechKind, softChars, hardChars),
+    actionHint,
+    strike >= maxStrikes
+      ? '若仍无法推进，下一条系统消息将要求你强制最终总结并结束会议。'
+      : '',
+    `本次会议共 ${rounds} 轮；全部结束后写「会议结束」且不要 @ 任何人。`,
+    '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
+    dispatchHint ? `\n${dispatchHint}` : '',
+    '',
+    '## 当前群聊记录',
+    transcript || '（暂无）',
+  ].filter(Boolean).join('\n');
+}
+
+function buildModeratorForceFinalSummaryPrompt({
+  transcript,
+  roster,
+  spokenAgentIds = [],
+  messages = [],
+  roundCount = 2,
+  softChars = MEETING_MODERATOR_FINAL_SOFT_CHARS,
+  hardChars = MEETING_MODERATOR_FINAL_HARD_CHARS,
+  idleMs = 0,
+  endReason = '长时间无议事 Agent 反馈',
+} = {}) {
+  const idleMin = Math.max(1, Math.round(idleMs / 60_000));
+  const rounds = normalizeRoundCount(roundCount);
+  const dispatchHint = buildModeratorDispatchHint(roster, messages);
+  return [
+    '[系统 · QiziShell]',
+    `⚠️ 已连续提醒仍无议事 Agent 新发言（约 ${idleMin} 分钟），**必须立即强制收尾**。`,
+    `提前结束原因（须写入总结正文）：${endReason}`,
+    '硬约束：',
+    moderatorSpeechGuidance('final_summary', softChars, hardChars),
+    '- 按 **最终总结格式（仅结论+派活）** 输出；',
+    '- 总结中**明确写出**上述提前结束原因；',
+    '- 正文末尾写「会议结束」；',
+    '- **不要 @ 任何人**（含派活描述也不要写 @）。',
+    `- 共 ${rounds} 轮制；当前为强制提前结束，不必再等待未发言者。`,
+    dispatchHint ? `\n${dispatchHint}` : '',
     '',
     '## 当前群聊记录',
     transcript || '（暂无）',
@@ -427,9 +547,9 @@ function buildModeratorIdlePrompt({
   const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
   const rounds = normalizeRoundCount(roundCount);
   const actionHint = speechKind === 'final_summary'
-    ? '请作 **最终总结** 并写「会议结束」，**不要 @ 任何人**。'
+    ? '请按 **最终总结格式（仅结论+派活）** 收尾并写「会议结束」，**不要 @ 任何人**。'
     : (speechKind === 'round_summary'
-      ? '请作 **当轮完整总结**，然后 @ 名单第一位开始下一轮反馈。'
+      ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
       : (next
         ? `建议现在 @：@${next.agentId}（${next.label}）`
         : (remaining.length
@@ -493,24 +613,29 @@ function hasUnprocessedModeratorMentions(messages, roster, processed, moderatorA
   return false;
 }
 
-/** 主持收尾：有关键词且不再 @ 议事 Agent（@ 表示派发，不是结束） */
-function isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount = 3) {
+/** 主持收尾：有关键词；派活/总结里 @ 已发言者不算「还要 relay 一轮」 */
+function isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount = 3, messages = []) {
   if (!isMeetingClosingMessage(text, roundCount)) return false;
   const mentions = parseMeetingMentions(text, roster, moderatorAgentId);
-  if (mentions.length > 0) return false;
-  return true;
+  if (mentions.length === 0) return true;
+  const relayable = mentions.filter(
+    (m) => !shouldSkipRelayMention(text, m.agentId, messages, moderatorAgentId),
+  );
+  return relayable.length === 0;
 }
 
 function hasClosingModeratorMessage(messages, moderatorAgentId, roster = [], processed = new Set(), roundCount = 3) {
   if (!Array.isArray(messages)) return false;
-  if (hasUnprocessedModeratorMentions(messages, roster, processed, moderatorAgentId)) {
-    return false;
-  }
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (msg.speakerLabel === '任务书') continue;
     if (msg.speakerAgentId !== moderatorAgentId) continue;
-    if (isModeratorClosingMessage(msg.text, roster, moderatorAgentId, roundCount)) return true;
+    if (msg.streaming) continue;
+    if (isModeratorClosingMessage(msg.text, roster, moderatorAgentId, roundCount, messages)) {
+      return true;
+    }
+    // 只认最近一条主持发言是否收尾；旧消息里遗留的 @ 不再阻塞结束
+    return false;
   }
   return false;
 }
@@ -608,9 +733,10 @@ function buildModeratorBriefingMessage({
     '你现在是本次会议 **主持 Agent**。硬约束：',
     '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾与派活；',
     '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
-    `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；硬上限约 ${MEETING_MODERATOR_HARD_CHARS}/${MEETING_MODERATOR_SUMMARY_HARD_CHARS}/${MEETING_MODERATOR_FINAL_HARD_CHARS}/${MEETING_PARTICIPANT_HARD_CHARS} 字；`,
-    '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的轮次总结；',
-    `- 按 **${rounds} 轮** 议程推进（${roundWord}轮制，最多 ${rounds} 轮总结后结束）；每轮：依次 @ 各议事 Agent 各发言一次 → 你作当轮完整总结 → 将总结发给各 Agent 再论；**全部结束后作最终总结并写「会议结束」，不要 @ 任何人**；`,
+    `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**（仅结论）建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；`,
+    '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧、下步/派活），**禁止**复述研讨过程、逐人回顾、发散新问题；格式见系统后续提示中的 **共识/分歧/下轮焦点** 或 **结论/派活** 块；',
+    '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的**结论型**轮次总结；',
+    `- 按 **${rounds} 轮** 议程推进（${roundWord}轮制，最多 ${rounds} 轮总结后结束）；每轮：依次 @ 各议事 Agent 各发言一次 → 你作**结论型**当轮总结 → 将总结发给各 Agent 再论；**全部结束后作最终总结并写「会议结束」，不要 @ 任何人**；`,
     '- **派发语法（硬约束）**：只认 @agentId，例如 @mo_bao；**@墨宝 等中文名不会被 relay**；一次只 @ 一人；',
     '- **纠正派发错误时**：正文里**不要**写 @agentId（用纯文字 nai_pang 即可），否则 QiziShell 仍会 relay；',
     '- **禁止**调用 sessions_send / sessions_spawn，**禁止**向任何 Agent 的 main 私聊发消息；只需在发言里 @，QiziShell 会 relay；',
@@ -819,6 +945,8 @@ module.exports = {
   buildParticipantGroupPrompt,
   buildModeratorContinuePrompt,
   buildModeratorIdlePrompt,
+  buildModeratorIdleWatchdogPrompt,
+  buildModeratorForceFinalSummaryPrompt,
   isMeetingCompleteText,
   isMeetingClosingMessage,
   isModeratorClosingMessage,

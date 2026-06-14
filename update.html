@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';">
+  <title>Update QiziShell</title>
+  <link rel="stylesheet" href="update.css">
+</head>
+<body>
+  <main class="update">
+    <div class="update-hero">
+      <img class="update-hero-img" src="assets/update-hero.png" alt="">
+    </div>
+    <div class="update-body">
+      <div class="update-content">
+      <p class="update-kicker">Software Update</p>
+      <h1 class="update-title">QiziShell 更新</h1>
+      <p class="update-current">当前版本 <span id="update-current-version">—</span></p>
+
+      <div class="update-status-wrap">
+        <div class="update-spinner" id="update-spinner" aria-hidden="true"></div>
+        <p class="update-status checking" id="update-status">正在连接 GitHub…</p>
+      </div>
+
+      <p class="update-notes" id="update-notes" hidden></p>
+
+      <div class="update-progress" id="update-progress" hidden>
+        <div class="update-progress-bar" aria-hidden="true">
+          <div class="update-progress-fill" id="update-progress-fill"></div>
+        </div>
+        <p class="update-progress-text" id="update-progress-text">准备下载…</p>
+      </div>
+      </div>
+
+      <div class="update-actions">
+        <button type="button" class="update-btn" id="update-install-btn" hidden>升级</button>
+        <button type="button" class="update-btn update-btn-ghost" id="update-recheck-btn" hidden>重新检查</button>
+      </div>
+    </div>
+  </main>
+  <script src="update.js"></script>
+</body>
+</html>

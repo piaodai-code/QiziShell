@@ -69,6 +69,7 @@ contextBridge.exposeInMainWorld('qizi', {
   cancelMeeting: () => ipcRenderer.invoke('qizi-meeting:cancel'),
   getMeetingStatus: () => ipcRenderer.invoke('qizi-meeting:status'),
   listMeetingRecords: () => ipcRenderer.invoke('qizi-meeting:list-records'),
+  loadMeetingRecord: (payload) => ipcRenderer.invoke('qizi-meeting:load-record', payload),
   loadMeetingHistory: (payload) => ipcRenderer.invoke('qizi-meeting:load-history', payload),
   exitMeeting: () => ipcRenderer.invoke('qizi-meeting:exit'),
   onMeetingEvent: (callback) => {

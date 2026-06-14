@@ -26,6 +26,7 @@ const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
 const titlebarAgentBtn = document.getElementById('titlebar-agent-btn');
 const titlebarAgentAvatar = document.getElementById('titlebar-agent-avatar');
+const titlebarMeetingTitle = document.getElementById('titlebar-meeting-title');
 const agentPopup = document.getElementById('agent-popup');
 const contextMeter = document.getElementById('context-meter');
 const contextMeterFill = document.getElementById('context-meter-fill');
@@ -2449,7 +2450,14 @@ function hideAgentPopup() {
   if (!agentPopup) return;
   agentPopup.hidden = true;
   agentPopup.innerHTML = '';
-  if (titlebarAgentBtn) titlebarAgentBtn.classList.remove('open');
+  if (titlebarAgentBtn) {
+    titlebarAgentBtn.classList.remove('open');
+    titlebarAgentBtn.setAttribute('aria-expanded', 'false');
+  }
+  if (titlebarMeetingTitle) {
+    titlebarMeetingTitle.classList.remove('open');
+    titlebarMeetingTitle.setAttribute('aria-expanded', 'false');
+  }
 }
 
 function renderAgentPopup(agents) {
@@ -2520,6 +2528,8 @@ function renderAgentPopup(agents) {
     meetingMeta.textContent = window.MeetingView.isVisible?.()
       ? (topic ? `进行中 · ${topic}` : '进行中')
       : (topic ? `进行中 · 点击返回 · ${topic}` : '进行中 · 点击返回');
+  } else if (window.MeetingView?.isVisible?.()) {
+    meetingMeta.textContent = '会议记录';
   } else {
     meetingMeta.textContent = '多 Agent 结构化会议';
   }
@@ -2529,8 +2539,8 @@ function renderAgentPopup(agents) {
   meetingBtn.appendChild(meetingBody);
   meetingBtn.addEventListener('click', () => {
     hideAgentPopup();
-    if (window.MeetingView?.isRunning?.()) {
-      window.MeetingView.showView();
+    if (window.MeetingView?.openHub) {
+      void window.MeetingView.openHub();
       return;
     }
     if (window.MeetingUI?.openSetup) window.MeetingUI.openSetup(agents);
@@ -2543,7 +2553,8 @@ function renderAgentPopup(agents) {
 }
 
 async function showAgentPopup() {
-  if (!agentPopup || !titlebarAgentBtn) return;
+  if (!agentPopup) return;
+  if (!titlebarAgentBtn && !titlebarMeetingTitle) return;
   if (!agentPopup.hidden) {
     hideAgentPopup();
     return;
@@ -2551,7 +2562,15 @@ async function showAgentPopup() {
   hideModelPopup();
   hideCommandPopup();
   agentPopup.hidden = false;
-  titlebarAgentBtn.classList.add('open');
+  const inMeeting = document.body.classList.contains('meeting-mode');
+  if (titlebarAgentBtn) {
+    titlebarAgentBtn.classList.toggle('open', !inMeeting);
+    titlebarAgentBtn.setAttribute('aria-expanded', inMeeting ? 'false' : 'true');
+  }
+  if (titlebarMeetingTitle) {
+    titlebarMeetingTitle.classList.toggle('open', inMeeting);
+    titlebarMeetingTitle.setAttribute('aria-expanded', inMeeting ? 'true' : 'false');
+  }
   agentPopup.innerHTML = '<div class="agent-popup-loading">加载 Agent…</div>';
 
   if (!connected) {
@@ -3618,6 +3637,13 @@ if (titlebarAgentBtn) {
   });
 }
 
+if (titlebarMeetingTitle) {
+  titlebarMeetingTitle.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showAgentPopup();
+  });
+}
+
 if (modelPickerBtn) {
   modelPickerBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -4633,27 +4659,28 @@ if (messagesEl) {
 
 let meetingTitlebarBackup = null;
 
-function buildMeetingTitlebarAvatarHtml() {
-  const src = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
-  return `<span class="agent-avatar agent-avatar-titlebar agent-avatar-meeting" role="img" aria-label="会议"><img src="${src}" alt="会议"></span>`;
-}
-
-function applyMeetingTitlebar(config) {
-  if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
-  if (!meetingTitlebarBackup) {
+function applyMeetingTitlebar() {
+  if (!titlebarMeetingTitle) return;
+  if (!meetingTitlebarBackup && titlebarAgentAvatar && titlebarAgentBtn) {
     meetingTitlebarBackup = {
       avatarHtml: titlebarAgentAvatar.innerHTML,
       title: titlebarAgentBtn.title,
       ariaLabel: titlebarAgentBtn.getAttribute('aria-label'),
     };
   }
-  titlebarAgentAvatar.innerHTML = buildMeetingTitlebarAvatarHtml();
-  titlebarAgentBtn.title = '会议模式';
-  titlebarAgentBtn.setAttribute('aria-label', '会议模式');
-  titlebarAgentBtn.classList.add('titlebar-agent-btn--meeting-view');
+  titlebarMeetingTitle.hidden = false;
+  titlebarMeetingTitle.setAttribute('aria-hidden', 'false');
+  titlebarMeetingTitle.title = '切换 Agent / 会议';
+  titlebarMeetingTitle.setAttribute('aria-label', '切换 Agent / 会议');
 }
 
 function restoreMeetingTitlebar(clearBackup = false) {
+  if (titlebarMeetingTitle) {
+    titlebarMeetingTitle.hidden = true;
+    titlebarMeetingTitle.setAttribute('aria-hidden', 'true');
+    titlebarMeetingTitle.classList.remove('open');
+    titlebarMeetingTitle.setAttribute('aria-expanded', 'false');
+  }
   if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
   titlebarAgentBtn.classList.remove('titlebar-agent-btn--meeting-view');
   if (meetingTitlebarBackup) {
@@ -4667,6 +4694,10 @@ function restoreMeetingTitlebar(clearBackup = false) {
 }
 
 window.addEventListener('qizi-meeting-entered', (event) => {
+  applyMeetingTitlebar(event.detail || {});
+});
+
+window.addEventListener('qizi-meeting-hub-opened', (event) => {
   applyMeetingTitlebar(event.detail || {});
 });
 

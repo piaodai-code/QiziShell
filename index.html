@@ -11,6 +11,7 @@
     <header class="titlebar">
       <div class="titlebar-left"></div>
       <div class="titlebar-center">
+        <button type="button" class="titlebar-meeting-title" id="titlebar-meeting-title" hidden aria-hidden="true" title="切换 Agent / 会议" aria-label="切换 Agent / 会议" aria-haspopup="true" aria-expanded="false">会议</button>
         <div class="titlebar-identity" id="titlebar-identity">
           <button type="button" class="titlebar-agent-btn" id="titlebar-agent-btn" title="切换 Agent" aria-label="切换 Agent">
             <span class="titlebar-agent-avatar" id="titlebar-agent-avatar"></span>
@@ -48,13 +49,20 @@
         </div>
       </div>
     </header>
-    <div class="meeting-banner" id="meeting-banner" hidden>
-      <div class="meeting-banner-main">
-        <span class="meeting-banner-label">会议</span>
-        <span class="meeting-banner-topic" id="meeting-banner-topic"></span>
-        <span class="meeting-banner-status" id="meeting-banner-status"></span>
+    <div class="meeting-toolbar" id="meeting-toolbar" hidden>
+      <div class="meeting-toolbar-body">
+        <div class="meeting-toolbar-left">
+          <label class="meeting-history-label" for="meeting-history-select">历史记录</label>
+          <select class="meeting-history-select" id="meeting-history-select" aria-label="历史会议">
+            <option value="">加载中…</option>
+          </select>
+          <span class="meeting-toolbar-status" id="meeting-toolbar-status" hidden></span>
+        </div>
+        <div class="meeting-toolbar-actions">
+          <button type="button" class="meeting-toolbar-btn" id="meeting-new-btn">新建会议</button>
+          <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-muted" id="meeting-leave-hub-btn">结束会议</button>
+        </div>
       </div>
-      <button type="button" class="meeting-exit-btn" id="meeting-exit-btn">退出会议</button>
     </div>
     <section class="chat-screen" id="chat-screen">
       <main class="messages" id="messages">
@@ -317,7 +325,13 @@
         </label>
         <label class="meeting-field">
           <span class="meeting-label">期望结论方向（可选）</span>
-          <input type="text" class="meeting-input" id="meeting-goal" placeholder="例如：确定 MVP 范围与优先级">
+          <div class="meeting-goal-row">
+            <input type="text" class="meeting-input meeting-goal-input" id="meeting-goal" placeholder="例如：确定 MVP 范围与优先级">
+            <select class="meeting-input meeting-exec-select" id="meeting-exec-agent" title="会后执行 Agent" aria-label="会后执行 Agent">
+              <option value="">无</option>
+            </select>
+          </div>
+          <span class="meeting-field-hint">右侧选 Agent 时，会议结束后将把主持最终总结转发给他，左侧期望结论方向作为留言</span>
         </label>
         <label class="meeting-field">
           <span class="meeting-label">主持 Agent（仅主持，不参与议事）</span>
@@ -341,6 +355,15 @@
           <button type="button" class="meeting-secondary-btn" id="meeting-cancel-btn">取消</button>
           <button type="button" class="meeting-primary-btn" id="meeting-start-btn">开始会议</button>
         </div>
+      </div>
+    </div>
+  </div>
+  <div class="meeting-end-confirm-modal" id="meeting-end-confirm-modal" hidden role="dialog" aria-modal="true" aria-labelledby="meeting-end-confirm-title">
+    <div class="meeting-end-confirm-panel">
+      <p class="meeting-end-confirm-text" id="meeting-end-confirm-title">会议仍在进行中，是否强制结束？</p>
+      <div class="meeting-end-confirm-actions">
+        <button type="button" class="meeting-end-confirm-btn meeting-end-confirm-btn-secondary" id="meeting-end-confirm-no">否</button>
+        <button type="button" class="meeting-end-confirm-btn meeting-end-confirm-btn-primary" id="meeting-end-confirm-yes">是</button>
       </div>
     </div>
   </div>

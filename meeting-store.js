@@ -51,8 +51,32 @@ function listMeetingRecords(limit = 20) {
   });
 }
 
+function loadMeetingRecordFile(filePath) {
+  if (!filePath || typeof filePath !== 'string') {
+    throw new Error('缺少会议记录路径');
+  }
+  const resolved = path.resolve(filePath);
+  const dir = path.resolve(MEETINGS_DIR);
+  if (!resolved.startsWith(`${dir}${path.sep}`) && resolved !== dir) {
+    throw new Error('无效会议记录路径');
+  }
+  const record = JSON.parse(fs.readFileSync(resolved, 'utf8'));
+  return record;
+}
+
+function loadMeetingRecordById(meetingId) {
+  const id = String(meetingId || '').trim();
+  if (!id) throw new Error('缺少会议 id');
+  const entries = listMeetingRecords(200);
+  const found = entries.find((entry) => entry.id === id);
+  if (!found?.file) throw new Error('未找到会议记录');
+  return loadMeetingRecordFile(found.file);
+}
+
 module.exports = {
   MEETINGS_DIR,
   saveMeetingRecord,
   listMeetingRecords,
+  loadMeetingRecordFile,
+  loadMeetingRecordById,
 };
