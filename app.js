@@ -89,6 +89,7 @@ const sttRecordingWaveWrap = sttRecordingWaveCanvas?.closest('.stt-recording-wav
 const sttRecordingStopBtn = document.getElementById('stt-recording-stop-btn');
 const sttRecordingCancelBtn = document.getElementById('stt-recording-cancel-btn');
 const composerInputWrapEl = document.getElementById('composer-input-wrap');
+const auxModalDimEl = document.getElementById('aux-modal-dim');
 
 let activeSettingsTab = 'gateway';
 
@@ -4536,6 +4537,15 @@ if (settingsModal) {
 if (window.qizi?.onOpenSettings) {
   window.qizi.onOpenSettings(() => {
     openSettingsModal();
+  });
+}
+
+if (window.qizi?.onAuxModalDim) {
+  window.qizi.onAuxModalDim(({ active } = {}) => {
+    if (!auxModalDimEl) return;
+    const on = Boolean(active);
+    auxModalDimEl.hidden = !on;
+    auxModalDimEl.setAttribute('aria-hidden', on ? 'false' : 'true');
   });
 }
 

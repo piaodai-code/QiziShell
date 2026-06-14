@@ -82,6 +82,11 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:open-settings', handler);
     return () => ipcRenderer.removeListener('openclaw:open-settings', handler);
   },
+  onAuxModalDim: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:aux-modal-dim', handler);
+    return () => ipcRenderer.removeListener('openclaw:aux-modal-dim', handler);
+  },
   getSttStatus: () => ipcRenderer.invoke('openclaw:stt:status'),
   installStt: () => ipcRenderer.invoke('openclaw:stt:install'),
   uninstallStt: () => ipcRenderer.invoke('openclaw:stt:uninstall'),

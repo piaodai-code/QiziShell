@@ -1432,6 +1432,17 @@ body.drag-over .composer-pending {
   to { opacity: 1; }
 }
 
+/* About / Update 打开时主窗口变暗（与设置弹层一致） */
+.aux-modal-dim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.42);
+  z-index: 10000;
+  pointer-events: auto;
+  animation: img-modal-fade 0.12s ease-out;
+}
+.aux-modal-dim[hidden] { display: none; }
+
 /* 设置 */
 .settings-modal {
   position: fixed;

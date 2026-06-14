@@ -89,6 +89,8 @@ function isAllowedSttAudioPath(audioPath) {
 }
 let aboutWindow = null;
 let updateWindow = null;
+let pendingUpdateInfo = null;
+let auxiliaryModalRefCount = 0;
 /** @type {Map<string, { fullText: string, resolve: Function, reject: Function, timeout: NodeJS.Timeout, lastEventAt: number }>} */
 const pendingMeetingRuns = new Map();
 let meetingEngine = null;
@@ -514,27 +516,75 @@ function openSettings() {
   safeSendTo(mainWindow.webContents, 'openclaw:open-settings');
 }
 
+function setMainWindowAuxModalDim(active) {
+  if (active) auxiliaryModalRefCount += 1;
+  else auxiliaryModalRefCount = Math.max(0, auxiliaryModalRefCount - 1);
+  const on = auxiliaryModalRefCount > 0;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    safeSendTo(mainWindow.webContents, 'openclaw:aux-modal-dim', { active: on });
+  }
+}
+
+function centerAuxiliaryWindowOnParent(child, parent) {
+  if (!child || child.isDestroyed() || !parent || parent.isDestroyed()) return;
+  const pb = parent.getBounds();
+  const [cw, ch] = child.getSize();
+  child.setPosition(
+    Math.round(pb.x + (pb.width - cw) / 2),
+    Math.round(pb.y + (pb.height - ch) / 2),
+  );
+}
+
+function createAuxiliaryModalWindow(options) {
+  showMainWindow();
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  const win = new BrowserWindow({
+    width: 400,
+    height: 560,
+    resizable: false,
+    closable: true,
+    minimizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    backgroundColor: '#1a2421',
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'default' } : {}),
+    ...options,
+    parent: parent || undefined,
+    // macOS 下 modal 子窗口会异常（红绿灯不可用）；parent 已保证叠在主窗口之上
+    modal: process.platform !== 'darwin' && Boolean(parent),
+    closable: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      ...(options.webPreferences || {}),
+    },
+  });
+  win.setMenu(null);
+  setMainWindowAuxModalDim(true);
+  win.once('ready-to-show', () => {
+    centerAuxiliaryWindowOnParent(win, parent);
+    win.show();
+    win.focus();
+  });
+  win.on('closed', () => {
+    setMainWindowAuxModalDim(false);
+  });
+  return win;
+}
+
 function openAbout() {
   if (aboutWindow && !aboutWindow.isDestroyed()) {
+    showMainWindow();
     aboutWindow.focus();
     return;
   }
   const { version } = require('./package.json');
-  aboutWindow = new BrowserWindow({
+  aboutWindow = createAuxiliaryModalWindow({
     width: 360,
     height: 440,
-    resizable: false,
-    minimizable: true,
-    maximizable: false,
-    fullscreenable: false,
     title: 'About QiziShell',
-    backgroundColor: '#1a2421',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
   });
-  aboutWindow.setMenu(null);
   aboutWindow.loadFile(path.join(__dirname, 'about.html'), {
     query: { version },
   });
@@ -552,27 +602,20 @@ function getAuthorizedUpdateWindow(event) {
 
 function openUpdate() {
   if (updateWindow && !updateWindow.isDestroyed()) {
+    showMainWindow();
     updateWindow.focus();
     safeSendTo(updateWindow.webContents, 'qizi-update:recheck');
     return;
   }
   const { version } = require('./package.json');
-  updateWindow = new BrowserWindow({
+  updateWindow = createAuxiliaryModalWindow({
     width: 400,
-    height: 560,
-    resizable: false,
-    minimizable: true,
-    maximizable: false,
-    fullscreenable: false,
+    height: 580,
     title: 'Update QiziShell',
-    backgroundColor: '#1a2421',
     webPreferences: {
       preload: path.join(__dirname, 'update-preload.js'),
-      nodeIntegration: false,
-      contextIsolation: true,
     },
   });
-  updateWindow.setMenu(null);
   updateWindow.loadFile(path.join(__dirname, 'update.html'), {
     query: { version },
   });
@@ -2460,9 +2503,9 @@ ipcMain.handle('qizi-update:install', async (event) => {
   try {
     await downloadAndInstallUpdate(pendingUpdateInfo, ({ received, total }) => {
       safeSendTo(event.sender, 'qizi-update:progress', { received, total });
-    });
+    }, { updaterPid: process.pid });
     isQuitting = true;
-    setTimeout(() => app.quit(), 500);
+    app.quit();
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message || '升级失败' };
