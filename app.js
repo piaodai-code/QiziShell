@@ -31,6 +31,7 @@ const contextMeter = document.getElementById('context-meter');
 const contextMeterFill = document.getElementById('context-meter-fill');
 const contextMeterText = document.getElementById('context-meter-text');
 const settingsBtn = document.getElementById('settings-btn');
+const appMenuPopup = document.getElementById('app-menu-popup');
 const settingsModal = document.getElementById('settings-modal');
 const settingsCloseBtn = document.getElementById('settings-close-btn');
 const settingsCancelBtn = document.getElementById('settings-cancel-btn');
@@ -164,6 +165,7 @@ let userAborted = false;
 /** @type {{ who: 'me'|'them', authorLabel: string, text: string, time?: string } | null} */
 let pendingQuote = null;
 let contextMenuTargetIndex = -1;
+let contextMenuSource = 'chat';
 let forwardTargetMessage = null;
 let forwardSelectedAgentIds = new Set();
 let forwardBatchMode = false;
@@ -503,14 +505,43 @@ function getQuotePreviewLine(text) {
   return `${trimmed.slice(0, 96)}…`;
 }
 
+function getActiveMessages() {
+  if (contextMenuSource === 'meeting' && window.MeetingView?.getMessages) {
+    return window.MeetingView.getMessages();
+  }
+  return messages;
+}
+
+function getMeetingMessagesEl() {
+  return document.getElementById('meeting-messages');
+}
+
+function renderActiveMessageView() {
+  if (contextMenuSource === 'meeting' || (multiSelectMode && window.MeetingView?.isVisible?.())) {
+    window.MeetingView?.render?.();
+    return;
+  }
+  if (!window.MeetingView?.isVisible?.()) render();
+}
+
 function getMessageAuthorLabel(msg) {
   if (!msg) return '未知';
+  if (contextMenuSource === 'meeting') {
+    if (msg.speakerLabel === '任务书') return '任务书';
+    if (msg.speakerLabel) return msg.speakerLabel;
+    if (msg.who === 'me') return '主持';
+    if (msg.speakerAgentId) return msg.speakerAgentId;
+    return 'Agent';
+  }
   if (msg.who === 'me') return LOCAL_USER_LABEL;
   return formatAgentLabel(getCurrentAgentInfo());
 }
 
 function extractQuoteTextFromMessage(msg) {
   if (!msg) return '';
+  if (contextMenuSource === 'meeting') {
+    return String(msg.text || '').trim();
+  }
   const { plainText } = renderMessageContent(msg.text || '');
   let body = plainText.trim();
   if (!body && Array.isArray(msg.images) && msg.images.length > 0) {
@@ -853,6 +884,10 @@ function setPendingQuoteFromMessage(msg) {
     sentTime: msg.sentTime,
   };
   renderComposerQuote();
+  if (window.MeetingView?.isVisible?.()) {
+    window.MeetingView.leaveView();
+    setStatus('已引用，可在 Agent 私聊中回复', 'ok');
+  }
   inputEl?.focus();
   return true;
 }
@@ -906,6 +941,9 @@ function utf8ByteLength(text) {
 
 function getMessageSelectableText(msg) {
   if (!msg) return '';
+  if (contextMenuSource === 'meeting') {
+    return String(msg.text || '').trim();
+  }
   const parts = [];
   const forwardRef = resolveMessageForwardRef(msg);
   if (forwardRef?.text) {
@@ -925,11 +963,12 @@ function isMessageSelectable(msg) {
 
 function buildMergedForwardSnapshot(indices) {
   const sorted = [...indices].sort((a, b) => a - b);
+  const list = getActiveMessages();
   const blocks = [];
   let earliestTime = '';
   let earliestSentAtMs;
   for (const idx of sorted) {
-    const msg = messages[idx];
+    const msg = list[idx];
     if (!isMessageSelectable(msg)) continue;
     const text = getMessageSelectableText(msg);
     const author = getMessageAuthorLabel(msg);
@@ -954,9 +993,11 @@ function buildExportEntryForMessage(msg) {
   const entry = {
     author: getMessageAuthorLabel(msg),
     time: msg.time || '',
-    text: msg.who === 'me'
-      ? getUserMessageDisplayText(msg)
-      : String(msg.text || ''),
+    text: contextMenuSource === 'meeting'
+      ? String(msg.text || '').trim()
+      : (msg.who === 'me'
+        ? getUserMessageDisplayText(msg)
+        : String(msg.text || '')),
   };
   entry.text = entry.text.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n').trim();
   if (forwardRef?.text) {
@@ -975,8 +1016,9 @@ function buildExportEntryForMessage(msg) {
 
 function buildExportEntries(indices) {
   const sorted = [...indices].sort((a, b) => a - b);
+  const list = getActiveMessages();
   return sorted
-    .map((idx) => buildExportEntryForMessage(messages[idx]))
+    .map((idx) => buildExportEntryForMessage(list[idx]))
     .filter((entry) => entry.text || entry.quote?.text || entry.forward?.text);
 }
 
@@ -1008,7 +1050,7 @@ async function exportMessagesToWord(entries, { exitMultiSelectOnSuccess = false 
 }
 
 async function exportMessageAtIndex(index) {
-  const msg = messages[index];
+  const msg = getActiveMessages()[index];
   if (!isMessageSelectable(msg)) {
     setStatus('该消息没有可导出的文字', 'error');
     return;
@@ -1030,17 +1072,29 @@ function updateMultiSelectBar() {
 function setMultiSelectMode(enabled) {
   multiSelectMode = enabled;
   if (!enabled) multiSelectedIndices = new Set();
-  if (messagesEl) messagesEl.classList.toggle('is-multiselect', enabled);
-  if (composerBodyEl) composerBodyEl.hidden = enabled;
+  const meetingMessagesEl = getMeetingMessagesEl();
+  if (meetingMessagesEl) {
+    meetingMessagesEl.classList.toggle('is-multiselect', enabled && contextMenuSource === 'meeting');
+  }
+  if (messagesEl) {
+    messagesEl.classList.toggle('is-multiselect', enabled && contextMenuSource !== 'meeting');
+  }
+  if (composerBodyEl) composerBodyEl.hidden = enabled && contextMenuSource !== 'meeting';
   if (composerMultiselectEl) composerMultiselectEl.hidden = !enabled;
+  const observeBarEl = document.getElementById('meeting-observe-bar');
+  if (observeBarEl && window.MeetingView?.isVisible?.()) {
+    observeBarEl.hidden = enabled;
+  }
   hideMessageContextMenu();
   updateMultiSelectBar();
-  render();
+  renderActiveMessageView();
 }
 
 function toggleMultiSelectIndex(index) {
-  if (!multiSelectMode || index < 0 || index >= messages.length) return;
-  const msg = messages[index];
+  if (!multiSelectMode) return;
+  const list = getActiveMessages();
+  if (index < 0 || index >= list.length) return;
+  const msg = list[index];
   if (!isMessageSelectable(msg)) return;
   if (multiSelectedIndices.has(index)) {
     multiSelectedIndices.delete(index);
@@ -1048,15 +1102,16 @@ function toggleMultiSelectIndex(index) {
     multiSelectedIndices.add(index);
   }
   updateMultiSelectBar();
-  render();
+  renderActiveMessageView();
 }
 
 function enterMultiSelectMode(initialIndex = -1) {
   setMultiSelectMode(true);
-  if (initialIndex >= 0 && isMessageSelectable(messages[initialIndex])) {
+  const list = getActiveMessages();
+  if (initialIndex >= 0 && isMessageSelectable(list[initialIndex])) {
     multiSelectedIndices.add(initialIndex);
     updateMultiSelectBar();
-    render();
+    renderActiveMessageView();
   }
 }
 
@@ -1066,7 +1121,7 @@ function exitMultiSelectMode() {
 
 function renderMessageSelectCheckHtml(index) {
   if (!multiSelectMode) return '';
-  const msg = messages[index];
+  const msg = getActiveMessages()[index];
   if (!isMessageSelectable(msg)) {
     return '<button type="button" class="msg-select-check" hidden aria-hidden="true" tabindex="-1"></button>';
   }
@@ -1312,15 +1367,53 @@ async function submitForward() {
   }
 }
 
+function getMeetingDraftFromMessage(msg) {
+  if (!msg) return '';
+  if (msg.who === 'me') {
+    return getUserMessageDisplayText(msg).trim();
+  }
+  return String(msg.text || '').trim();
+}
+
+async function openMeetingFromMessage(index) {
+  const msg = messages[index];
+  if (!msg) return;
+  const draft = getMeetingDraftFromMessage(msg);
+  if (!draft) {
+    setStatus('该消息没有可用内容', 'error');
+    return;
+  }
+  hideMessageContextMenu();
+  let agents = [...agentCatalog.values()];
+  if (agents.length === 0) {
+    try {
+      const result = await window.qizi.listAgents();
+      if (result?.ok) {
+        applyAgentCatalog(result.agents);
+        agents = result.agents || [];
+      }
+    } catch {
+      // ignore
+    }
+  }
+  if (window.MeetingUI?.openSetup) {
+    window.MeetingUI.openSetup(agents, { draft });
+  }
+}
+
 function hideMessageContextMenu() {
   if (!msgContextMenuEl) return;
   msgContextMenuEl.hidden = true;
   contextMenuTargetIndex = -1;
 }
 
-function showMessageContextMenu(x, y, msgIndex) {
+function showMessageContextMenu(x, y, msgIndex, source = 'chat') {
   if (!msgContextMenuEl) return;
+  contextMenuSource = source;
   contextMenuTargetIndex = msgIndex;
+  msgContextMenuEl.querySelectorAll('[data-chat-only="1"]').forEach((el) => {
+    el.hidden = source !== 'chat';
+  });
   msgContextMenuEl.hidden = false;
   const menuRect = msgContextMenuEl.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
@@ -1820,6 +1913,7 @@ function loadMessages() {
 }
 
 function render() {
+  if (window.MeetingView?.isVisible?.()) return;
   if (!messagesEl) return;
   normalizeStreamingFlags();
   if (messages.length === 0) {
@@ -1891,6 +1985,7 @@ function stopSessionWatch() {
 }
 
 async function tickSessionWatch() {
+  if (window.MeetingView?.isVisible?.()) return;
   if (!connected || isLocalOwnedActiveRun()) return;
 
   try {
@@ -1928,6 +2023,7 @@ function startSessionWatch() {
 
 async function handleExternalSessionChat(payload) {
   if (!payload || isLocalOwnedActiveRun()) return;
+  if (window.MeetingView?.isVisible?.()) return;
 
   if (payload.state === 'delta') {
     await syncHistoryFromGateway();
@@ -2389,10 +2485,59 @@ function renderAgentPopup(agents) {
       if (agent.id !== currentAgentId) {
         switchToAgent(agent.id);
       } else {
+        if (window.MeetingView?.isVisible?.()) {
+          window.MeetingView.leaveView();
+        }
         hideAgentPopup();
       }
     });
     agentPopup.appendChild(btn);
+  }
+  const meetingBtn = document.createElement('button');
+  meetingBtn.type = 'button';
+  meetingBtn.className = 'agent-item agent-item-meeting';
+  if (window.MeetingView?.isRunning?.()) {
+    meetingBtn.classList.add('active');
+    meetingBtn.classList.add('agent-item-meeting-running');
+  }
+  if (window.MeetingView?.isVisible?.()) {
+    meetingBtn.classList.add('active');
+  }
+  const meetingAvatarWrap = document.createElement('span');
+  meetingAvatarWrap.className = 'agent-item-avatar agent-item-avatar-meeting';
+  const meetingAvatarSrc = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
+  meetingAvatarWrap.innerHTML = `<img src="${meetingAvatarSrc}" alt="" aria-hidden="true">`;
+  const meetingBody = document.createElement('span');
+  meetingBody.className = 'agent-item-body';
+  const meetingName = document.createElement('span');
+  meetingName.className = 'agent-item-name';
+  meetingName.textContent = '会议';
+  const meetingMeta = document.createElement('span');
+  meetingMeta.className = 'agent-item-meta';
+  if (window.MeetingView?.isRunning?.()) {
+    const topic = window.MeetingView.getConfig?.()?.topic;
+    meetingMeta.textContent = window.MeetingView.isVisible?.()
+      ? (topic ? `进行中 · ${topic}` : '进行中')
+      : (topic ? `进行中 · 点击返回 · ${topic}` : '进行中 · 点击返回');
+  } else {
+    meetingMeta.textContent = '多 Agent 结构化会议';
+  }
+  meetingBody.appendChild(meetingName);
+  meetingBody.appendChild(meetingMeta);
+  meetingBtn.appendChild(meetingAvatarWrap);
+  meetingBtn.appendChild(meetingBody);
+  meetingBtn.addEventListener('click', () => {
+    hideAgentPopup();
+    if (window.MeetingView?.isRunning?.()) {
+      window.MeetingView.showView();
+      return;
+    }
+    if (window.MeetingUI?.openSetup) window.MeetingUI.openSetup(agents);
+  });
+  if (window.MeetingView?.isRunning?.()) {
+    agentPopup.insertBefore(meetingBtn, agentPopup.firstChild);
+  } else {
+    agentPopup.appendChild(meetingBtn);
   }
 }
 
@@ -2431,6 +2576,9 @@ async function showAgentPopup() {
 }
 
 async function switchToAgent(agentId) {
+  if (window.MeetingView?.isVisible?.()) {
+    window.MeetingView.leaveView();
+  }
   if (!agentId || agentId === currentAgentId) {
     hideAgentPopup();
     return;
@@ -2988,15 +3136,19 @@ if (msgContextMenuEl) {
     if (!item || item.disabled) return;
     const action = item.dataset.action;
     if (action === 'quote') {
-      const msg = messages[contextMenuTargetIndex];
+      const msg = getActiveMessages()[contextMenuTargetIndex];
       if (msg) setPendingQuoteFromMessage(msg);
       hideMessageContextMenu();
       return;
     }
     if (action === 'forward') {
-      const msg = messages[contextMenuTargetIndex];
+      const msg = getActiveMessages()[contextMenuTargetIndex];
       if (msg) openForwardModal(msg);
       else hideMessageContextMenu();
+      return;
+    }
+    if (action === 'start-meeting') {
+      void openMeetingFromMessage(contextMenuTargetIndex);
       return;
     }
     if (action === 'multiselect') {
@@ -3484,6 +3636,9 @@ document.addEventListener('click', (e) => {
   if (agentPopup && !agentPopup.hidden) {
     if (!e.target.closest('.titlebar-center')) hideAgentPopup();
   }
+  if (appMenuPopup && !appMenuPopup.hidden) {
+    if (!e.target.closest('.titlebar-menu-wrap')) hideAppMenu();
+  }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -3503,6 +3658,7 @@ document.addEventListener('keydown', (e) => {
     if (modelPopup && !modelPopup.hidden) hideModelPopup();
     if (emojiPickerEl && !emojiPickerEl.hidden) hideEmojiPicker();
     if (agentPopup && !agentPopup.hidden) hideAgentPopup();
+    if (appMenuPopup && !appMenuPopup.hidden) hideAppMenu();
   }
 });
 
@@ -4186,7 +4342,7 @@ async function populateSettingsForm() {
       : '请向管理员索取 Gateway Token 后手动填写。';
   }
   if (settingsWsUrlInput && !settingsWsUrlInput.value) {
-    settingsWsUrlInput.placeholder = '向管理员索取，如 wss://host:18789';
+    settingsWsUrlInput.placeholder = '向管理员索取，如 wss://host:18789 或 ws://host:18789';
   }
   if (settingsSourceHint) {
     const sourceLabel = SETTINGS_SOURCE_LABELS[snapshot.source] || SETTINGS_SOURCE_LABELS.unset;
@@ -4282,10 +4438,70 @@ async function testSettingsConnection() {
   }
 }
 
+function hideAppMenu() {
+  if (!appMenuPopup) return;
+  appMenuPopup.hidden = true;
+  if (settingsBtn) {
+    settingsBtn.classList.remove('open');
+    settingsBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function toggleAppMenu() {
+  if (!appMenuPopup || !settingsBtn) return;
+  if (!appMenuPopup.hidden) {
+    hideAppMenu();
+    return;
+  }
+  hideAgentPopup();
+  hideModelPopup();
+  hideCommandPopup();
+  appMenuPopup.hidden = false;
+  settingsBtn.classList.add('open');
+  settingsBtn.setAttribute('aria-expanded', 'true');
+}
+
+async function handleAppMenuAction(action) {
+  hideAppMenu();
+  if (action === 'settings') {
+    openSettingsModal();
+    return;
+  }
+  if (action === 'control') {
+    if (window.qizi?.openControl) {
+      const result = await window.qizi.openControl();
+      if (!result?.ok) {
+        setStatus(result?.error || '无法打开 OpenClaw Control', 'error');
+      }
+    }
+    return;
+  }
+  if (action === 'update') {
+    if (window.qizi?.openUpdate) await window.qizi.openUpdate();
+    return;
+  }
+  if (action === 'about') {
+    if (window.qizi?.openAbout) await window.qizi.openAbout();
+    return;
+  }
+  if (action === 'quit') {
+    if (window.qizi?.quitApp) await window.qizi.quitApp();
+  }
+}
+
 if (settingsBtn) {
   settingsBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    openSettingsModal();
+    toggleAppMenu();
+  });
+}
+
+if (appMenuPopup) {
+  appMenuPopup.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const item = e.target.closest('.app-menu-item[data-action]');
+    if (!item) return;
+    void handleAppMenuAction(item.dataset.action);
   });
 }
 if (settingsCloseBtn) settingsCloseBtn.addEventListener('click', closeSettingsModal);
@@ -4404,3 +4620,66 @@ if (messagesEl) {
     }
   });
 }
+
+let meetingTitlebarBackup = null;
+
+function buildMeetingTitlebarAvatarHtml() {
+  const src = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
+  return `<span class="agent-avatar agent-avatar-titlebar agent-avatar-meeting" role="img" aria-label="会议"><img src="${src}" alt="会议"></span>`;
+}
+
+function applyMeetingTitlebar(config) {
+  if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
+  if (!meetingTitlebarBackup) {
+    meetingTitlebarBackup = {
+      avatarHtml: titlebarAgentAvatar.innerHTML,
+      title: titlebarAgentBtn.title,
+      ariaLabel: titlebarAgentBtn.getAttribute('aria-label'),
+    };
+  }
+  titlebarAgentAvatar.innerHTML = buildMeetingTitlebarAvatarHtml();
+  titlebarAgentBtn.title = '会议模式';
+  titlebarAgentBtn.setAttribute('aria-label', '会议模式');
+  titlebarAgentBtn.classList.add('titlebar-agent-btn--meeting-view');
+}
+
+function restoreMeetingTitlebar(clearBackup = false) {
+  if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
+  titlebarAgentBtn.classList.remove('titlebar-agent-btn--meeting-view');
+  if (meetingTitlebarBackup) {
+    titlebarAgentAvatar.innerHTML = meetingTitlebarBackup.avatarHtml;
+    titlebarAgentBtn.title = meetingTitlebarBackup.title;
+    titlebarAgentBtn.setAttribute('aria-label', meetingTitlebarBackup.ariaLabel);
+    if (clearBackup) meetingTitlebarBackup = null;
+    return;
+  }
+  updateAgentTitleLabel(getCurrentAgentInfo());
+}
+
+window.addEventListener('qizi-meeting-entered', (event) => {
+  applyMeetingTitlebar(event.detail || {});
+});
+
+window.addEventListener('qizi-meeting-view-shown', (event) => {
+  applyMeetingTitlebar(event.detail || window.MeetingView?.getConfig?.() || {});
+});
+
+window.addEventListener('qizi-meeting-view-hidden', () => {
+  restoreMeetingTitlebar(false);
+  render();
+});
+
+window.addEventListener('qizi-meeting-exited', () => {
+  if (multiSelectMode) exitMultiSelectMode();
+  contextMenuSource = 'chat';
+  restoreMeetingTitlebar(true);
+  render();
+});
+
+window.QiziShellMsgOps = {
+  showContextMenu: (x, y, index, source = 'meeting') => showMessageContextMenu(x, y, index, source),
+  hideContextMenu: hideMessageContextMenu,
+  isMultiSelectMode: () => multiSelectMode,
+  toggleMultiSelectIndex,
+  renderMessageSelectCheckHtml,
+};

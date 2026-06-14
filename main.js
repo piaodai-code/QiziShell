@@ -5,6 +5,10 @@ const openLinksExternally = !process.argv.includes('--open-links-in-shell');
 
 const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-policy');
 const { buildExportWordHtml } = require('./export-html');
+const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
+const { startMeetingGroupRelay } = require('./meeting-group');
+const { saveMeetingRecord, listMeetingRecords } = require('./meeting-store');
+const { isMeetingA2ASessionKey } = require('./meeting-protocol');
 
 function isSafeExternalHttpUrl(url) {
   if (typeof url !== 'string') return false;
@@ -84,8 +88,23 @@ function isAllowedSttAudioPath(audioPath) {
   return allowedRoots.some((root) => resolved.startsWith(root));
 }
 let aboutWindow = null;
+let updateWindow = null;
+/** @type {Map<string, { fullText: string, resolve: Function, reject: Function, timeout: NodeJS.Timeout, lastEventAt: number }>} */
+const pendingMeetingRuns = new Map();
+let meetingEngine = null;
+let meetingBriefingRunning = false;
+let meetingBriefingCancelled = false;
+/** 当前会议群聊 session（与私聊 main session 隔离） */
+let activeMeetingSessionKey = null;
+/** @type {{ sessionKey: string, meetingId: string, moderatorAgentId: string, moderatorLabel?: string, participantAgentIds: string[], topic?: string } | null} */
+let activeMeetingMeta = null;
+let meetingHistoryPollTimer = null;
+let controlUiWindow = null;
+let controlUiLaunchUrl = null;
 let tray = null;
 let isQuitting = false;
+/** macOS 点菜单栏图标会同时触发 activate + tray click，需忽略紧随其后的 activate */
+let suppressAppActivateUntil = 0;
 let gateway = null;
 let gatewayConfigKey = null;
 /** @type {Map<number, { gatewayRunId: string, sender: Electron.WebContents, fullText: string, done?: (v: unknown) => void, timeout?: NodeJS.Timeout }>} */
@@ -124,13 +143,19 @@ app.on('second-instance', () => {
   showMainWindow();
 });
 
+function markTrayClick() {
+  suppressAppActivateUntil = Date.now() + 400;
+}
+
+function shouldIgnoreAppActivate() {
+  return process.platform === 'darwin' && Date.now() < suppressAppActivateUntil;
+}
+
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
-  if (!mainWindow.isVisible()) {
-    mainWindow.show();
-    if (process.platform === 'darwin' && app.dock) app.dock.show();
-  }
+  if (process.platform === 'darwin' && app.dock) app.dock.show();
+  if (!mainWindow.isVisible()) mainWindow.show();
   mainWindow.focus();
 }
 
@@ -518,6 +543,159 @@ function openAbout() {
   });
 }
 
+function getAuthorizedUpdateWindow(event) {
+  if (!updateWindow || updateWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== updateWindow) return null;
+  return updateWindow;
+}
+
+function openUpdate() {
+  if (updateWindow && !updateWindow.isDestroyed()) {
+    updateWindow.focus();
+    safeSendTo(updateWindow.webContents, 'qizi-update:recheck');
+    return;
+  }
+  const { version } = require('./package.json');
+  updateWindow = new BrowserWindow({
+    width: 400,
+    height: 560,
+    resizable: false,
+    minimizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    title: 'Update QiziShell',
+    backgroundColor: '#1a2421',
+    webPreferences: {
+      preload: path.join(__dirname, 'update-preload.js'),
+      nodeIntegration: false,
+      contextIsolation: true,
+    },
+  });
+  updateWindow.setMenu(null);
+  updateWindow.loadFile(path.join(__dirname, 'update.html'), {
+    query: { version },
+  });
+  updateWindow.on('closed', () => {
+    updateWindow = null;
+    pendingUpdateInfo = null;
+  });
+}
+
+function gatewayWsUrlToControlHttpUrl(wsUrl) {
+  const trimmed = String(wsUrl || '').trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'wss:') {
+      return `https://${parsed.host}/`;
+    }
+    if (parsed.protocol === 'ws:') {
+      return `http://${parsed.host}/`;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function buildOpenClawControlLaunchUrl(wsUrl, token) {
+  const httpBase = gatewayWsUrlToControlHttpUrl(wsUrl);
+  const trimmedWs = String(wsUrl || '').trim();
+  const trimmedToken = String(token || '').trim();
+  if (!httpBase || !trimmedWs) return null;
+  try {
+    const url = new URL(httpBase);
+    url.searchParams.set('gatewayUrl', trimmedWs);
+    if (trimmedToken) {
+      const hash = new URLSearchParams();
+      hash.set('token', trimmedToken);
+      url.hash = hash.toString();
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function attachGatewayTlsSessionPolicy(session) {
+  session.setCertificateVerifyProc((request, callback) => {
+    if (shouldAllowInsecureTls(request.hostname)) {
+      callback(0);
+      return;
+    }
+    callback(-2);
+  });
+}
+
+function openOpenClawControl() {
+  const { wsUrl, token } = loadOpenClawConfig();
+  if (!wsUrl) {
+    return { ok: false, error: '未配置 Gateway 地址，请先在设置中填写 WSS/WS 地址' };
+  }
+  if (!token) {
+    return { ok: false, error: '未配置 Gateway Token，请先在设置中填写' };
+  }
+  const controlUrl = buildOpenClawControlLaunchUrl(wsUrl, token);
+  if (!controlUrl) {
+    return { ok: false, error: 'Gateway 地址格式无效' };
+  }
+
+  if (controlUiWindow && !controlUiWindow.isDestroyed()) {
+    controlUiWindow.focus();
+    if (controlUiLaunchUrl !== controlUrl) {
+      controlUiLaunchUrl = controlUrl;
+      void controlUiWindow.loadURL(controlUrl);
+    }
+    return { ok: true, url: gatewayWsUrlToControlHttpUrl(wsUrl) };
+  }
+
+  controlUiLaunchUrl = controlUrl;
+  controlUiWindow = new BrowserWindow({
+    width: 1280,
+    height: 840,
+    minWidth: 900,
+    minHeight: 600,
+    title: 'OpenClaw Control',
+    backgroundColor: '#111111',
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
+    },
+  });
+  attachGatewayTlsSessionPolicy(controlUiWindow.webContents.session);
+  controlUiWindow.setMenu(null);
+  controlUiWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isSafeExternalHttpUrl(url)) {
+      openExternal(url);
+    }
+    return { action: 'deny' };
+  });
+  controlUiWindow.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = controlUiWindow.webContents.getURL();
+    if (!url || url === currentUrl) return;
+    try {
+      const target = new URL(url);
+      const current = new URL(currentUrl);
+      if (target.origin !== current.origin) {
+        event.preventDefault();
+        if (isSafeExternalHttpUrl(url)) {
+          openExternal(url);
+        }
+      }
+    } catch {
+      event.preventDefault();
+    }
+  });
+  void controlUiWindow.loadURL(controlUrl);
+  controlUiWindow.on('closed', () => {
+    controlUiWindow = null;
+    controlUiLaunchUrl = null;
+  });
+  return { ok: true, url: gatewayWsUrlToControlHttpUrl(wsUrl) };
+}
+
 function formatTestConnectionError(err) {
   const message = String(err?.message || err || '').toLowerCase();
   const detailCode = err?.details?.code || err?.details?.detailCode || err?.gatewayCode;
@@ -596,6 +774,13 @@ function formatGatewayError(err) {
   }
   if (detailCode === 'DEVICE_IDENTITY_REQUIRED') {
     return `${message}。设备身份未就绪，请重启应用后重试`;
+  }
+  if (/DNS lookup.*provider endpoint/i.test(message)) {
+    return [
+      'Gateway 调用 LLM 失败：无法解析模型服务商 API 域名（DNS）。',
+      '这发生在 OpenClaw Gateway 主机上，不是 QiziShell 会议逻辑问题。',
+      '请检查：① Gateway 主机能否上网；② OpenClaw 模型 provider 的 baseURL/代理是否正确；③ 私聊发一条消息是否同样报错。',
+    ].join('');
   }
   return message;
 }
@@ -774,6 +959,196 @@ function convertHistoryMessages(serverMessages) {
       };
     })
     .filter(Boolean);
+}
+
+function lookupMeetingAgentLabel(agentId, meta) {
+  if (!agentId) return 'Agent';
+  if (agentId === meta?.moderatorAgentId) {
+    return meta?.moderatorLabel || agentId;
+  }
+  const catalog = meta?.agentCatalog;
+  if (Array.isArray(catalog)) {
+    const found = catalog.find((a) => a.id === agentId);
+    if (found?.label || found?.name) return found.label || found.name;
+  }
+  return agentId;
+}
+
+function extractHistoryAgentId(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidates = [
+    raw.agentId,
+    raw.senderAgentId,
+    raw.meta?.agentId,
+    raw.meta?.senderAgentId,
+    raw.sender?.agentId,
+  ];
+  for (const value of candidates) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
+}
+
+function extractHistoryLabel(raw) {
+  if (!raw || typeof raw !== 'object') return '';
+  const label = raw.label || raw.senderLabel || raw.meta?.label;
+  return typeof label === 'string' ? label.trim() : '';
+}
+
+function resolveInjectedSpeaker(label, meta) {
+  const participantIds = new Set(meta?.participantAgentIds || []);
+  const idMatch = label.match(/\(@([a-zA-Z0-9_-]+)\)/);
+  if (idMatch && participantIds.has(idMatch[1])) {
+    return {
+      agentId: idMatch[1],
+      label: lookupMeetingAgentLabel(idMatch[1], meta),
+    };
+  }
+  const prefix = label.split('(')[0].trim();
+  if (prefix) {
+    const catalog = meta?.agentCatalog;
+    if (Array.isArray(catalog)) {
+      const found = catalog.find((a) => a.label === prefix || a.name === prefix);
+      if (found && participantIds.has(found.id)) {
+        return { agentId: found.id, label: found.label || found.name || found.id };
+      }
+    }
+  }
+  return null;
+}
+
+function convertMeetingHistoryMessages(serverMessages, meta) {
+  if (!Array.isArray(serverMessages)) return [];
+  const moderatorId = meta?.moderatorAgentId;
+  const participantIds = new Set(meta?.participantAgentIds || []);
+  let briefingSeen = false;
+
+  return serverMessages
+    .filter((m) => !shouldHideHistoryMessage(m))
+    .map((raw) => {
+      const role = normalizeHistoryRole(raw?.role ?? raw?.who);
+      const { text, images } = extractMessageParts(raw);
+      const files = extractOpenClawFileMeta(raw);
+      let resolvedText = text;
+      if (!resolvedText && raw?.errorMessage) {
+        resolvedText = `[错误] ${raw.errorMessage}`;
+      }
+      if (!resolvedText && images.length === 0 && files.length === 0) return null;
+
+      const injectLabel = extractHistoryLabel(raw);
+      const injectedSpeaker = injectLabel ? resolveInjectedSpeaker(injectLabel, meta) : null;
+      const agentId = injectedSpeaker?.agentId || extractHistoryAgentId(raw);
+      let who = 'them';
+      let speakerAgentId = agentId;
+      let speakerLabel = injectedSpeaker?.label || lookupMeetingAgentLabel(agentId, meta);
+
+      if (role === 'user') {
+        if (resolvedText.startsWith('[系统')) return null;
+        if (!briefingSeen && resolvedText.includes('【QiziShell 会议模式')) {
+          briefingSeen = true;
+          who = 'me';
+          speakerAgentId = null;
+          speakerLabel = '任务书';
+        } else if (agentId && agentId !== moderatorId && participantIds.has(agentId)) {
+          who = 'them';
+          speakerLabel = lookupMeetingAgentLabel(agentId, meta);
+        } else if (agentId === moderatorId) {
+          who = 'me';
+          speakerLabel = lookupMeetingAgentLabel(moderatorId, meta);
+        } else {
+          who = 'me';
+          speakerAgentId = null;
+          speakerLabel = '老大';
+        }
+      } else if (role === 'assistant') {
+        if (injectedSpeaker) {
+          who = 'them';
+          speakerAgentId = injectedSpeaker.agentId;
+          speakerLabel = injectedSpeaker.label;
+        } else if (agentId && agentId !== moderatorId && participantIds.has(agentId)) {
+          who = 'them';
+          speakerLabel = lookupMeetingAgentLabel(agentId, meta);
+        } else {
+          who = 'me';
+          speakerAgentId = moderatorId;
+          speakerLabel = lookupMeetingAgentLabel(moderatorId, meta);
+        }
+      }
+
+      const sent = extractMessageSentTimeFromRaw(raw);
+      const displayTime = sent.time
+        ? sent.time.match(/\d{2}:\d{2}/)?.[0] || sent.time
+        : '';
+
+      return {
+        who,
+        text: resolvedText,
+        images: images.length > 0 ? images : undefined,
+        files: files.length > 0 ? files : undefined,
+        time: displayTime,
+        sentTime: sent.time || undefined,
+        sentAtMs: sent.sentAtMs ?? undefined,
+        streaming: false,
+        speakerAgentId: speakerAgentId || undefined,
+        speakerLabel,
+        meeting: true,
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchMeetingHistory(sessionKey, meta) {
+  const client = ensureGateway();
+  await client.waitForConnect();
+  const result = await client.request('chat.history', {
+    sessionKey,
+    limit: 200,
+  });
+  return convertMeetingHistoryMessages(result?.messages || [], meta);
+}
+
+function broadcastMeetingHistory(messages) {
+  broadcastMeetingEvent({
+    type: 'history',
+    payload: { messages },
+  });
+}
+
+function stopMeetingHistoryPoll() {
+  if (meetingHistoryPollTimer) {
+    clearInterval(meetingHistoryPollTimer);
+    meetingHistoryPollTimer = null;
+  }
+}
+
+function startMeetingHistoryPoll() {
+  stopMeetingHistoryPoll();
+  if (!activeMeetingSessionKey || !activeMeetingMeta) return;
+
+  const poll = async () => {
+    if (!activeMeetingSessionKey || !activeMeetingMeta) return;
+    try {
+      const messages = await fetchMeetingHistory(activeMeetingSessionKey, activeMeetingMeta);
+      broadcastMeetingHistory(messages);
+    } catch {
+      // ignore background poll errors
+    }
+  };
+
+  void poll();
+  meetingHistoryPollTimer = setInterval(poll, 3000);
+  meetingHistoryPollTimer.unref?.();
+}
+
+function setActiveMeetingMeta(meta) {
+  activeMeetingMeta = meta;
+  activeMeetingSessionKey = meta?.sessionKey || null;
+}
+
+function clearActiveMeeting() {
+  stopMeetingHistoryPoll();
+  activeMeetingSessionKey = null;
+  activeMeetingMeta = null;
 }
 
 function resolveDeltaText(currentText, payload) {
@@ -981,6 +1356,8 @@ function isPayloadForCurrentSession(payload) {
 
 function handleExternalSessionChatEvent(payload) {
   if (!payload || typeof payload.runId !== 'string') return;
+  if (activeMeetingSessionKey && payload.sessionKey === activeMeetingSessionKey) return;
+  if (isMeetingA2ASessionKey(payload.sessionKey)) return;
   if (activeRuns.size > 0) return;
   if (!isPayloadForCurrentSession(payload)) return;
 
@@ -1056,6 +1433,173 @@ function handleExternalSessionChatEvent(payload) {
   }
 }
 
+function broadcastMeetingEvent(event) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    safeSendTo(mainWindow.webContents, 'qizi-meeting:event', event);
+  }
+}
+
+function finishMeetingRun(gatewayRunId, outcome) {
+  const run = pendingMeetingRuns.get(gatewayRunId);
+  if (!run) return;
+  if (run.timeout) clearTimeout(run.timeout);
+  pendingMeetingRuns.delete(gatewayRunId);
+  if (outcome.error) {
+    run.reject(new Error(formatGatewayError(new Error(outcome.error))));
+    return;
+  }
+  if (outcome.aborted) {
+    run.reject(new Error('回复已中止'));
+    return;
+  }
+  run.resolve({ text: outcome.text || run.fullText || '' });
+}
+
+function handleMeetingGatewayChatEvent(payload) {
+  const run = pendingMeetingRuns.get(payload.runId);
+  if (!run) return false;
+  run.lastEventAt = Date.now();
+  if (payload.state === 'delta') {
+    run.fullText = resolveDeltaText(run.fullText, payload);
+    if (typeof run.onDelta === 'function') {
+      run.onDelta(run.fullText);
+    }
+    return true;
+  }
+  if (payload.state === 'final') {
+    const finalText = extractMessageText(payload.message);
+    if (finalText && finalText.length >= run.fullText.length && !looksLikeLeakedToolPayloadText(finalText)) {
+      run.fullText = finalText;
+    }
+    finishMeetingRun(payload.runId, { ok: true, text: run.fullText });
+    return true;
+  }
+  if (payload.state === 'aborted') {
+    finishMeetingRun(payload.runId, { aborted: true, text: run.fullText });
+    return true;
+  }
+  if (payload.state === 'error') {
+    finishMeetingRun(payload.runId, { error: payload.errorMessage || 'chat error' });
+    return true;
+  }
+  return true;
+}
+
+function runMeetingChatTurn(sessionKey, message, { timeoutMs = 120000, onDelta } = {}) {
+  return new Promise(async (resolve, reject) => {
+    let gatewayRunId;
+    try {
+      const client = ensureGateway();
+      await client.waitForConnect();
+      const idempotencyKey = `qizi-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const ack = await client.request('chat.send', {
+        sessionKey,
+        message,
+        deliver: false,
+        idempotencyKey,
+      });
+      gatewayRunId = (ack && ack.runId) || idempotencyKey;
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    const timeout = setTimeout(() => {
+      pendingMeetingRuns.delete(gatewayRunId);
+      reject(new Error('会议发言超时'));
+    }, timeoutMs);
+    timeout.unref?.();
+    pendingMeetingRuns.set(gatewayRunId, {
+      fullText: '',
+      resolve,
+      reject,
+      timeout,
+      lastEventAt: Date.now(),
+      onDelta,
+    });
+  });
+}
+
+function refreshMeetingHistorySoon() {
+  if (!activeMeetingSessionKey || !activeMeetingMeta) return;
+  void (async () => {
+    try {
+      const messages = await fetchMeetingHistory(activeMeetingSessionKey, activeMeetingMeta);
+      broadcastMeetingHistory(messages);
+    } catch {
+      // ignore
+    }
+  })();
+}
+
+async function injectMeetingChatMessage(sessionKey, message, label) {
+  const client = ensureGateway();
+  await client.waitForConnect();
+  await client.request('chat.inject', {
+    sessionKey,
+    message,
+    label,
+  });
+}
+
+async function runMeetingBriefingFlow(config) {
+  meetingBriefingRunning = true;
+  meetingBriefingCancelled = false;
+  try {
+    await startMeetingGroupRelay(config, {
+      chatTurn: (sessionKey, message, opts) => runMeetingChatTurn(sessionKey, message, opts || {}),
+      chatTurnStream: (sessionKey, message, { onDelta }) => runMeetingChatTurn(sessionKey, message, { onDelta }),
+      onEvent: (event) => {
+        if (event.type === 'briefing_ready' && event.payload) {
+          setActiveMeetingMeta({
+            sessionKey: event.payload.sessionKey,
+            meetingId: event.payload.meetingId,
+            moderatorAgentId: config.moderatorAgentId,
+            moderatorLabel: config.moderatorLabel,
+            participantAgentIds: [...(config.participantAgentIds || [])],
+            agentCatalog: config.agentCatalog || [],
+            topic: config.topic,
+          });
+        }
+        if (event.type === 'transcript') {
+          broadcastMeetingEvent(event);
+          return;
+        }
+        if (event.type === 'done') {
+          clearActiveMeeting();
+        }
+        if (event.type === 'error' || event.type === 'cancelled') {
+          clearActiveMeeting();
+        }
+        broadcastMeetingEvent(event);
+      },
+      saveRecord: saveMeetingRecord,
+      isCancelled: () => meetingBriefingCancelled,
+    });
+  } catch (err) {
+    clearActiveMeeting();
+    if (!meetingBriefingCancelled) {
+      broadcastMeetingEvent({ type: 'error', payload: { error: err.message || String(err) } });
+    } else {
+      broadcastMeetingEvent({ type: 'cancelled', payload: {} });
+    }
+  } finally {
+    meetingBriefingRunning = false;
+    meetingBriefingCancelled = false;
+  }
+}
+
+function ensureMeetingEngine() {
+  if (!meetingEngine) {
+    const { MeetingEngine } = require('./meeting-engine');
+    meetingEngine = new MeetingEngine({
+      chatTurn: runMeetingChatTurn,
+      onEvent: (event) => broadcastMeetingEvent(event),
+      saveRecord: saveMeetingRecord,
+    });
+  }
+  return meetingEngine;
+}
+
 function handleSessionsChangedEvent(payload) {
   const keys = new Set();
   if (payload?.key) keys.add(payload.key);
@@ -1066,12 +1610,22 @@ function handleSessionsChangedEvent(payload) {
       if (session?.key) keys.add(session.key);
     }
   }
+  if (activeMeetingSessionKey && keys.has(activeMeetingSessionKey)) {
+    refreshMeetingHistorySoon();
+  }
   if (keys.size > 0 && !keys.has(getSessionKey())) return;
   broadcastToRenderers('openclaw:session-changed', { sessionKey: getSessionKey() });
 }
 
 function handleGatewayChatEvent(payload) {
   if (!payload || typeof payload.runId !== 'string') return;
+  if (handleMeetingGatewayChatEvent(payload)) return;
+  if (activeMeetingSessionKey && payload.sessionKey === activeMeetingSessionKey) {
+    if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
+      refreshMeetingHistorySoon();
+    }
+    return;
+  }
   const matched = findClientRunByGatewayRunId(payload.runId);
   if (matched) {
     handleOwnedGatewayChatEvent(payload, matched);
@@ -1339,6 +1893,8 @@ function trayMenuIcon(filename) {
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
     { label: '设置', icon: trayMenuIcon('gear.png'), click: () => openSettings() },
+    { label: 'Openclaw Control', icon: trayMenuIcon('openclaw-control.png'), click: () => openOpenClawControl() },
+    { label: 'Update', icon: trayMenuIcon('update-menu.png'), click: () => openUpdate() },
     { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: () => openAbout() },
     { type: 'separator' },
     { label: '退出', icon: trayMenuIcon('exit.png'), click: () => {
@@ -1354,8 +1910,11 @@ function createTray() {
   tray = new Tray(icon);
   tray.setToolTip('QiziShell');
   tray.setContextMenu(buildTrayMenu());
-  // 左键 = toggle 显隐主界面
-  tray.on('click', () => toggleMainWindow());
+  // 左键 = toggle 显隐主界面（macOS 会连带触发 activate，由 markTrayClick 屏蔽）
+  tray.on('click', () => {
+    markTrayClick();
+    toggleMainWindow();
+  });
 }
 
 async function checkConnection() {
@@ -1862,6 +2421,129 @@ ipcMain.handle('openclaw:open-settings', () => {
   return { ok: true };
 });
 
+ipcMain.handle('openclaw:open-about', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  openAbout();
+  return { ok: true };
+});
+
+ipcMain.handle('openclaw:open-update', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  openUpdate();
+  return { ok: true };
+});
+
+ipcMain.handle('qizi-update:version', (event) => {
+  if (!getAuthorizedUpdateWindow(event)) return forbiddenSenderResult();
+  const { version } = require('./package.json');
+  return version;
+});
+
+ipcMain.handle('qizi-update:check', async (event) => {
+  if (!getAuthorizedUpdateWindow(event)) return forbiddenSenderResult();
+  const { version } = require('./package.json');
+  try {
+    const result = await checkForUpdate(version);
+    pendingUpdateInfo = result.updateAvailable ? result : null;
+    return result;
+  } catch (err) {
+    pendingUpdateInfo = null;
+    return { ok: false, error: err.message || '检查更新失败' };
+  }
+});
+
+ipcMain.handle('qizi-update:install', async (event) => {
+  if (!getAuthorizedUpdateWindow(event)) return forbiddenSenderResult();
+  if (!pendingUpdateInfo?.updateAvailable || !pendingUpdateInfo.downloadUrl) {
+    return { ok: false, error: '没有可安装的更新' };
+  }
+  try {
+    await downloadAndInstallUpdate(pendingUpdateInfo, ({ received, total }) => {
+      safeSendTo(event.sender, 'qizi-update:progress', { received, total });
+    });
+    isQuitting = true;
+    setTimeout(() => app.quit(), 500);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || '升级失败' };
+  }
+});
+
+ipcMain.handle('qizi-meeting:start', async (event, config) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  try {
+    if (meetingBriefingRunning || (meetingEngine && meetingEngine.running)) {
+      return { ok: false, error: '已有会议在进行中' };
+    }
+    void runMeetingBriefingFlow(config || {});
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || '无法启动会议' };
+  }
+});
+
+ipcMain.handle('qizi-meeting:cancel', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  meetingBriefingCancelled = true;
+  if (meetingEngine) meetingEngine.cancel();
+  clearActiveMeeting();
+  for (const [runId, run] of [...pendingMeetingRuns.entries()]) {
+    if (run.timeout) clearTimeout(run.timeout);
+    run.reject(new Error('会议已取消'));
+    pendingMeetingRuns.delete(runId);
+  }
+  return { ok: true };
+});
+
+ipcMain.handle('qizi-meeting:status', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return {
+    ok: true,
+    snapshot: {
+      mode: 'a2a_transcript_v1',
+      running: meetingBriefingRunning || Boolean(meetingEngine?.running),
+    },
+  };
+});
+
+ipcMain.handle('qizi-meeting:list-records', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return { ok: true, records: listMeetingRecords() };
+});
+
+ipcMain.handle('qizi-meeting:load-history', async (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const sessionKey = payload?.sessionKey || activeMeetingSessionKey;
+  const meta = payload?.meta || activeMeetingMeta;
+  if (!sessionKey || !meta) {
+    return { ok: false, error: '没有进行中的会议' };
+  }
+  try {
+    const messages = await fetchMeetingHistory(sessionKey, meta);
+    return { ok: true, sessionKey, messages };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
+});
+
+ipcMain.handle('qizi-meeting:exit', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  clearActiveMeeting();
+  return { ok: true };
+});
+
+ipcMain.handle('openclaw:open-control', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return openOpenClawControl();
+});
+
+ipcMain.handle('openclaw:quit', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  isQuitting = true;
+  app.quit();
+  return { ok: true };
+});
+
 ipcMain.handle('openclaw:stt:status', () => getSttStatus());
 
 ipcMain.handle('openclaw:stt:install', async (event) => {
@@ -2218,7 +2900,13 @@ app.on('window-all-closed', () => {
 });
 // macOS：点 Dock / 从 Spotlight 唤醒时，恢复已隐藏的主窗口
 app.on('activate', () => {
-  if (process.platform === 'darwin') showMainWindow();
+  if (process.platform !== 'darwin') return;
+  if (shouldIgnoreAppActivate()) return;
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible()) {
+    showMainWindow();
+    return;
+  }
+  mainWindow.focus();
 });
 // 真的退出前清理菜单栏图标，避免 macOS 状态栏残留
 app.on('before-quit', () => {

@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.1.4",
+  "version": "0.1.5-beta.2",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -35,6 +35,16 @@
       "about.html",
       "about.js",
       "about.css",
+      "update.html",
+      "update.js",
+      "update.css",
+      "update-preload.js",
+      "update-checker.js",
+      "meeting-briefing.js",
+      "meeting-engine.js",
+      "meeting-protocol.js",
+      "meeting-store.js",
+      "meeting-ui.js",
       "style.css",
       "app.js",
       "message-time.js",
@@ -42,6 +52,7 @@
       "dompurify.min.js",
       "assets/icons/**",
       "assets/about-icon.png",
+      "assets/update-hero.png",
       "tray-icon.png"
     ]
   },

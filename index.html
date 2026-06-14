@@ -11,19 +11,61 @@
     <header class="titlebar">
       <div class="titlebar-left"></div>
       <div class="titlebar-center">
-        <button type="button" class="titlebar-agent-btn" id="titlebar-agent-btn" title="切换 Agent" aria-label="切换 Agent">
-          <span class="titlebar-agent-avatar" id="titlebar-agent-avatar"></span>
-        </button>
+        <div class="titlebar-identity" id="titlebar-identity">
+          <button type="button" class="titlebar-agent-btn" id="titlebar-agent-btn" title="切换 Agent" aria-label="切换 Agent">
+            <span class="titlebar-agent-avatar" id="titlebar-agent-avatar"></span>
+          </button>
+        </div>
         <div class="agent-popup" id="agent-popup" hidden></div>
       </div>
       <div class="titlebar-right">
         <span class="status-pill" id="status">连接中…</span>
-        <button type="button" class="icon-btn" id="settings-btn" title="设置">⋯</button>
+        <div class="titlebar-menu-wrap">
+          <button type="button" class="icon-btn" id="settings-btn" title="菜单" aria-label="菜单" aria-haspopup="menu" aria-expanded="false">⋯</button>
+          <div class="app-menu-popup" id="app-menu-popup" hidden role="menu">
+            <button type="button" class="app-menu-item" data-action="settings" role="menuitem">
+              <img src="assets/icons/gear.png" alt="" class="app-menu-icon" aria-hidden="true">
+              <span>设置</span>
+            </button>
+            <button type="button" class="app-menu-item" data-action="control" role="menuitem">
+              <img src="assets/icons/openclaw-control.png" alt="" class="app-menu-icon" aria-hidden="true">
+              <span>Openclaw Control</span>
+            </button>
+            <button type="button" class="app-menu-item" data-action="update" role="menuitem">
+              <img src="assets/icons/update-menu.png" alt="" class="app-menu-icon" aria-hidden="true">
+              <span>Update</span>
+            </button>
+            <button type="button" class="app-menu-item" data-action="about" role="menuitem">
+              <img src="assets/icons/about-menu.png" alt="" class="app-menu-icon" aria-hidden="true">
+              <span>About QiziShell</span>
+            </button>
+            <div class="app-menu-separator" role="separator"></div>
+            <button type="button" class="app-menu-item" data-action="quit" role="menuitem">
+              <img src="assets/icons/exit.png" alt="" class="app-menu-icon" aria-hidden="true">
+              <span>退出</span>
+            </button>
+          </div>
+        </div>
       </div>
     </header>
-    <main class="messages" id="messages">
-      <div class="msg-hint">还没有消息，发个试试 👋</div>
-    </main>
+    <div class="meeting-banner" id="meeting-banner" hidden>
+      <div class="meeting-banner-main">
+        <span class="meeting-banner-label">会议</span>
+        <span class="meeting-banner-topic" id="meeting-banner-topic"></span>
+        <span class="meeting-banner-status" id="meeting-banner-status"></span>
+      </div>
+      <button type="button" class="meeting-exit-btn" id="meeting-exit-btn">退出会议</button>
+    </div>
+    <section class="chat-screen" id="chat-screen">
+      <main class="messages" id="messages">
+        <div class="msg-hint">还没有消息，发个试试 👋</div>
+      </main>
+    </section>
+    <section class="meeting-screen" id="meeting-screen" hidden>
+      <main class="messages meeting-messages" id="meeting-messages">
+        <div class="msg-hint">会议进行中，等待发言…</div>
+      </main>
+    </section>
     <footer class="composer" id="composer">
       <div class="composer-resize" id="composer-resize"></div>
       <div class="composer-body" id="composer-body">
@@ -100,6 +142,9 @@
           <button type="button" class="multiselect-btn multiselect-btn-primary" id="multiselect-send-btn" disabled>发送</button>
         </div>
       </div>
+      <div class="meeting-observe-bar" id="meeting-observe-bar" hidden>
+        <span>观察模式 · 群聊展示由 QiziShell 合成，Agent 私聊不受影响</span>
+      </div>
     </footer>
   </div>
   <!-- 图片放大 modal（点击消息气泡里的图打开） -->
@@ -119,6 +164,10 @@
     <button type="button" class="msg-context-item" data-action="export" role="menuitem">
       <img src="assets/icons/word.png" alt="" class="msg-context-icon" aria-hidden="true">
       <span>输出</span>
+    </button>
+    <button type="button" class="msg-context-item msg-context-item-meeting" data-action="start-meeting" data-chat-only="1" role="menuitem">
+      <img src="assets/icons/meeting-team.png" alt="" class="msg-context-icon msg-context-icon-meeting" aria-hidden="true">
+      <span>发起会议</span>
     </button>
   </div>
   <div class="forward-modal" id="forward-modal" hidden role="dialog" aria-modal="true" aria-labelledby="forward-modal-title">
@@ -170,8 +219,8 @@
         <section class="settings-section">
           <p class="settings-hint" id="settings-source-hint"></p>
           <label class="settings-field">
-            <span class="settings-label">WSS 地址</span>
-            <input type="url" class="settings-input" id="settings-ws-url" placeholder="向管理员索取，如 wss://host:18789" spellcheck="false" autocomplete="off">
+            <span class="settings-label">WSS/WS 地址</span>
+            <input type="url" class="settings-input" id="settings-ws-url" placeholder="向管理员索取，如 wss://host:18789 或 ws://host:18789" spellcheck="false" autocomplete="off">
           </label>
           <label class="settings-field">
             <span class="settings-label">Token</span>
@@ -200,7 +249,7 @@
         <section class="settings-section settings-section-muted">
           <h3 class="settings-section-title">说明</h3>
           <ul class="settings-tips">
-            <li>WSS 地址与 Token 均需向 Gateway 管理员索取；</li>
+            <li>WSS/WS 地址与 Token 均需向 Gateway 管理员索取；</li>
             <li>首次连接新设备需配对，管理员在 Gateway 批准；</li>
             <li>Agent、模型可在聊天界面内切换，无需在此配置。</li>
           </ul>
@@ -249,9 +298,57 @@
       </div>
     </div>
   </div>
+  <div class="meeting-modal" id="meeting-modal" hidden role="dialog" aria-modal="true" aria-labelledby="meeting-modal-title">
+    <div class="meeting-panel">
+      <div class="meeting-header">
+        <h2 class="meeting-title" id="meeting-modal-title">会议模式</h2>
+        <button type="button" class="meeting-close" id="meeting-close-btn" title="关闭">×</button>
+      </div>
+      <div class="meeting-setup" id="meeting-setup-panel">
+        <p class="meeting-hint">界面为群聊气泡；后台在隔离 A2A session 中通信，不写入你与 Agent 的 main 私聊。</p>
+        <label class="meeting-field">
+          <span class="meeting-label">议题</span>
+          <input type="text" class="meeting-input" id="meeting-topic" placeholder="例如：QiziShell 下一版功能取舍">
+        </label>
+        <label class="meeting-field">
+          <span class="meeting-label">讨论底稿</span>
+          <span class="meeting-field-hint">支持 Markdown 格式，可粘贴较长素材</span>
+          <textarea class="meeting-textarea meeting-textarea-markdown" id="meeting-draft" rows="10" placeholder="粘贴原始素材、背景资料、备选方案等（Markdown 会原样交给主持 Agent）"></textarea>
+        </label>
+        <label class="meeting-field">
+          <span class="meeting-label">期望结论方向（可选）</span>
+          <input type="text" class="meeting-input" id="meeting-goal" placeholder="例如：确定 MVP 范围与优先级">
+        </label>
+        <label class="meeting-field">
+          <span class="meeting-label">主持 Agent（仅主持，不参与议事）</span>
+          <select class="meeting-input" id="meeting-moderator"></select>
+        </label>
+        <div class="meeting-field meeting-setup-split">
+          <div class="meeting-setup-col">
+            <span class="meeting-label">议事 Agent（默认全选，可取消）</span>
+            <div class="meeting-participants" id="meeting-participants"></div>
+          </div>
+          <div class="meeting-setup-col meeting-setup-col-rounds">
+            <span class="meeting-label">讨论轮次</span>
+            <div class="meeting-rounds-options" role="radiogroup" aria-label="讨论轮次">
+              <label class="meeting-round-option"><input type="radio" name="meeting-rounds" value="1"> 一轮</label>
+              <label class="meeting-round-option"><input type="radio" name="meeting-rounds" value="2" checked> 二轮</label>
+              <label class="meeting-round-option"><input type="radio" name="meeting-rounds" value="3"> 三轮</label>
+            </div>
+          </div>
+        </div>
+        <div class="meeting-actions">
+          <button type="button" class="meeting-secondary-btn" id="meeting-cancel-btn">取消</button>
+          <button type="button" class="meeting-primary-btn" id="meeting-start-btn">开始会议</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <script src="dompurify.min.js"></script>
   <script src="marked.min.js"></script>
   <script src="message-time.js"></script>
   <script src="app.js"></script>
+  <script src="meeting-view.js"></script>
+  <script src="meeting-ui.js"></script>
 </body>
 </html>
