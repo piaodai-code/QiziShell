@@ -10,7 +10,10 @@
   const composerBodyEl = document.getElementById('composer-body');
   const observeBarEl = document.getElementById('meeting-observe-bar');
   const toolbarEl = document.getElementById('meeting-toolbar');
-  const historySelectEl = document.getElementById('meeting-history-select');
+  const historyPickerEl = document.getElementById('meeting-history-picker');
+  const historyTriggerEl = document.getElementById('meeting-history-trigger');
+  const historyTriggerTextEl = document.getElementById('meeting-history-trigger-text');
+  const historyMenuEl = document.getElementById('meeting-history-menu');
   const toolbarStatusEl = document.getElementById('meeting-toolbar-status');
   const newMeetingBtn = document.getElementById('meeting-new-btn');
   const leaveHubBtn = document.getElementById('meeting-leave-hub-btn');
@@ -37,6 +40,61 @@
   /** @type {Array<object>} */
   let recordList = [];
   let loadingArchive = false;
+  /** @type {Array<{ value: string, label: string }>} */
+  let historyOptions = [];
+
+  function syncHistoryTriggerLabel() {
+    if (!historyTriggerTextEl) return;
+    const opt = historyOptions.find((o) => o.value === selectedRecordKey);
+    historyTriggerTextEl.textContent = opt?.label || '暂无历史会议';
+  }
+
+  function closeHistoryMenu() {
+    if (!historyMenuEl || !historyTriggerEl) return;
+    historyMenuEl.hidden = true;
+    historyTriggerEl.classList.remove('open');
+    historyTriggerEl.setAttribute('aria-expanded', 'false');
+  }
+
+  function toggleHistoryMenu(forceOpen) {
+    if (!historyMenuEl || !historyTriggerEl) return;
+    const open = typeof forceOpen === 'boolean' ? forceOpen : historyMenuEl.hidden;
+    if (!open) {
+      closeHistoryMenu();
+      return;
+    }
+    historyMenuEl.hidden = false;
+    historyTriggerEl.classList.add('open');
+    historyTriggerEl.setAttribute('aria-expanded', 'true');
+  }
+
+  function selectHistoryKey(key) {
+    selectedRecordKey = key;
+    syncHistoryTriggerLabel();
+    if (historyMenuEl) {
+      for (const btn of historyMenuEl.querySelectorAll('.meeting-history-item')) {
+        btn.classList.toggle('active', btn.dataset.value === key);
+      }
+    }
+    closeHistoryMenu();
+    if (key === LIVE_RECORD_KEY && running) {
+      viewingLive = true;
+      applyMeetingChrome();
+      render();
+      return;
+    }
+    void loadArchiveRecord(key);
+  }
+
+  function setSelectedHistoryKey(key) {
+    selectedRecordKey = key;
+    syncHistoryTriggerLabel();
+    if (historyMenuEl) {
+      for (const btn of historyMenuEl.querySelectorAll('.meeting-history-item')) {
+        btn.classList.toggle('active', btn.dataset.value === key);
+      }
+    }
+  }
 
   function escapeHtml(text) {
     return String(text)
@@ -150,7 +208,7 @@
     if (loadingArchive) return '加载会议记录…';
     if (running && viewingLive) return '会议进行中，等待发言…';
     if (recordList.length === 0) return '暂无历史会议，点击「新建会议」开始';
-    return '请选择上方会议记录';
+    return '请选择历史会议';
   }
 
   function render() {
@@ -249,56 +307,58 @@
   }
 
   function populateHistorySelect() {
-    if (!historySelectEl) return;
+    if (!historyMenuEl) return;
     const previous = selectedRecordKey;
-    historySelectEl.innerHTML = '';
+    historyOptions = [];
+    historyMenuEl.innerHTML = '';
 
     if (running && liveMeetingId && meetingConfig) {
-      const liveOpt = document.createElement('option');
-      liveOpt.value = LIVE_RECORD_KEY;
-      liveOpt.textContent = recordOptionLabel(meetingConfig, { live: true });
-      historySelectEl.appendChild(liveOpt);
+      historyOptions.push({
+        value: LIVE_RECORD_KEY,
+        label: recordOptionLabel(meetingConfig, { live: true }),
+      });
     }
 
     if (recordList.length === 0 && !running) {
-      const emptyOpt = document.createElement('option');
-      emptyOpt.value = '';
-      emptyOpt.textContent = '暂无历史会议';
-      historySelectEl.appendChild(emptyOpt);
-      return;
+      historyOptions.push({ value: '', label: '暂无历史会议' });
+    } else {
+      for (const entry of recordList) {
+        if (running && entry.id === liveMeetingId) continue;
+        historyOptions.push({
+          value: entry.file || entry.id || '',
+          label: recordOptionLabel(entry),
+        });
+      }
     }
 
-    for (const entry of recordList) {
-      if (running && entry.id === liveMeetingId) continue;
-      const opt = document.createElement('option');
-      opt.value = entry.file || entry.id || '';
-      opt.textContent = recordOptionLabel(entry);
-      opt.dataset.meetingId = entry.id || '';
-      historySelectEl.appendChild(opt);
+    for (const opt of historyOptions) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'meeting-history-item';
+      btn.setAttribute('role', 'option');
+      btn.dataset.value = opt.value;
+      btn.textContent = opt.label;
+      btn.addEventListener('click', () => selectHistoryKey(opt.value));
+      historyMenuEl.appendChild(btn);
     }
 
     if (running && viewingLive) {
-      historySelectEl.value = LIVE_RECORD_KEY;
-      selectedRecordKey = LIVE_RECORD_KEY;
+      setSelectedHistoryKey(LIVE_RECORD_KEY);
       return;
     }
 
-    if (previous && [...historySelectEl.options].some((o) => o.value === previous)) {
-      historySelectEl.value = previous;
-      selectedRecordKey = previous;
+    if (previous && historyOptions.some((o) => o.value === previous)) {
+      setSelectedHistoryKey(previous);
       return;
     }
 
     if (running) {
-      historySelectEl.value = LIVE_RECORD_KEY;
-      selectedRecordKey = LIVE_RECORD_KEY;
+      setSelectedHistoryKey(LIVE_RECORD_KEY);
       return;
     }
 
-    const first = historySelectEl.options[0];
-    if (first) {
-      historySelectEl.value = first.value;
-      selectedRecordKey = first.value;
+    if (historyOptions[0]) {
+      setSelectedHistoryKey(historyOptions[0].value);
     }
   }
 
@@ -362,12 +422,12 @@
     if (running) {
       viewingLive = true;
       selectedRecordKey = LIVE_RECORD_KEY;
-      if (historySelectEl) historySelectEl.value = LIVE_RECORD_KEY;
+      setSelectedHistoryKey(LIVE_RECORD_KEY);
       applyMeetingChrome();
       render();
       return;
     }
-    const key = selectedRecordKey || historySelectEl?.value;
+    const key = selectedRecordKey || historyOptions.find((o) => o.value)?.value;
     if (key) {
       await loadArchiveRecord(key);
     } else {
@@ -428,6 +488,7 @@
   function leaveHub() {
     if (!hubVisible) return;
     hubVisible = false;
+    closeHistoryMenu();
     hideMeetingScreen();
     clearMeetingChrome();
     window.dispatchEvent(new CustomEvent('qizi-meeting-view-hidden'));
@@ -480,7 +541,7 @@
     }
     viewingLive = true;
     selectedRecordKey = LIVE_RECORD_KEY;
-    if (historySelectEl) historySelectEl.value = LIVE_RECORD_KEY;
+    setSelectedHistoryKey(LIVE_RECORD_KEY);
     if (!hubVisible) {
       hubVisible = true;
       showMeetingScreen();
@@ -632,7 +693,7 @@
       applyTranscript(event.payload?.messages);
       viewingLive = true;
       selectedRecordKey = LIVE_RECORD_KEY;
-      if (historySelectEl) historySelectEl.value = LIVE_RECORD_KEY;
+      setSelectedHistoryKey(LIVE_RECORD_KEY);
       const streaming = meetingMessages.some((m) => m.streaming);
       setStatus(streaming ? '发言中…' : '会议进行中 · 群聊');
       if (observeBarEl) observeBarEl.hidden = false;
@@ -713,19 +774,18 @@
     }
   }
 
-  if (historySelectEl) {
-    historySelectEl.addEventListener('change', () => {
-      const key = historySelectEl.value;
-      selectedRecordKey = key;
-      if (key === LIVE_RECORD_KEY && running) {
-        viewingLive = true;
-        applyMeetingChrome();
-        render();
-        return;
-      }
-      void loadArchiveRecord(key);
+  if (historyTriggerEl) {
+    historyTriggerEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleHistoryMenu();
     });
   }
+
+  document.addEventListener('click', (e) => {
+    if (historyMenuEl && !historyMenuEl.hidden) {
+      if (!historyPickerEl?.contains(e.target)) closeHistoryMenu();
+    }
+  });
 
   if (newMeetingBtn) {
     newMeetingBtn.addEventListener('click', () => { void openNewMeetingSetup(); });
@@ -750,8 +810,14 @@
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && endConfirmModal && !endConfirmModal.hidden) {
-      hideEndMeetingConfirm();
+    if (e.key === 'Escape') {
+      if (endConfirmModal && !endConfirmModal.hidden) {
+        hideEndMeetingConfirm();
+        return;
+      }
+      if (historyMenuEl && !historyMenuEl.hidden) {
+        closeHistoryMenu();
+      }
     }
   });
 

@@ -26,7 +26,6 @@ const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
 const titlebarAgentBtn = document.getElementById('titlebar-agent-btn');
 const titlebarAgentAvatar = document.getElementById('titlebar-agent-avatar');
-const titlebarMeetingTitle = document.getElementById('titlebar-meeting-title');
 const agentPopup = document.getElementById('agent-popup');
 const contextMeter = document.getElementById('context-meter');
 const contextMeterFill = document.getElementById('context-meter-fill');
@@ -2454,89 +2453,90 @@ function hideAgentPopup() {
     titlebarAgentBtn.classList.remove('open');
     titlebarAgentBtn.setAttribute('aria-expanded', 'false');
   }
-  if (titlebarMeetingTitle) {
-    titlebarMeetingTitle.classList.remove('open');
-    titlebarMeetingTitle.setAttribute('aria-expanded', 'false');
-  }
 }
 
-function renderAgentPopup(agents) {
-  if (!agentPopup) return;
-  if (!agents.length) {
-    agentPopup.innerHTML = '<div class="agent-popup-empty">暂无可用 Agent</div>';
-    return;
-  }
-  agentPopup.innerHTML = '';
-  for (const agent of agents) {
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'agent-item' + (agent.id === currentAgentId ? ' active' : '');
+function buildAgentPopupItem(agent, { active = false, onClick } = {}) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'agent-item' + (active ? ' active' : '');
 
-    const avatarWrap = document.createElement('span');
-    avatarWrap.innerHTML = buildAgentAvatarInner(agent, 'menu');
+  const avatarWrap = document.createElement('span');
+  avatarWrap.innerHTML = buildAgentAvatarInner(agent, 'menu');
 
-    const body = document.createElement('span');
-    body.className = 'agent-item-body';
+  const body = document.createElement('span');
+  body.className = 'agent-item-body';
 
-    const nameRow = document.createElement('span');
-    nameRow.className = 'agent-item-name';
-    nameRow.textContent = formatAgentLabel(agent);
+  const nameRow = document.createElement('span');
+  nameRow.className = 'agent-item-name';
+  nameRow.textContent = formatAgentLabel(agent);
 
-    const meta = document.createElement('span');
-    meta.className = 'agent-item-meta';
-    meta.textContent = formatAgentCurrentModel(agent);
+  const meta = document.createElement('span');
+  meta.className = 'agent-item-meta';
+  meta.textContent = formatAgentCurrentModel(agent);
 
-    body.appendChild(nameRow);
-    body.appendChild(meta);
-    btn.appendChild(avatarWrap.firstElementChild || avatarWrap);
-    btn.appendChild(body);
-    btn.addEventListener('click', () => {
-      if (agent.id !== currentAgentId) {
-        switchToAgent(agent.id);
-      } else {
-        if (window.MeetingView?.isVisible?.()) {
-          window.MeetingView.leaveView();
-        }
-        hideAgentPopup();
-      }
-    });
-    agentPopup.appendChild(btn);
-  }
+  const check = document.createElement('span');
+  check.className = 'agent-item-check';
+  check.textContent = '✓';
+  check.setAttribute('aria-hidden', 'true');
+
+  body.appendChild(nameRow);
+  body.appendChild(meta);
+  btn.appendChild(avatarWrap.firstElementChild || avatarWrap);
+  btn.appendChild(body);
+  btn.appendChild(check);
+  btn.addEventListener('click', onClick);
+  return btn;
+}
+
+function buildMeetingPopupItem(agents) {
   const meetingBtn = document.createElement('button');
   meetingBtn.type = 'button';
   meetingBtn.className = 'agent-item agent-item-meeting';
-  if (window.MeetingView?.isRunning?.()) {
-    meetingBtn.classList.add('active');
+  const meetingRunning = window.MeetingView?.isRunning?.();
+  const meetingVisible = window.MeetingView?.isVisible?.();
+  if (meetingRunning) {
     meetingBtn.classList.add('agent-item-meeting-running');
   }
-  if (window.MeetingView?.isVisible?.()) {
+  if (meetingVisible) {
     meetingBtn.classList.add('active');
   }
+
   const meetingAvatarWrap = document.createElement('span');
   meetingAvatarWrap.className = 'agent-item-avatar agent-item-avatar-meeting';
   const meetingAvatarSrc = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
   meetingAvatarWrap.innerHTML = `<img src="${meetingAvatarSrc}" alt="" aria-hidden="true">`;
+
   const meetingBody = document.createElement('span');
   meetingBody.className = 'agent-item-body';
+
   const meetingName = document.createElement('span');
   meetingName.className = 'agent-item-name';
   meetingName.textContent = '会议';
+
   const meetingMeta = document.createElement('span');
   meetingMeta.className = 'agent-item-meta';
-  if (window.MeetingView?.isRunning?.()) {
-    const topic = window.MeetingView.getConfig?.()?.topic;
-    meetingMeta.textContent = window.MeetingView.isVisible?.()
-      ? (topic ? `进行中 · ${topic}` : '进行中')
-      : (topic ? `进行中 · 点击返回 · ${topic}` : '进行中 · 点击返回');
-  } else if (window.MeetingView?.isVisible?.()) {
-    meetingMeta.textContent = '会议记录';
+  const topic = window.MeetingView?.getConfig?.()?.topic?.trim();
+  if (meetingRunning) {
+    meetingMeta.textContent = topic || '群聊进行中';
+    if (!meetingVisible) {
+      meetingName.title = topic ? `${topic} · 点击返回会议` : '点击返回会议';
+    }
+  } else if (meetingVisible) {
+    meetingMeta.textContent = '浏览历史记录';
   } else {
     meetingMeta.textContent = '多 Agent 结构化会议';
   }
+
+  const check = document.createElement('span');
+  check.className = 'agent-item-check';
+  check.textContent = '✓';
+  check.setAttribute('aria-hidden', 'true');
+
   meetingBody.appendChild(meetingName);
   meetingBody.appendChild(meetingMeta);
   meetingBtn.appendChild(meetingAvatarWrap);
   meetingBtn.appendChild(meetingBody);
+  meetingBtn.appendChild(check);
   meetingBtn.addEventListener('click', () => {
     hideAgentPopup();
     if (window.MeetingView?.openHub) {
@@ -2545,16 +2545,62 @@ function renderAgentPopup(agents) {
     }
     if (window.MeetingUI?.openSetup) window.MeetingUI.openSetup(agents);
   });
-  if (window.MeetingView?.isRunning?.()) {
-    agentPopup.insertBefore(meetingBtn, agentPopup.firstChild);
-  } else {
-    agentPopup.appendChild(meetingBtn);
+  return meetingBtn;
+}
+
+function renderAgentPopup(agents) {
+  if (!agentPopup) return;
+  if (!agents.length) {
+    agentPopup.innerHTML = '<div class="agent-popup-empty">暂无可用 Agent</div>';
+    return;
   }
+
+  agentPopup.innerHTML = '';
+  const shell = document.createElement('div');
+  shell.className = 'agent-popup-shell';
+
+  const meetingSection = document.createElement('div');
+  meetingSection.className = 'agent-popup-section agent-popup-section-meeting'
+    + (window.MeetingView?.isRunning?.() ? ' is-live' : '');
+  const meetingLabel = document.createElement('div');
+  meetingLabel.className = 'agent-popup-section-label';
+  meetingLabel.textContent = '会议';
+  meetingSection.appendChild(meetingLabel);
+  meetingSection.appendChild(buildMeetingPopupItem(agents));
+
+  const agentSection = document.createElement('div');
+  agentSection.className = 'agent-popup-section agent-popup-section-agents';
+  const agentLabel = document.createElement('div');
+  agentLabel.className = 'agent-popup-section-label';
+  agentLabel.textContent = '对话';
+  const agentList = document.createElement('div');
+  agentList.className = 'agent-popup-list';
+
+  for (const agent of agents) {
+    agentList.appendChild(buildAgentPopupItem(agent, {
+      active: agent.id === currentAgentId && !window.MeetingView?.isVisible?.(),
+      onClick: () => {
+        if (agent.id !== currentAgentId) {
+          switchToAgent(agent.id);
+        } else {
+          if (window.MeetingView?.isVisible?.()) {
+            window.MeetingView.leaveView();
+          }
+          hideAgentPopup();
+        }
+      },
+    }));
+  }
+
+  agentSection.appendChild(agentLabel);
+  agentSection.appendChild(agentList);
+  shell.appendChild(agentSection);
+  shell.appendChild(meetingSection);
+  agentPopup.appendChild(shell);
 }
 
 async function showAgentPopup() {
-  if (!agentPopup) return;
-  if (!titlebarAgentBtn && !titlebarMeetingTitle) return;
+  if (!agentPopup || !titlebarAgentBtn) return;
   if (!agentPopup.hidden) {
     hideAgentPopup();
     return;
@@ -2562,15 +2608,8 @@ async function showAgentPopup() {
   hideModelPopup();
   hideCommandPopup();
   agentPopup.hidden = false;
-  const inMeeting = document.body.classList.contains('meeting-mode');
-  if (titlebarAgentBtn) {
-    titlebarAgentBtn.classList.toggle('open', !inMeeting);
-    titlebarAgentBtn.setAttribute('aria-expanded', inMeeting ? 'false' : 'true');
-  }
-  if (titlebarMeetingTitle) {
-    titlebarMeetingTitle.classList.toggle('open', inMeeting);
-    titlebarMeetingTitle.setAttribute('aria-expanded', inMeeting ? 'true' : 'false');
-  }
+  titlebarAgentBtn.classList.add('open');
+  titlebarAgentBtn.setAttribute('aria-expanded', 'true');
   agentPopup.innerHTML = '<div class="agent-popup-loading">加载 Agent…</div>';
 
   if (!connected) {
@@ -3637,13 +3676,6 @@ if (titlebarAgentBtn) {
   });
 }
 
-if (titlebarMeetingTitle) {
-  titlebarMeetingTitle.addEventListener('click', (e) => {
-    e.stopPropagation();
-    showAgentPopup();
-  });
-}
-
 if (modelPickerBtn) {
   modelPickerBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -4659,28 +4691,27 @@ if (messagesEl) {
 
 let meetingTitlebarBackup = null;
 
+function buildMeetingTitlebarAvatarHtml() {
+  const src = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
+  return `<span class="agent-avatar agent-avatar-titlebar agent-avatar-meeting" role="img" aria-label="会议"><img src="${src}" alt="会议"></span>`;
+}
+
 function applyMeetingTitlebar() {
-  if (!titlebarMeetingTitle) return;
-  if (!meetingTitlebarBackup && titlebarAgentAvatar && titlebarAgentBtn) {
+  if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
+  if (!meetingTitlebarBackup) {
     meetingTitlebarBackup = {
       avatarHtml: titlebarAgentAvatar.innerHTML,
       title: titlebarAgentBtn.title,
       ariaLabel: titlebarAgentBtn.getAttribute('aria-label'),
     };
   }
-  titlebarMeetingTitle.hidden = false;
-  titlebarMeetingTitle.setAttribute('aria-hidden', 'false');
-  titlebarMeetingTitle.title = '切换 Agent / 会议';
-  titlebarMeetingTitle.setAttribute('aria-label', '切换 Agent / 会议');
+  titlebarAgentAvatar.innerHTML = buildMeetingTitlebarAvatarHtml();
+  titlebarAgentBtn.title = '会议 · 切换 Agent';
+  titlebarAgentBtn.setAttribute('aria-label', '会议 · 切换 Agent');
+  titlebarAgentBtn.classList.add('titlebar-agent-btn--meeting-view');
 }
 
 function restoreMeetingTitlebar(clearBackup = false) {
-  if (titlebarMeetingTitle) {
-    titlebarMeetingTitle.hidden = true;
-    titlebarMeetingTitle.setAttribute('aria-hidden', 'true');
-    titlebarMeetingTitle.classList.remove('open');
-    titlebarMeetingTitle.setAttribute('aria-expanded', 'false');
-  }
   if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
   titlebarAgentBtn.classList.remove('titlebar-agent-btn--meeting-view');
   if (meetingTitlebarBackup) {

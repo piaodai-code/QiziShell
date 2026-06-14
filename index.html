@@ -11,7 +11,6 @@
     <header class="titlebar">
       <div class="titlebar-left"></div>
       <div class="titlebar-center">
-        <button type="button" class="titlebar-meeting-title" id="titlebar-meeting-title" hidden aria-hidden="true" title="切换 Agent / 会议" aria-label="切换 Agent / 会议" aria-haspopup="true" aria-expanded="false">会议</button>
         <div class="titlebar-identity" id="titlebar-identity">
           <button type="button" class="titlebar-agent-btn" id="titlebar-agent-btn" title="切换 Agent" aria-label="切换 Agent">
             <span class="titlebar-agent-avatar" id="titlebar-agent-avatar"></span>
@@ -49,21 +48,6 @@
         </div>
       </div>
     </header>
-    <div class="meeting-toolbar" id="meeting-toolbar" hidden>
-      <div class="meeting-toolbar-body">
-        <div class="meeting-toolbar-left">
-          <label class="meeting-history-label" for="meeting-history-select">历史记录</label>
-          <select class="meeting-history-select" id="meeting-history-select" aria-label="历史会议">
-            <option value="">加载中…</option>
-          </select>
-          <span class="meeting-toolbar-status" id="meeting-toolbar-status" hidden></span>
-        </div>
-        <div class="meeting-toolbar-actions">
-          <button type="button" class="meeting-toolbar-btn" id="meeting-new-btn">新建会议</button>
-          <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-muted" id="meeting-leave-hub-btn">结束会议</button>
-        </div>
-      </div>
-    </div>
     <section class="chat-screen" id="chat-screen">
       <main class="messages" id="messages">
         <div class="msg-hint">还没有消息，发个试试 👋</div>
@@ -150,8 +134,24 @@
           <button type="button" class="multiselect-btn multiselect-btn-primary" id="multiselect-send-btn" disabled>发送</button>
         </div>
       </div>
-      <div class="meeting-observe-bar" id="meeting-observe-bar" hidden>
+    </footer>
+    <footer class="meeting-toolbar" id="meeting-toolbar" hidden>
+      <div class="meeting-toolbar-notice" id="meeting-observe-bar" hidden>
         <span>观察模式 · 群聊展示由 QiziShell 合成，Agent 私聊不受影响</span>
+      </div>
+      <div class="meeting-toolbar-body">
+        <div class="meeting-history-picker" id="meeting-history-picker">
+          <button type="button" class="meeting-history-trigger" id="meeting-history-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="历史会议">
+            <span class="meeting-history-trigger-text" id="meeting-history-trigger-text">加载中…</span>
+            <span class="meeting-history-trigger-caret" aria-hidden="true">▴</span>
+          </button>
+          <div class="meeting-history-menu" id="meeting-history-menu" hidden role="listbox"></div>
+        </div>
+        <span class="meeting-toolbar-status" id="meeting-toolbar-status" hidden></span>
+        <div class="meeting-toolbar-actions">
+          <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-primary" id="meeting-new-btn">新建会议</button>
+          <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-muted" id="meeting-leave-hub-btn">结束会议</button>
+        </div>
       </div>
     </footer>
   </div>
