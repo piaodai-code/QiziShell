@@ -17,6 +17,10 @@
   const toolbarStatusEl = document.getElementById('meeting-toolbar-status');
   const newMeetingBtn = document.getElementById('meeting-new-btn');
   const leaveHubBtn = document.getElementById('meeting-leave-hub-btn');
+  const composerToggleEl = document.getElementById('meeting-composer-toggle');
+  const composerDockEl = document.getElementById('meeting-composer-dock');
+  const ownerInputEl = document.getElementById('meeting-owner-input');
+  const ownerSendBtn = document.getElementById('meeting-owner-send-btn');
   const endConfirmModal = document.getElementById('meeting-end-confirm-modal');
   const endConfirmYesBtn = document.getElementById('meeting-end-confirm-yes');
   const endConfirmNoBtn = document.getElementById('meeting-end-confirm-no');
@@ -42,6 +46,63 @@
   let loadingArchive = false;
   /** @type {Array<{ value: string, label: string }>} */
   let historyOptions = [];
+  let composerExpanded = false;
+
+  function syncOwnerSendBtn() {
+    if (!ownerSendBtn || !ownerInputEl) return;
+    ownerSendBtn.disabled = !ownerInputEl.value.trim() || !running || !viewingLive;
+  }
+
+  function setComposerExpanded(expanded) {
+    composerExpanded = expanded;
+    document.body.classList.toggle('meeting-composer-expanded', expanded);
+    if (composerDockEl) composerDockEl.hidden = !expanded;
+    if (composerToggleEl) {
+      composerToggleEl.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+      composerToggleEl.setAttribute('aria-label', expanded ? '收起输入区' : '展开输入区');
+      const icon = composerToggleEl.querySelector('.meeting-composer-toggle-icon');
+      if (icon) icon.textContent = expanded ? '▾' : '▴';
+    }
+    if (expanded && ownerInputEl) {
+      ownerInputEl.focus();
+    }
+    if (!expanded && ownerInputEl) {
+      ownerInputEl.blur();
+    }
+  }
+
+  function updateComposerChrome() {
+    const showToggle = running && viewingLive;
+    if (composerToggleEl) composerToggleEl.hidden = !showToggle;
+    if (!showToggle) {
+      setComposerExpanded(false);
+      if (ownerInputEl) ownerInputEl.value = '';
+      syncOwnerSendBtn();
+    }
+  }
+
+  function toggleComposerExpanded() {
+    setComposerExpanded(!composerExpanded);
+  }
+
+  async function sendOwnerNote() {
+    const text = ownerInputEl?.value?.trim();
+    if (!text || !running || !viewingLive) return;
+    if (ownerSendBtn) ownerSendBtn.disabled = true;
+    try {
+      const result = await window.qizi?.sendMeetingOwnerNote?.(text);
+      if (result?.ok) {
+        ownerInputEl.value = '';
+        syncOwnerSendBtn();
+      } else if (result?.error) {
+        setStatus(result.error);
+      }
+    } catch (err) {
+      setStatus(err.message || '发送失败');
+    } finally {
+      syncOwnerSendBtn();
+    }
+  }
 
   function syncHistoryTriggerLabel() {
     if (!historyTriggerTextEl) return;
@@ -160,6 +221,9 @@
     if (m.speakerLabel === '任务书') {
       return { label: '任务书', agent: null };
     }
+    if (m.speakerLabel === '老大' || m.moderatorOnly) {
+      return { label: '老大', agent: null };
+    }
     if (m.who === 'me') {
       const agentId = m.speakerAgentId || meetingConfig?.moderatorAgentId;
       return { label: m.speakerLabel || agentLabel(agentId), agent: agentInfo(agentId) };
@@ -174,6 +238,9 @@
   function renderAvatarHtml(m) {
     if (m.speakerLabel === '任务书') {
       return '<div class="msg-avatar msg-avatar-me" aria-hidden="true">📋</div>';
+    }
+    if (m.speakerLabel === '老大' || m.moderatorOnly) {
+      return '<div class="msg-avatar msg-avatar-me" role="img" aria-label="老大">我</div>';
     }
     const speaker = speakerDisplay(m);
     const label = escapeHtml(speaker.label);
@@ -383,6 +450,7 @@
         viewingLive = true;
         applyTranscript(meetingMessages);
         setStatus(meetingStatus || '会议进行中…');
+        updateComposerChrome();
         render();
       }
       return;
@@ -390,6 +458,7 @@
     if (!window.qizi?.loadMeetingRecord) return;
     loadingArchive = true;
     viewingLive = false;
+    updateComposerChrome();
     render();
     try {
       const payload = key.includes('/') || key.includes('\\')
@@ -447,10 +516,13 @@
     if (running && viewingLive) {
       setStatus(meetingStatus || '会议进行中…');
     }
+    updateComposerChrome();
   }
 
   function clearMeetingChrome() {
     document.body.classList.remove('meeting-mode');
+    document.body.classList.remove('meeting-composer-expanded');
+    setComposerExpanded(false);
     if (toolbarEl) toolbarEl.hidden = true;
     if (composerBodyEl) composerBodyEl.hidden = false;
     if (observeBarEl) observeBarEl.hidden = true;
@@ -694,6 +766,7 @@
       viewingLive = true;
       selectedRecordKey = LIVE_RECORD_KEY;
       setSelectedHistoryKey(LIVE_RECORD_KEY);
+      updateComposerChrome();
       const streaming = meetingMessages.some((m) => m.streaming);
       setStatus(streaming ? '发言中…' : '会议进行中 · 群聊');
       if (observeBarEl) observeBarEl.hidden = false;
@@ -742,6 +815,7 @@
       }
       running = false;
       viewingLive = false;
+      updateComposerChrome();
       liveMeetingId = event.payload?.meetingId || liveMeetingId;
       if (observeBarEl) observeBarEl.hidden = true;
       if (event.payload?.endedEarly || event.payload?.state === 'DONE_EARLY_IDLE') {
@@ -766,6 +840,7 @@
     if (event.type === 'cancelled') {
       running = false;
       viewingLive = false;
+      updateComposerChrome();
       liveMeetingId = null;
       meetingStatus = '';
       if (newMeetingBtn) newMeetingBtn.disabled = false;
@@ -795,6 +870,24 @@
     leaveHubBtn.addEventListener('click', () => { requestEndMeeting(); });
   }
 
+  if (composerToggleEl) {
+    composerToggleEl.addEventListener('click', () => { toggleComposerExpanded(); });
+  }
+
+  if (ownerInputEl) {
+    ownerInputEl.addEventListener('input', () => { syncOwnerSendBtn(); });
+    ownerInputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+        e.preventDefault();
+        void sendOwnerNote();
+      }
+    });
+  }
+
+  if (ownerSendBtn) {
+    ownerSendBtn.addEventListener('click', () => { void sendOwnerNote(); });
+  }
+
   if (endConfirmNoBtn) {
     endConfirmNoBtn.addEventListener('click', () => { hideEndMeetingConfirm(); });
   }
@@ -817,6 +910,10 @@
       }
       if (historyMenuEl && !historyMenuEl.hidden) {
         closeHistoryMenu();
+        return;
+      }
+      if (composerExpanded) {
+        setComposerExpanded(false);
       }
     }
   });

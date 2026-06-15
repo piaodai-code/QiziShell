@@ -53,6 +53,13 @@ function moderatorSummaryRules({ final = false } = {}) {
 
 function meetingSummaryGuidance(softMax, hardMax, { final = false } = {}) {
   const label = final ? '最终总结' : '当轮总结';
+  if (final) {
+    return [
+      moderatorSummaryRules({ final }),
+      `- **${label}篇幅**：会议即将结束，**不设字数上限**；请把结论、分歧、派活写完整，系统不会截断；`,
+      '- 下方群聊记录仅供**提炼结论**；总结中**不得**复述或改写各位的发言过程。',
+    ].join('\n');
+  }
   return [
     moderatorSummaryRules({ final }),
     `- **${label}篇幅**：建议 ${softMax} 字以内；只写上述格式块；**必须在本条内收束完整**；`,
@@ -126,7 +133,7 @@ function resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount) {
     return {
       kind: 'final_summary',
       softChars: MEETING_MODERATOR_FINAL_SOFT_CHARS,
-      hardChars: MEETING_MODERATOR_FINAL_HARD_CHARS,
+      hardChars: 0,
     };
   }
   return {
@@ -138,6 +145,9 @@ function resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount) {
 
 function capModeratorSpeech(text, messages, roster, moderatorId, roundCount) {
   const mode = resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount);
+  if (mode.kind === 'final_summary') {
+    return String(text || '').trim();
+  }
   return capMeetingSpeech(text, mode.hardChars);
 }
 

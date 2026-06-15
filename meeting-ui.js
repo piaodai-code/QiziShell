@@ -191,9 +191,6 @@
   if (startBtn) startBtn.addEventListener('click', () => { void startMeeting(); });
   if (cancelBtn) cancelBtn.addEventListener('click', () => { void cancelSetup(); });
   if (closeBtn) closeBtn.addEventListener('click', () => { void cancelSetup(); });
-  modal.addEventListener('click', (e) => {
-    if (e.target === modal && !starting) closeModal();
-  });
 
   window.MeetingUI = { openSetup };
 })();

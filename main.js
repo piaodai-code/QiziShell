@@ -105,6 +105,8 @@ let meetingBriefingCancelled = false;
 let activeMeetingSessionKey = null;
 /** @type {{ sessionKey: string, meetingId: string, moderatorAgentId: string, moderatorLabel?: string, participantAgentIds: string[], topic?: string } | null} */
 let activeMeetingMeta = null;
+/** @type {{ appendOwnerNote: (text: string) => void } | null} */
+let activeMeetingRelay = null;
 let meetingHistoryPollTimer = null;
 let controlUiWindow = null;
 let controlUiLaunchUrl = null;
@@ -1197,6 +1199,7 @@ function clearActiveMeeting() {
   stopMeetingHistoryPoll();
   activeMeetingSessionKey = null;
   activeMeetingMeta = null;
+  activeMeetingRelay = null;
 }
 
 function resolveDeltaText(currentText, payload) {
@@ -1644,6 +1647,9 @@ async function runMeetingBriefingFlow(config) {
     await startMeetingGroupRelay(config, {
       chatTurn: (sessionKey, message, opts) => runMeetingChatTurn(sessionKey, message, opts || {}),
       chatTurnStream: (sessionKey, message, opts = {}) => runMeetingChatTurn(sessionKey, message, opts),
+      onRelayReady: (api) => {
+        activeMeetingRelay = api;
+      },
       onEvent: (event) => {
         if (event.type === 'briefing_ready' && event.payload) {
           setActiveMeetingMeta({
@@ -1693,6 +1699,7 @@ async function runMeetingBriefingFlow(config) {
       broadcastMeetingEvent({ type: 'cancelled', payload: {} });
     }
   } finally {
+    activeMeetingRelay = null;
     meetingBriefingRunning = false;
     meetingBriefingCancelled = false;
   }
@@ -2603,6 +2610,22 @@ ipcMain.handle('qizi-meeting:cancel', (event) => {
     pendingMeetingRuns.delete(runId);
   }
   return { ok: true };
+});
+
+ipcMain.handle('qizi-meeting:send-owner-note', async (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const text = String(payload?.text || '').trim();
+  if (!text) return { ok: false, error: '消息不能为空' };
+  if (!meetingBriefingRunning) return { ok: false, error: '会议未进行中' };
+  if (!activeMeetingRelay?.appendOwnerNote) return { ok: false, error: '会议尚未就绪' };
+  if (!activeMeetingSessionKey) return { ok: false, error: '会议 session 未就绪' };
+  try {
+    activeMeetingRelay.appendOwnerNote(text);
+    await injectMeetingChatMessage(activeMeetingSessionKey, text, '老大');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
 });
 
 ipcMain.handle('qizi-meeting:status', (event) => {

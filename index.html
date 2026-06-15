@@ -153,6 +153,19 @@
           <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-muted" id="meeting-leave-hub-btn">结束会议</button>
         </div>
       </div>
+      <button type="button" class="meeting-composer-toggle" id="meeting-composer-toggle" hidden aria-expanded="false" aria-label="展开输入区">
+        <span class="meeting-composer-toggle-icon" aria-hidden="true">▴</span>
+      </button>
+      <div class="meeting-composer-dock" id="meeting-composer-dock" hidden>
+        <div class="composer-input-wrap meeting-composer-input-wrap">
+          <textarea id="meeting-owner-input" placeholder="私信主持，仅主持可见…" rows="1"></textarea>
+          <button type="button" class="composer-send-btn" id="meeting-owner-send-btn" title="发送" aria-label="发送" disabled>
+            <svg class="composer-send-icon composer-send-icon-send" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+              <path fill="currentColor" d="M8 3.25 3.75 11.75h8.5L8 3.25Z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
     </footer>
   </div>
   <!-- 图片放大 modal（点击消息气泡里的图打开） -->

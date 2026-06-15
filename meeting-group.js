@@ -24,7 +24,6 @@ const {
   MEETING_MODERATOR_HARD_CHARS,
   MEETING_PARTICIPANT_HARD_CHARS,
   MEETING_MODERATOR_FINAL_SOFT_CHARS,
-  MEETING_MODERATOR_FINAL_HARD_CHARS,
   MEETING_TRANSCRIPT_MSG_CHARS,
   MEETING_TRANSCRIPT_TOTAL_CHARS,
 } = require('./meeting-protocol');
@@ -68,6 +67,10 @@ async function startMeetingGroupRelay(config, deps) {
     maxMessageChars: MEETING_TRANSCRIPT_MSG_CHARS,
     maxTotalChars: MEETING_TRANSCRIPT_TOTAL_CHARS,
   };
+  const participantPromptOpts = {
+    ...promptTranscriptOpts,
+    audience: 'participant',
+  };
 
   const meetingId = crypto.randomUUID();
   const startedAt = new Date().toISOString();
@@ -100,6 +103,15 @@ async function startMeetingGroupRelay(config, deps) {
 
   transcript.appendBriefing(briefingMessage);
   emitTranscript();
+
+  if (typeof deps.onRelayReady === 'function') {
+    deps.onRelayReady({
+      appendOwnerNote(text) {
+        transcript.appendOwnerNote(text);
+        emitTranscript();
+      },
+    });
+  }
 
   onEvent?.({ type: 'briefing_sending', payload: { sessionKey: moderatorSessionKey } });
 
@@ -207,7 +219,7 @@ async function startMeetingGroupRelay(config, deps) {
         speechMode: {
           kind: 'final_summary',
           softChars: MEETING_MODERATOR_FINAL_SOFT_CHARS,
-          hardChars: MEETING_MODERATOR_FINAL_HARD_CHARS,
+          hardChars: 0,
         },
         lastSpeakerLabel: '',
         extraPromptArgs: {
@@ -368,7 +380,7 @@ async function startMeetingGroupRelay(config, deps) {
         agentId: pending.agentId,
         agentLabel: pending.label,
         instruction: pending.instruction,
-        transcript: transcript.formatForPrompt(promptTranscriptOpts),
+        transcript: transcript.formatForPrompt(participantPromptOpts),
         groupSessionKey: participantSessionKey,
       });
 

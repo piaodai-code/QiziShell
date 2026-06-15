@@ -96,10 +96,30 @@ function createMeetingTranscript(config) {
     });
   }
 
+  function appendOwnerNote(text) {
+    finalizeStreaming();
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return;
+    messages.push({
+      who: 'me',
+      text: trimmed,
+      time: nowTimeLabel(),
+      streaming: false,
+      speakerLabel: '老大',
+      meeting: true,
+      moderatorOnly: true,
+    });
+  }
+
   function formatForPrompt(options = {}) {
     const maxMessageChars = Number(options.maxMessageChars) || 0;
     const maxTotalChars = Number(options.maxTotalChars) || 0;
-    const source = messages.filter((m) => m.text?.trim() && !m.streaming);
+    const audience = options.audience || 'moderator';
+    const source = messages.filter((m) => {
+      if (!m.text?.trim() || m.streaming) return false;
+      if (audience === 'participant' && m.moderatorOnly) return false;
+      return true;
+    });
     const list = maxTotalChars > 0 && source.length > 48 ? source.slice(-48) : source;
     const blocks = [];
     let total = 0;
@@ -125,6 +145,7 @@ function createMeetingTranscript(config) {
     upsertModeratorStream,
     appendModerator,
     appendParticipant,
+    appendOwnerNote,
     formatForPrompt,
   };
 }
