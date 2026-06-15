@@ -30,6 +30,23 @@ function hasSubstantiveMeetingSummary(text) {
 function findModeratorFinalMessage(messages, moderatorAgentId) {
   if (!Array.isArray(messages) || !moderatorAgentId) return null;
 
+  for (let i = 0; i < messages.length; i += 1) {
+    const msg = messages[i];
+    if (!isModeratorMessage(msg, moderatorAgentId)) continue;
+    const text = String(msg.text || '').trim();
+    if (!text || !isMeetingClosingMessage(text)) continue;
+    if (isMeetingClosingStub(text)) continue;
+    if (hasSubstantiveMeetingSummary(text)) return msg;
+  }
+
+  for (let i = 0; i < messages.length; i += 1) {
+    const msg = messages[i];
+    if (!isModeratorMessage(msg, moderatorAgentId)) continue;
+    const text = String(msg.text || '').trim();
+    if (!text || !isMeetingClosingMessage(text)) continue;
+    if (!isMeetingClosingStub(text)) return msg;
+  }
+
   let closingStub = null;
 
   for (let i = messages.length - 1; i >= 0; i -= 1) {

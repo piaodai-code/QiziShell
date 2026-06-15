@@ -21,6 +21,7 @@ const composerQuoteEl = document.getElementById('composer-quote');
 const composerQuoteTextEl = document.getElementById('composer-quote-text');
 const composerQuoteRemoveEl = document.getElementById('composer-quote-remove');
 const msgContextMenuEl = document.getElementById('msg-context-menu');
+const composerContextMenuEl = document.getElementById('composer-context-menu');
 const modelBadge = document.getElementById('model-badge');
 const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
@@ -166,10 +167,12 @@ let userAborted = false;
 /** @type {{ who: 'me'|'them', authorLabel: string, text: string, time?: string } | null} */
 let pendingQuote = null;
 let contextMenuTargetIndex = -1;
+let composerContextMenuTarget = null;
 let contextMenuSource = 'chat';
 let forwardTargetMessage = null;
 let forwardSelectedAgentIds = new Set();
 let forwardBatchMode = false;
+let forwardSubmitInFlight = false;
 let multiSelectMode = false;
 let multiSelectedIndices = new Set();
 const LOCAL_USER_LABEL = '用户';
@@ -471,7 +474,10 @@ let streamPollStableCount = 0;
 let sessionWatchTimer = null;
 let lastSyncedHistorySignature = '';
 let externalSessionRunId = null;
+let lastSessionSyncAt = 0;
+let syncHistoryChain = Promise.resolve();
 const SESSION_WATCH_MS = 800;
+const SESSION_SYNC_MIN_MS = 3000;
 
 async function normalizeImageForUi(dataUrl) {
   if (!window.qizi.normalizeImage) return dataUrl;
@@ -519,12 +525,50 @@ function getMeetingMessagesEl() {
   return document.getElementById('meeting-messages');
 }
 
-function renderActiveMessageView() {
+function renderActiveMessageView(options = {}) {
   if (contextMenuSource === 'meeting' || (multiSelectMode && window.MeetingView?.isVisible?.())) {
-    window.MeetingView?.render?.();
+    window.MeetingView?.render?.(options);
     return;
   }
-  if (!window.MeetingView?.isVisible?.()) render();
+  if (!window.MeetingView?.isVisible?.()) render(options);
+}
+
+function render(options = {}) {
+  if (window.MeetingView?.isVisible?.()) return;
+  if (!messagesEl) return;
+  const preserveScroll = options.preserveScroll === true;
+  const prevScrollTop = preserveScroll ? messagesEl.scrollTop : 0;
+  normalizeStreamingFlags();
+  if (messages.length === 0) {
+    messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
+    return;
+  }
+  messagesEl.innerHTML = '';
+  for (let i = 0; i < messages.length; i += 1) {
+    const m = messages[i];
+    try {
+      const row = document.createElement('div');
+      row.className = 'msg ' + m.who;
+      if (m.runId != null) row.dataset.runId = String(m.runId);
+      row.innerHTML = `
+        ${renderMessageAvatarHtml(m.who)}
+        <div class="msg-content">
+          <div class="msg-bubble"></div>
+          <div class="msg-meta">${m.time || ''}${m.streaming ? ' · 输入中…' : ''}</div>
+        </div>
+        ${renderMessageSelectCheckHtml(i)}
+      `;
+      row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m, i).html;
+      messagesEl.appendChild(row);
+    } catch (e) {
+      console.error('render error:', e);
+    }
+  }
+  if (preserveScroll) {
+    messagesEl.scrollTop = prevScrollTop;
+  } else {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
 }
 
 function getMessageAuthorLabel(msg) {
@@ -808,6 +852,9 @@ function findLocalUserMessageForServer(server, localList) {
       }
       continue;
     }
+    if (candidate.forward || isForwardLikeUserText(candidate.text)) {
+      if (historyForwardFingerprintsMatch(candidate, server)) return candidate;
+    }
     const localText = String(candidate.text || '').trim();
     if (localText && (localText === serverText || localText === serverReply)) {
       return candidate;
@@ -959,6 +1006,60 @@ function getMessageSelectableText(msg) {
   return parts.join('\n\n').trim();
 }
 
+function buildMessageCopyText(msg) {
+  if (!msg || msg.streaming) return '';
+  const parts = [];
+  const text = getMessageSelectableText(msg);
+  if (text) parts.push(text);
+  const images = Array.isArray(msg.images) ? msg.images : [];
+  if (images.length > 0) {
+    parts.push(images.length === 1 ? '[图片]' : `[图片 x${images.length}]`);
+  }
+  const files = Array.isArray(msg.files) ? msg.files : [];
+  if (files.length > 0) {
+    const names = files.map((f) => f.name || '未命名文件').join('、');
+    parts.push(`[附件] ${names}`);
+  }
+  return parts.join('\n\n').trim();
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text ?? '');
+  if (!value) return false;
+  try {
+    await navigator.clipboard.writeText(value);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+async function copyMessageAtIndex(index) {
+  const msg = getActiveMessages()[index];
+  const text = buildMessageCopyText(msg);
+  if (!text) {
+    setStatus('该消息没有可复制的内容', 'error');
+    hideMessageContextMenu();
+    return;
+  }
+  hideMessageContextMenu();
+  const ok = await copyTextToClipboard(text);
+  setStatus(ok ? '已复制' : '复制失败', ok ? 'ok' : 'error');
+}
+
 function isMessageSelectable(msg) {
   if (!msg || msg.streaming) return false;
   return Boolean(getMessageSelectableText(msg));
@@ -1025,16 +1126,38 @@ function buildExportEntries(indices) {
     .filter((entry) => entry.text || entry.quote?.text || entry.forward?.text);
 }
 
+function countMultiSelectSelection() {
+  if (!multiSelectMode || multiSelectedIndices.size === 0) return 0;
+  const list = getActiveMessages();
+  let count = 0;
+  for (const index of multiSelectedIndices) {
+    if (index >= 0 && index < list.length && isMessageSelectable(list[index])) count += 1;
+  }
+  return count;
+}
+
+function hasMultiSelectSelection() {
+  return countMultiSelectSelection() > 0;
+}
+
+function setMultiSelectActionEnabled(enabled) {
+  for (const btn of [multiselectExportBtn, multiselectSendBtn]) {
+    if (!btn) continue;
+    btn.disabled = !enabled;
+    btn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  }
+}
+
 async function exportMessagesToWord(entries, { exitMultiSelectOnSuccess = false } = {}) {
   if (!Array.isArray(entries) || entries.length === 0) {
-    setStatus('没有可导出的文字', 'error');
+    setStatus('没有可保存的文字', 'error');
     return;
   }
   if (!window.qizi?.exportMessagesWord) {
-    setStatus('导出功能不可用', 'error');
+    setStatus('保存功能不可用', 'error');
     return;
   }
-  setStatus('正在导出…', 'pending');
+  setStatus('正在保存…', 'pending');
   try {
     const result = await window.qizi.exportMessagesWord(entries);
     if (result?.cancelled) {
@@ -1042,20 +1165,20 @@ async function exportMessagesToWord(entries, { exitMultiSelectOnSuccess = false 
       return;
     }
     if (!result?.ok) {
-      setStatus(result?.error || '导出失败', 'error');
+      setStatus(result?.error || '保存失败', 'error');
       return;
     }
-    setStatus('已导出', 'ok');
+    setStatus('已保存', 'ok');
     if (exitMultiSelectOnSuccess) exitMultiSelectMode();
   } catch (err) {
-    setStatus(err.message || '导出失败', 'error');
+    setStatus(err.message || '保存失败', 'error');
   }
 }
 
 async function exportMessageAtIndex(index) {
   const msg = getActiveMessages()[index];
   if (!isMessageSelectable(msg)) {
-    setStatus('该消息没有可导出的文字', 'error');
+    setStatus('该消息没有可保存的文字', 'error');
     return;
   }
   hideMessageContextMenu();
@@ -1063,13 +1186,20 @@ async function exportMessageAtIndex(index) {
 }
 
 function updateMultiSelectBar() {
-  const count = multiSelectedIndices.size;
-  if (multiselectHintEl) {
-    multiselectHintEl.textContent = count > 0 ? `已选 ${count} 条` : '请选择消息';
+  const count = countMultiSelectSelection();
+  if (multiSelectedIndices.size > count) {
+    const list = getActiveMessages();
+    multiSelectedIndices = new Set(
+      [...multiSelectedIndices].filter(
+        (index) => index >= 0 && index < list.length && isMessageSelectable(list[index]),
+      ),
+    );
   }
-  const enabled = count > 0;
-  if (multiselectExportBtn) multiselectExportBtn.disabled = !enabled;
-  if (multiselectSendBtn) multiselectSendBtn.disabled = !enabled;
+  const effectiveCount = countMultiSelectSelection();
+  if (multiselectHintEl) {
+    multiselectHintEl.textContent = effectiveCount > 0 ? `已选 ${effectiveCount} 条` : '请选择消息';
+  }
+  setMultiSelectActionEnabled(effectiveCount > 0);
 }
 
 function setMultiSelectMode(enabled) {
@@ -1084,13 +1214,34 @@ function setMultiSelectMode(enabled) {
   }
   if (composerBodyEl) composerBodyEl.hidden = enabled && contextMenuSource !== 'meeting';
   if (composerMultiselectEl) composerMultiselectEl.hidden = !enabled;
-  const observeBarEl = document.getElementById('meeting-observe-bar');
-  if (observeBarEl && window.MeetingView?.isVisible?.()) {
-    observeBarEl.hidden = enabled;
-  }
   hideMessageContextMenu();
   updateMultiSelectBar();
   renderActiveMessageView();
+}
+
+function updateMultiSelectRowUI(index) {
+  const container = contextMenuSource === 'meeting' || (multiSelectMode && window.MeetingView?.isVisible?.())
+    ? getMeetingMessagesEl()
+    : messagesEl;
+  if (!container) return;
+  const rows = container.querySelectorAll('.msg');
+  const row = rows[index];
+  if (!row) {
+    renderActiveMessageView({ preserveScroll: true });
+    return;
+  }
+  const msg = getActiveMessages()[index];
+  if (!isMessageSelectable(msg)) return;
+  const selected = multiSelectedIndices.has(index);
+  const check = row.querySelector('.msg-select-check');
+  if (!check) {
+    renderActiveMessageView({ preserveScroll: true });
+    return;
+  }
+  check.hidden = false;
+  check.classList.toggle('selected', selected);
+  check.setAttribute('aria-label', selected ? '取消选择' : '选择消息');
+  check.setAttribute('aria-pressed', selected ? 'true' : 'false');
 }
 
 function toggleMultiSelectIndex(index) {
@@ -1105,17 +1256,16 @@ function toggleMultiSelectIndex(index) {
     multiSelectedIndices.add(index);
   }
   updateMultiSelectBar();
-  renderActiveMessageView();
+  updateMultiSelectRowUI(index);
 }
 
 function enterMultiSelectMode(initialIndex = -1) {
-  setMultiSelectMode(true);
+  multiSelectedIndices = new Set();
   const list = getActiveMessages();
   if (initialIndex >= 0 && isMessageSelectable(list[initialIndex])) {
     multiSelectedIndices.add(initialIndex);
-    updateMultiSelectBar();
-    renderActiveMessageView();
   }
+  setMultiSelectMode(true);
 }
 
 function exitMultiSelectMode() {
@@ -1183,7 +1333,10 @@ function renderForwardAgentList(agents) {
     return;
   }
   forwardAgentsListEl.innerHTML = '';
+  const seenAgentIds = new Set();
   for (const agent of agents) {
+    if (!agent?.id || seenAgentIds.has(agent.id)) continue;
+    seenAgentIds.add(agent.id);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'forward-agent-item' + (forwardSelectedAgentIds.has(agent.id) ? ' selected' : '');
@@ -1314,9 +1467,12 @@ async function openForwardModal(msg) {
 }
 
 async function openForwardModalForSelection() {
-  if (multiSelectedIndices.size === 0) return;
+  if (!hasMultiSelectSelection()) {
+    setStatus('请先选择消息', 'error');
+    return;
+  }
   const snapshot = buildMergedForwardSnapshot(multiSelectedIndices);
-  if (!snapshot.text) {
+  if (!snapshot.text?.trim()) {
     setStatus('所选消息没有可转发的文字', 'error');
     return;
   }
@@ -1328,12 +1484,20 @@ async function openForwardModalForSelection() {
 }
 
 async function exportSelectedMessages() {
-  if (multiSelectedIndices.size === 0) return;
+  if (!hasMultiSelectSelection()) {
+    setStatus('请先选择消息', 'error');
+    return;
+  }
   const entries = buildExportEntries(multiSelectedIndices);
+  if (entries.length === 0) {
+    setStatus('没有可保存的文字', 'error');
+    return;
+  }
   await exportMessagesToWord(entries, { exitMultiSelectOnSuccess: true });
 }
 
 async function submitForward() {
+  if (forwardSubmitInFlight) return;
   if (!forwardTargetMessage || forwardSelectedAgentIds.size === 0) return;
   const comment = forwardInputEl?.value || '';
   const outbound = formatForwardForAgent(buildForwardSnapshot(forwardTargetMessage), comment);
@@ -1342,6 +1506,7 @@ async function submitForward() {
     return;
   }
 
+  forwardSubmitInFlight = true;
   if (forwardSendBtn) forwardSendBtn.disabled = true;
   setStatus('正在转发…', 'pending');
   try {
@@ -1359,14 +1524,19 @@ async function submitForward() {
       : [];
     if (failed.length > 0) {
       setStatus(`部分转发失败（${failed.length}）`, 'error');
+    } else if (result.deduped) {
+      setStatus('已转发（重复请求已忽略）', 'ok');
     } else {
       setStatus('已转发', 'ok');
     }
+    const wasBatchForward = forwardBatchMode;
     closeForwardModal();
-    if (forwardBatchMode) exitMultiSelectMode();
+    if (wasBatchForward) exitMultiSelectMode();
   } catch (err) {
     setStatus(err.message || '转发失败', 'error');
     updateForwardSendButton();
+  } finally {
+    forwardSubmitInFlight = false;
   }
 }
 
@@ -1410,8 +1580,100 @@ function hideMessageContextMenu() {
   contextMenuTargetIndex = -1;
 }
 
+function hideComposerContextMenu() {
+  if (!composerContextMenuEl) return;
+  composerContextMenuEl.hidden = true;
+  composerContextMenuTarget = null;
+}
+
+function hideAllContextMenus() {
+  hideMessageContextMenu();
+  hideComposerContextMenu();
+}
+
+function showComposerContextMenu(x, y, target) {
+  if (!composerContextMenuEl || !target) return;
+  hideMessageContextMenu();
+  composerContextMenuTarget = target;
+  const value = target.value || '';
+  const start = target.selectionStart ?? value.length;
+  const end = target.selectionEnd ?? start;
+  const hasSelection = start !== end;
+  const disabled = Boolean(target.disabled);
+  const cutBtn = composerContextMenuEl.querySelector('[data-action="cut"]');
+  const copyBtn = composerContextMenuEl.querySelector('[data-action="copy"]');
+  const pasteBtn = composerContextMenuEl.querySelector('[data-action="paste"]');
+  const selectAllBtn = composerContextMenuEl.querySelector('[data-action="select-all"]');
+  if (cutBtn) cutBtn.disabled = disabled || !hasSelection;
+  if (copyBtn) copyBtn.disabled = disabled || !hasSelection;
+  if (pasteBtn) pasteBtn.disabled = disabled;
+  if (selectAllBtn) selectAllBtn.disabled = disabled || !value.length;
+  composerContextMenuEl.hidden = false;
+  const menuRect = composerContextMenuEl.getBoundingClientRect();
+  const maxX = window.innerWidth - menuRect.width - 8;
+  const maxY = window.innerHeight - menuRect.height - 8;
+  composerContextMenuEl.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
+  composerContextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+}
+
+async function pasteIntoTextarea(target) {
+  if (!target || target.disabled) return;
+  target.focus();
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    document.execCommand('paste');
+    target.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+  if (!text) return;
+  const value = target.value || '';
+  const start = target.selectionStart ?? value.length;
+  const end = target.selectionEnd ?? start;
+  const before = value.slice(0, start);
+  const after = value.slice(end);
+  target.value = before + text + after;
+  const pos = start + text.length;
+  target.setSelectionRange(pos, pos);
+  target.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function handleComposerContextAction(action) {
+  const target = composerContextMenuTarget;
+  hideComposerContextMenu();
+  if (!target || target.disabled) return;
+  target.focus();
+  if (action === 'select-all') {
+    target.select();
+    return;
+  }
+  if (action === 'cut') {
+    if (document.execCommand('cut')) {
+      target.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    return;
+  }
+  if (action === 'copy') {
+    document.execCommand('copy');
+    return;
+  }
+  if (action === 'paste') {
+    void pasteIntoTextarea(target);
+  }
+}
+
+function bindComposerInputContextMenu(textarea) {
+  if (!textarea) return;
+  textarea.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    showComposerContextMenu(e.clientX, e.clientY, textarea);
+  });
+}
+
 function showMessageContextMenu(x, y, msgIndex, source = 'chat') {
   if (!msgContextMenuEl) return;
+  hideComposerContextMenu();
   contextMenuSource = source;
   contextMenuTargetIndex = msgIndex;
   msgContextMenuEl.querySelectorAll('[data-chat-only="1"]').forEach((el) => {
@@ -1452,83 +1714,6 @@ function renderMessageBubbleContent(m, msgIndex = -1) {
   return content;
 }
 
-function mergeMessagePair(local, server) {
-  const who = server?.who || local?.who;
-  const merged = {
-    who,
-    text: '',
-    time: local?.time || server?.time || '',
-    runId: local?.runId ?? server?.runId,
-    streaming: false,
-  };
-
-  const localText = local?.text || '';
-  const serverText = server?.text || '';
-
-  if (who === 'them') {
-    merged.text = localText.length >= serverText.length ? localText : serverText;
-  } else if (isAttachmentPlaceholder(serverText)) {
-    merged.text = localText;
-  } else if (local?.forward) {
-    merged.text = localText || extractCommentTextFromForwardOutbound(serverText);
-  } else if (local?.quote) {
-    merged.text = localText || extractReplyTextFromOutbound(serverText);
-  } else {
-    const forwardParsed = parseStoredForwardMessage(serverText);
-    if (forwardParsed?.forward) {
-      merged.text = forwardParsed.comment || localText;
-      merged.forward = forwardParsed.forward;
-    } else {
-      const parsed = parseStoredQuoteMessage(serverText);
-      if (parsed?.quote) {
-        merged.text = parsed.reply || localText;
-        merged.quote = parsed.quote;
-      } else {
-        merged.text = serverText || localText;
-      }
-    }
-  }
-
-  if (Array.isArray(local?.images) && local.images.length > 0) {
-    merged.images = local.images;
-  } else if (Array.isArray(server?.images) && server.images.length > 0) {
-    merged.images = server.images;
-  }
-
-  if (Array.isArray(local?.files) && local.files.length > 0) {
-    merged.files = local.files.map(({ name, mimeType, size, dataUrl }) => ({
-      name,
-      mimeType,
-      size,
-      ...(dataUrl ? { dataUrl } : {}),
-    }));
-  } else if (Array.isArray(server?.files) && server.files.length > 0) {
-    merged.files = server.files;
-  }
-
-  if (who === 'me' && local?.forward) {
-    merged.forward = local.forward;
-  }
-
-  if (who === 'me' && local?.quote) {
-    merged.quote = local.quote;
-  }
-
-  if (local?.sentAtMs) {
-    merged.sentAtMs = local.sentAtMs;
-    merged.sentTime = local.sentTime || merged.sentTime;
-  } else if (server?.sentAtMs) {
-    merged.sentAtMs = server.sentAtMs;
-    merged.sentTime = server.sentTime;
-  } else if (local?.sentTime) {
-    merged.sentTime = local.sentTime;
-  } else if (server?.sentTime) {
-    merged.sentTime = server.sentTime;
-  }
-
-  return merged;
-}
-
 function assistantTextsMatch(a, b) {
   return String(a?.text || '').trim() === String(b?.text || '').trim();
 }
@@ -1538,7 +1723,37 @@ function shouldPreferHistoryStreamText(localText, serverText) {
   const local = String(localText || '');
   const server = String(serverText || '');
   if (!server || server.length <= local.length) return false;
-  if (!local) return true;
+  if (!local) return false;
+  return server.startsWith(local);
+}
+
+function getAssistantMessageBeforeTarget(target) {
+  const idx = messages.indexOf(target);
+  if (idx <= 0) return null;
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    if (messages[i].who === 'them') return messages[i];
+  }
+  return null;
+}
+
+/** 是否用 Gateway 历史刷新当前流式气泡（排除上一轮已完成回复） */
+function shouldApplyHistoryStreamText(target, serverText) {
+  const local = String(target?.text || '');
+  const server = String(serverText || '');
+  if (!server || server.length <= local.length) return false;
+
+  const prevText = String(getAssistantMessageBeforeTarget(target)?.text || '').trim();
+  const serverTrim = server.trim();
+
+  if (prevText && serverTrim === prevText && local.length <= prevText.length) {
+    return false;
+  }
+
+  if (!local) {
+    if (!prevText) return true;
+    return serverTrim !== prevText;
+  }
+
   return server.startsWith(local);
 }
 
@@ -1562,6 +1777,116 @@ function dedupeAssistantMessages(list) {
   return out;
 }
 
+function isAssistantReplyComplete(msg) {
+  return msg?.who === 'them' && Boolean(String(msg.text || '').trim()) && !msg.streaming;
+}
+
+function findExternalStreamingTarget(gatewayRunId) {
+  if (gatewayRunId) {
+    const byGateway = messages.find(
+      (m) => m.who === 'them' && m.external && m.streaming && m.gatewayRunId === gatewayRunId,
+    );
+    if (byGateway) return byGateway;
+  }
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg.who === 'them' && msg.external && msg.streaming) return msg;
+  }
+  return null;
+}
+
+function stripForwardMetadataEnvelope(text) {
+  return String(text || '')
+    .replace(/^Sender \(untrusted metadata\):\s*```json[\s\S]*?```\s*/m, '')
+    .trim();
+}
+
+function isForwardLikeUserText(text) {
+  const raw = String(text || '');
+  if (raw.includes(FORWARD_START_MARKER)) return true;
+  return /"kind"\s*:\s*"forwarded-message"/.test(raw);
+}
+
+function extractForwardScopeContentFromText(text) {
+  const trimmed = stripForwardMetadataEnvelope(text);
+  const start = trimmed.indexOf(FORWARD_START_MARKER);
+  const end = trimmed.indexOf(FORWARD_END_MARKER);
+  if (start >= 0 && end > start) {
+    const body = trimmed.slice(start + FORWARD_START_MARKER.length, end).trim();
+    const commentIdx = trimmed.indexOf('【留言】', end);
+    const comment = commentIdx >= 0 ? trimmed.slice(commentIdx + '【留言】'.length).trim() : '';
+    return comment ? `${body}\0${comment}` : body;
+  }
+  return trimmed;
+}
+
+function forwardUserMessageFingerprint(input, { bodyOnly = false } = {}) {
+  const msg = input && typeof input === 'object' ? input : null;
+  const text = msg ? String(msg.text || '') : String(input || '');
+  let body = '';
+  let comment = '';
+
+  if (msg?.forward?.text) {
+    body = String(msg.forward.text).trim();
+    comment = String(msg.text || '').trim();
+  } else {
+    const parsedText = stripForwardMetadataEnvelope(text);
+    const parsed = parseStoredForwardMessage(parsedText);
+    if (parsed?.forward?.text) {
+      body = String(parsed.forward.text).trim();
+      comment = String(parsed.comment || '').trim();
+    } else if (isForwardLikeUserText(text)) {
+      const scope = extractForwardScopeContentFromText(text);
+      const sep = scope.indexOf('\0');
+      if (sep >= 0) {
+        body = scope.slice(0, sep);
+        comment = scope.slice(sep + 1);
+      } else {
+        body = scope;
+      }
+    }
+  }
+
+  if (!body) return null;
+  if (bodyOnly) return body;
+  return comment ? `${body}\0${comment}` : body;
+}
+
+function historyForwardFingerprintsMatch(a, b) {
+  if (!a || !b || a.who !== 'me' || b.who !== 'me') return false;
+  const afBody = forwardUserMessageFingerprint(a, { bodyOnly: true });
+  const bfBody = forwardUserMessageFingerprint(b, { bodyOnly: true });
+  if (afBody && bfBody && afBody === bfBody) return true;
+  const af = forwardUserMessageFingerprint(a);
+  const bf = forwardUserMessageFingerprint(b);
+  return Boolean(af && bf && af === bf);
+}
+
+function dedupeForwardUserMessages(list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  const seenFull = new Set();
+  const out = [];
+  for (const msg of list) {
+    if (msg?.who !== 'me') {
+      out.push(msg);
+      continue;
+    }
+    const fullFp = forwardUserMessageFingerprint(msg);
+    if (fullFp) {
+      if (seenFull.has(fullFp)) continue;
+      seenFull.add(fullFp);
+      out.push(msg);
+      continue;
+    }
+    out.push(msg);
+  }
+  return out;
+}
+
+function finalizeHistoryMessages(list) {
+  return dedupeAssistantMessages(dedupeForwardUserMessages(list));
+}
+
 function pruneMessagesByRetention(list) {
   if (!Array.isArray(list) || list.length === 0) return list;
   const cutoff = Date.now() - MESSAGE_RETENTION_MS;
@@ -1570,6 +1895,7 @@ function pruneMessagesByRetention(list) {
 
 function historyMessagesMatch(a, b) {
   if (!a || !b || a.who !== b.who) return false;
+  if (historyForwardFingerprintsMatch(a, b)) return true;
   const at = String(a.text || '').trim();
   const bt = String(b.text || '').trim();
   if (at && bt && at === bt) return true;
@@ -1585,6 +1911,39 @@ function isLocalPrefixOfServer(local, server) {
     if (!historyMessagesMatch(local[i], server[i])) return false;
   }
   return true;
+}
+
+function isServerPrefixOfLocal(local, server) {
+  if (!server.length || local.length < server.length) return false;
+  for (let i = 0; i < server.length; i += 1) {
+    if (!historyMessagesMatch(local[i], server[i])) return false;
+  }
+  return true;
+}
+
+function refreshLocalFromServerPrefix(local, server) {
+  return local.map((m, i) => {
+    if (i >= server.length) {
+      return m.streaming ? { ...m } : m;
+    }
+    const overlaid = overlayLocalAttachmentsOntoServerHistory([server[i]], [m]);
+    const next = overlaid[0] || m;
+    if (!m.streaming) return next;
+    return {
+      ...next,
+      streaming: true,
+      runId: m.runId,
+      external: m.external,
+      gatewayRunId: m.gatewayRunId,
+      queued: m.queued,
+      queuedAt: m.queuedAt,
+    };
+  });
+}
+
+function stripHeadOverlappingMerged(head, merged) {
+  if (!head.length || !merged.length) return head;
+  return head.filter((m) => !isKnownInHistory(m, merged));
 }
 
 function findSuffixPrefixOverlap(local, server) {
@@ -1625,92 +1984,118 @@ function isKnownInHistory(msg, list) {
   return false;
 }
 
+function filterUnknownServerMessages(serverMessages, localMessages) {
+  const local = Array.isArray(localMessages) ? localMessages : [];
+  return (Array.isArray(serverMessages) ? serverMessages : []).filter((sm) => {
+    if (isKnownInHistory(sm, local)) return false;
+    if (sm?.who !== 'me') return true;
+    for (const item of local) {
+      if (historyForwardFingerprintsMatch(item, sm)) return false;
+    }
+    return true;
+  });
+}
+
 /** Gateway 历史可能比本地短（如隔日 session 被截断）；合并时以本地为归档，只追加/刷新服务端新内容 */
+function reattachInFlightStreaming(merged, inflightPrior) {
+  if (!Array.isArray(merged) || !inflightPrior?.length) return merged;
+  const out = merged.map((m) => ({ ...m }));
+  for (const live of inflightPrior) {
+    if (!live?.streaming) continue;
+    let idx = -1;
+    if (live.gatewayRunId) {
+      idx = out.findIndex((m) => m.gatewayRunId === live.gatewayRunId);
+    }
+    if (idx < 0 && live.who === 'them') {
+      for (let i = out.length - 1; i >= 0; i -= 1) {
+        if (out[i].who !== 'them') continue;
+        const serverText = String(out[i].text || '');
+        const liveText = String(live.text || '');
+        if (!serverText || !liveText || serverText.startsWith(liveText) || liveText.startsWith(serverText)) {
+          idx = i;
+        }
+        break;
+      }
+    }
+    if (idx >= 0) {
+      const server = out[idx];
+      const liveText = String(live.text || '');
+      const serverText = String(server.text || '');
+      out[idx] = {
+        ...server,
+        text: liveText.length >= serverText.length ? liveText : serverText,
+        streaming: true,
+        external: live.external ?? server.external,
+        gatewayRunId: live.gatewayRunId || server.gatewayRunId,
+        runId: live.runId ?? server.runId,
+        time: live.time || server.time,
+      };
+    } else {
+      out.push({ ...live });
+    }
+  }
+  return out;
+}
+
 function mergeGatewayHistory(localMessages, serverMessages) {
-  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => ({ ...m, streaming: false }));
-  const server = Array.isArray(serverMessages) ? serverMessages : [];
-  if (!server.length) return dedupeAssistantMessages(local);
+  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => (
+    m.streaming ? { ...m } : { ...m, streaming: false }
+  ));
+  const server = dedupeForwardUserMessages(
+    (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
+  );
+  if (!server.length) return finalizeHistoryMessages(local);
   if (!local.length) {
-    return dedupeAssistantMessages(overlayLocalAttachmentsOntoServerHistory(server, []));
+    return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, []));
   }
 
   if (isLocalPrefixOfServer(local, server)) {
-    return dedupeAssistantMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
+    return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
+  }
+
+  if (isServerPrefixOfLocal(local, server)) {
+    return finalizeHistoryMessages(refreshLocalFromServerPrefix(local, server));
   }
 
   const suffixPrefixK = findSuffixPrefixOverlap(local, server);
   if (suffixPrefixK > 0) {
-    const head = local.slice(0, local.length - suffixPrefixK);
+    const head = stripHeadOverlappingMerged(
+      local.slice(0, local.length - suffixPrefixK),
+      server,
+    );
     const localTail = local.slice(local.length - suffixPrefixK);
     const merged = overlayLocalAttachmentsOntoServerHistory(server, localTail);
-    return dedupeAssistantMessages([...head, ...merged]);
+    return finalizeHistoryMessages([...head, ...merged]);
   }
 
   const suffixK = findTrailingOverlapLength(local, server);
   if (suffixK === server.length) {
-    const head = local.slice(0, local.length - suffixK);
-    const localTail = local.slice(local.length - suffixK);
-    const merged = overlayLocalAttachmentsOntoServerHistory(server, localTail);
-    return dedupeAssistantMessages([...head, ...merged]);
+    const merged = overlayLocalAttachmentsOntoServerHistory(
+      server,
+      local.slice(local.length - suffixK),
+    );
+    const head = stripHeadOverlappingMerged(
+      local.slice(0, local.length - suffixK),
+      merged,
+    );
+    return finalizeHistoryMessages([...head, ...merged]);
   }
 
-  const unknownServer = server.filter((sm) => !isKnownInHistory(sm, local));
-  if (!unknownServer.length) return dedupeAssistantMessages(local);
+  const unknownServer = filterUnknownServerMessages(server, local);
+  if (!unknownServer.length) return finalizeHistoryMessages(local);
   const appended = overlayLocalAttachmentsOntoServerHistory(unknownServer, []);
-  return dedupeAssistantMessages([...local, ...appended]);
+  return finalizeHistoryMessages([...local, ...appended]);
 }
 
-function mergeHistories(localMessages, serverMessages) {
-  if (!Array.isArray(serverMessages) || serverMessages.length === 0) {
-    return Array.isArray(localMessages) && localMessages.length
-      ? localMessages.map((m) => ({ ...m, streaming: false }))
-      : [];
-  }
-  if (!Array.isArray(localMessages) || localMessages.length === 0) {
-    return serverMessages;
-  }
-
-  const localAttachmentUsers = localMessages.filter(
-    (m) => m.who === 'me' && (
-      (Array.isArray(m.images) && m.images.length > 0)
-      || (Array.isArray(m.files) && m.files.length > 0)
-    ),
+function rebuildMessagesFromGateway(serverMessages, localMessages) {
+  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => ({ ...m, streaming: false }));
+  const localUsers = local.filter((m) => m.who === 'me');
+  const server = dedupeForwardUserMessages(
+    (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
   );
-  let attachmentUserIdx = 0;
-
-  const merged = serverMessages.map((server, index) => {
-    const local = localMessages[index];
-    const serverText = server?.text || '';
-    const localHasAttachments = local?.who === 'me' && (
-      (Array.isArray(local?.images) && local.images.length > 0)
-      || (Array.isArray(local?.files) && local.files.length > 0)
-    );
-
-    if (server.who === 'me' && isAttachmentPlaceholder(serverText)) {
-      if (localHasAttachments) {
-        return mergeMessagePair(local, server);
-      }
-      while (attachmentUserIdx < localAttachmentUsers.length) {
-        const candidate = localAttachmentUsers[attachmentUserIdx++];
-        return mergeMessagePair(candidate, server);
-      }
-    }
-
-    return mergeMessagePair(local, server);
-  });
-
-  if (localMessages.length > serverMessages.length) {
-    for (let i = serverMessages.length; i < localMessages.length; i += 1) {
-      const local = localMessages[i];
-      if (!local?.text && !local?.images?.length && !local?.files?.length) continue;
-      if (local.who === 'them') {
-        const lastThem = [...merged].reverse().find((m) => m.who === 'them');
-        if (lastThem && assistantTextsMatch(lastThem, local)) continue;
-      }
-      merged.push({ ...local, streaming: false });
-    }
-  }
-  return dedupeAssistantMessages(merged);
+  return finalizeHistoryMessages(
+    overlayLocalAttachmentsOntoServerHistory(server, localUsers),
+  );
 }
 
 function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages) {
@@ -1806,6 +2191,7 @@ async function handleStopCommand() {
 
 function applyLoadedSessionKey(result) {
   if (!result?.sessionKey || result.sessionKey === currentSessionKey) return false;
+  if (multiSelectMode) exitMultiSelectMode();
   flushSaveMessages();
   currentSessionKey = result.sessionKey;
   currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
@@ -1955,7 +2341,10 @@ function saveMessages(force) {
     saveTimer = null;
   }
   const write = () => {
-    const payload = pruneMessagesByRetention(messages).map((m) => ({
+    const sanitized = finalizeHistoryMessages(
+      pruneMessagesByRetention(messages).map((m) => ({ ...m, streaming: false })),
+    );
+    const payload = sanitized.map((m) => ({
       who: m.who,
       text: m.text,
       quote: m.quote || undefined,
@@ -2007,44 +2396,12 @@ function loadMessages() {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       messages = pruneMessagesByRetention(
-        parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
+        finalizeHistoryMessages(parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }))),
       );
     }
   } catch {
     messages = [];
   }
-}
-
-function render() {
-  if (window.MeetingView?.isVisible?.()) return;
-  if (!messagesEl) return;
-  normalizeStreamingFlags();
-  if (messages.length === 0) {
-    messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
-    return;
-  }
-  messagesEl.innerHTML = '';
-  for (let i = 0; i < messages.length; i += 1) {
-    const m = messages[i];
-    try {
-      const row = document.createElement('div');
-      row.className = 'msg ' + m.who;
-      if (m.runId != null) row.dataset.runId = String(m.runId);
-      row.innerHTML = `
-        ${renderMessageAvatarHtml(m.who)}
-        <div class="msg-content">
-          <div class="msg-bubble"></div>
-          <div class="msg-meta">${m.time || ''}${m.streaming ? ' · 输入中…' : ''}</div>
-        </div>
-        ${renderMessageSelectCheckHtml(i)}
-      `;
-      row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m, i).html;
-      messagesEl.appendChild(row);
-    } catch (e) {
-      console.error('render error:', e);
-    }
-  }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function updateStreamingBubble(runId) {
@@ -2074,12 +2431,6 @@ function isLocalOwnedActiveRun() {
   return Boolean(target && !target.external);
 }
 
-function historySignature(historyMessages) {
-  if (!Array.isArray(historyMessages) || historyMessages.length === 0) return '0';
-  const last = historyMessages[historyMessages.length - 1];
-  return `${historyMessages.length}:${last.who}:${(last.text || '').length}`;
-}
-
 function stopSessionWatch() {
   if (sessionWatchTimer) {
     clearInterval(sessionWatchTimer);
@@ -2091,27 +2442,33 @@ async function tickSessionWatch() {
   if (window.MeetingView?.isVisible?.()) return;
   if (!connected || isLocalOwnedActiveRun()) return;
 
+  const now = Date.now();
+  if (now - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
+
   try {
     const sessionInfo = await window.qizi.getSessionInfo();
     if (!sessionInfo?.ok) return;
 
-    if (sessionInfo.hasActiveRun) {
-      if (!messages.some((m) => m.streaming)) {
+    lastSessionSyncAt = now;
+
+    if (!sessionInfo.hasActiveRun) {
+      if (busy || messages.some((m) => m.streaming)) {
         await syncHistoryFromGateway();
-        await resumeInterruptedSession({ external: true });
+        clearStaleStreamingState({ force: true });
+        render();
+        flushSaveMessages();
       } else {
-        await syncHistoryFromGateway();
+        const history = await window.qizi.loadHistory();
+        if (!history?.ok) return;
+        const signature = historySignature(history.messages);
+        if (signature !== lastSyncedHistorySignature) {
+          await syncHistoryFromGateway();
+        }
       }
       return;
     }
 
-    const history = await window.qizi.loadHistory();
-    if (!history?.ok) return;
-    const signature = historySignature(history.messages);
-    if (signature !== lastSyncedHistorySignature) {
-      lastSyncedHistorySignature = signature;
-      await syncHistoryFromGateway();
-    }
+    await syncHistoryFromGateway({ preserveExternalStream: true });
   } catch {
     // ignore background sync errors
   }
@@ -2127,10 +2484,12 @@ function startSessionWatch() {
 async function handleExternalSessionChat(payload) {
   if (!payload || isLocalOwnedActiveRun()) return;
   if (window.MeetingView?.isVisible?.()) return;
+  if (payload.sessionKey && payload.sessionKey !== currentSessionKey) return;
+
+  const gatewayRunId = payload.gatewayRunId || null;
 
   if (payload.state === 'delta') {
-    await syncHistoryFromGateway();
-    let target = [...messages].reverse().find((m) => m.who === 'them');
+    let target = findExternalStreamingTarget(gatewayRunId);
     if (!target) {
       currentRunId += 1;
       target = {
@@ -2140,6 +2499,7 @@ async function handleExternalSessionChat(payload) {
         streaming: true,
         runId: currentRunId,
         external: true,
+        gatewayRunId,
       };
       messages.push(target);
     } else {
@@ -2150,8 +2510,9 @@ async function handleExternalSessionChat(payload) {
       }
       target.streaming = true;
       target.external = true;
+      if (gatewayRunId) target.gatewayRunId = gatewayRunId;
     }
-    externalSessionRunId = payload.gatewayRunId;
+    externalSessionRunId = gatewayRunId;
     activeRunId = target.runId ?? activeRunId;
     setBusy(true);
     scheduleStreamingUpdate(target.runId);
@@ -2160,9 +2521,17 @@ async function handleExternalSessionChat(payload) {
   }
 
   if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
-    await syncHistoryFromGateway();
-    clearStaleStreamingState();
+    const target = findExternalStreamingTarget(gatewayRunId);
+    if (target) {
+      if (payload.text && payload.text.length >= (target.text || '').length) {
+        target.text = payload.text;
+      }
+      target.streaming = false;
+    }
     externalSessionRunId = null;
+    stopStreamHistoryPoll();
+    await syncHistoryFromGateway();
+    clearStaleStreamingState({ force: true });
     render();
     flushSaveMessages();
     setStatus('已连接', 'ok');
@@ -2254,7 +2623,27 @@ function toChatPayload(assistantMsg) {
   return splitMessageForSend(userMsg);
 }
 
-async function syncHistoryFromGateway() {
+function historySignature(historyMessages) {
+  if (!Array.isArray(historyMessages) || historyMessages.length === 0) return '0';
+  const finalized = finalizeHistoryMessages(historyMessages);
+  if (!finalized.length) return '0';
+  const tail = finalized.slice(-3);
+  const tailSig = tail.map((m) => {
+    const textLen = (m.text || '').length;
+    const stream = m.streaming ? 's' : 'd';
+    return `${m.who}:${stream}:${textLen}:${m.sentAtMs ?? ''}`;
+  }).join('|');
+  return `${finalized.length}|${tailSig}`;
+}
+
+async function syncHistoryFromGateway(options = {}) {
+  const task = () => syncHistoryFromGatewayOnce(options);
+  const run = syncHistoryChain.then(task, task);
+  syncHistoryChain = run.catch(() => {});
+  return run;
+}
+
+async function syncHistoryFromGatewayOnce(options = {}) {
   if (!window.qizi.loadHistory) return;
   try {
     const result = await window.qizi.loadHistory();
@@ -2264,29 +2653,55 @@ async function syncHistoryFromGateway() {
       lastSyncedHistorySignature = '';
     }
 
-    lastSyncedHistorySignature = historySignature(result.messages);
-
     if (isLocalOwnedActiveRun()) {
       const streamingMsgs = messages.filter((m) => m.streaming && !m.external);
       if (streamingMsgs.length > 0) {
         for (const sm of streamingMsgs) {
           const lastThem = [...result.messages].reverse().find((m) => m.who === 'them');
-          if (lastThem && shouldPreferHistoryStreamText(sm.text, lastThem.text)) {
+          if (lastThem && shouldApplyHistoryStreamText(sm, lastThem.text)) {
             sm.text = lastThem.text;
             scheduleStreamingUpdate(sm.runId);
           }
         }
         return;
       }
-      // 本地 run 仍标记 busy 时，不做全量 merge，避免停止输出后重复追加助手气泡
       return;
     }
 
-    clearStaleStreamingState();
+    const preserveExternal = options.preserveExternalStream === true
+      || messages.some((m) => m.external && m.streaming);
+    if (!preserveExternal) {
+      clearStaleStreamingState();
+    } else {
+      const streamingThem = messages.filter((m) => m.who === 'them' && m.streaming);
+      for (const sm of streamingThem) {
+        const lastThem = [...result.messages].reverse().find((m) => m.who === 'them');
+        if (lastThem && shouldApplyHistoryStreamText(sm, lastThem.text)) {
+          sm.text = lastThem.text;
+          scheduleStreamingUpdate(sm.runId);
+        }
+      }
+      render();
+      return;
+    }
 
-    if (result.messages.length === 0 && messages.length > 0) return;
+    if (result.messages.length === 0 && messages.length > 0 && options.allowEmptyServer !== true) return;
 
-    messages = mergeGatewayHistory(messages, result.messages);
+    const priorInflight = messages.filter((m) => m.streaming);
+    let nextMessages;
+    if (options.rebuildFromServer === true) {
+      nextMessages = rebuildMessagesFromGateway(result.messages, messages);
+    } else {
+      nextMessages = mergeGatewayHistory(messages, result.messages);
+    }
+    if (priorInflight.length > 0) {
+      nextMessages = reattachInFlightStreaming(nextMessages, priorInflight);
+    }
+
+    const nextSignature = historySignature(nextMessages);
+    if (nextSignature === lastSyncedHistorySignature) return;
+    lastSyncedHistorySignature = nextSignature;
+    messages = nextMessages;
 
     flushSaveMessages();
     render();
@@ -2319,7 +2734,7 @@ async function pollStreamHistoryOnce(runId) {
 
     if (historyResult?.ok) {
       const lastThem = [...historyResult.messages].reverse().find((m) => m.who === 'them');
-      if (lastThem && shouldPreferHistoryStreamText(target.text, lastThem.text)) {
+      if (lastThem && shouldApplyHistoryStreamText(target, lastThem.text)) {
         target.text = lastThem.text;
         streamPollStableCount = 0;
         scheduleStreamingUpdate(runId);
@@ -2348,39 +2763,44 @@ async function resumeInterruptedSession(options = {}) {
   if (isLocalOwnedActiveRun()) return;
 
   const sessionInfo = await window.qizi.getSessionInfo();
-  if (!sessionInfo?.ok || !sessionInfo.hasActiveRun) return;
-
-  await syncHistoryFromGateway();
-
-  let target = null;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].who === 'them') {
-      target = messages[i];
-      break;
-    }
+  if (!sessionInfo?.ok || !sessionInfo.hasActiveRun) {
+    clearStaleStreamingState({ force: true });
+    return;
   }
 
-  if (!target) {
-    currentRunId += 1;
-    target = {
-      who: 'them',
-      text: '',
-      time: now(),
-      streaming: true,
-      runId: currentRunId,
-      external: Boolean(options.external),
-    };
-    messages.push(target);
-  } else {
-    if (!target.runId) {
-      currentRunId += 1;
-      target.runId = currentRunId;
-    } else {
-      currentRunId = Math.max(currentRunId, target.runId);
-    }
-    target.streaming = true;
-    if (options.external) target.external = true;
+  await syncHistoryFromGateway({ preserveExternalStream: true });
+
+  const existing = findExternalStreamingTarget(externalSessionRunId);
+  if (existing) {
+    setBusy(true);
+    activeRunId = existing.runId;
+    startStreamHistoryPoll(existing.runId);
+    return;
   }
+
+  const localStreaming = [...messages].reverse().find((m) => m.who === 'them' && m.streaming);
+  if (localStreaming) {
+    setBusy(true);
+    activeRunId = localStreaming.runId;
+    startStreamHistoryPoll(localStreaming.runId);
+    return;
+  }
+
+  const history = await window.qizi.loadHistory();
+  const serverLastThem = history?.ok
+    ? [...history.messages].reverse().find((m) => m.who === 'them')
+    : null;
+
+  currentRunId += 1;
+  const target = {
+    who: 'them',
+    text: serverLastThem?.text || '',
+    time: now(),
+    streaming: true,
+    runId: currentRunId,
+    external: Boolean(options.external),
+  };
+  messages.push(target);
 
   setBusy(true);
   activeRunId = target.runId;
@@ -2739,6 +3159,8 @@ async function switchToAgent(agentId) {
     return;
   }
 
+  if (multiSelectMode) exitMultiSelectMode();
+
   hideAgentPopup();
   setStatus('切换 Agent…', 'pending');
 
@@ -2783,10 +3205,19 @@ async function switchToAgent(agentId) {
 
     updateAgentTitleLabel(result.agent || { id: agentId });
     loadMessages();
+    messages = finalizeHistoryMessages(messages);
+    flushSaveMessages();
     render();
 
-    await syncHistoryFromGateway();
-    await resumeInterruptedSession();
+    lastSyncedHistorySignature = '';
+    lastSessionSyncAt = 0;
+    await syncHistoryFromGateway({ rebuildFromServer: true });
+    const sessionInfo = await window.qizi.getSessionInfo();
+    if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
+      await resumeInterruptedSession();
+    } else {
+      clearStaleStreamingState({ force: true });
+    }
     await refreshCurrentModelBadge();
     await refreshSessionInfo();
     setStatus('已连接', 'ok');
@@ -2939,9 +3370,18 @@ async function checkConnection() {
     if (result.ok) {
       connected = true;
       setStatus('已连接', 'ok');
+      messages = finalizeHistoryMessages(messages);
+      flushSaveMessages();
+      lastSyncedHistorySignature = '';
+      lastSessionSyncAt = 0;
       await refreshCurrentModelBadge();
-      await syncHistoryFromGateway();
-      await resumeInterruptedSession();
+      await syncHistoryFromGateway({ rebuildFromServer: true });
+      const sessionInfo = await window.qizi.getSessionInfo();
+      if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
+        await resumeInterruptedSession();
+      } else {
+        clearStaleStreamingState({ force: true });
+      }
       startSessionWatch();
     } else {
       connected = false;
@@ -3189,6 +3629,9 @@ window.qizi.onChatDelta((delta, runId, replace) => {
 
 window.qizi.onChatDone((runId, payload) => {
   finishAssistant({ runId, text: payload?.text });
+  if (!busy) {
+    void syncHistoryFromGateway();
+  }
 });
 
 if (window.qizi.onGatewayStatus) {
@@ -3209,7 +3652,10 @@ if (window.qizi.onGatewayStatus) {
       } else {
         setStatus('已连接', 'ok');
         refreshCurrentModelBadge();
-        if (!busy) syncHistoryFromGateway();
+        if (!busy) {
+          lastSyncedHistorySignature = '';
+          syncHistoryFromGateway({ rebuildFromServer: true });
+        }
       }
       startSessionWatch();
     }
@@ -3225,10 +3671,12 @@ if (window.qizi.onSessionChat) {
 if (window.qizi.onSessionChanged) {
   window.qizi.onSessionChanged(() => {
     if (!isLocalOwnedActiveRun()) {
-      syncHistoryFromGateway();
+      syncHistoryFromGateway({ preserveExternalStream: true });
     }
   });
 }
+
+// 转发回复由 main → session-chat 事件驱动，不再额外全量 sync
 
 // 探活 + 事件监听：主进程会推 done/error, 正常走那两个路径收尾
 // 不再加 30s 兜底——LLM thinking 长时会被误判"已发完的消息末尾追加 [错误]"
@@ -3290,6 +3738,10 @@ if (msgContextMenuEl) {
     const item = e.target.closest('[data-action]');
     if (!item || item.disabled) return;
     const action = item.dataset.action;
+    if (action === 'copy') {
+      void copyMessageAtIndex(contextMenuTargetIndex);
+      return;
+    }
     if (action === 'quote') {
       const msg = getActiveMessages()[contextMenuTargetIndex];
       if (msg) setPendingQuoteFromMessage(msg);
@@ -3319,10 +3771,24 @@ if (msgContextMenuEl) {
 }
 
 document.addEventListener('click', (e) => {
-  if (!msgContextMenuEl || msgContextMenuEl.hidden) return;
-  if (e.target.closest('#msg-context-menu')) return;
-  hideMessageContextMenu();
+  if (msgContextMenuEl && !msgContextMenuEl.hidden) {
+    if (!e.target.closest('#msg-context-menu')) hideMessageContextMenu();
+  }
+  if (composerContextMenuEl && !composerContextMenuEl.hidden) {
+    if (!e.target.closest('#composer-context-menu')) hideComposerContextMenu();
+  }
 });
+
+if (composerContextMenuEl) {
+  composerContextMenuEl.addEventListener('click', (e) => {
+    const item = e.target.closest('[data-action]');
+    if (!item || item.disabled) return;
+    handleComposerContextAction(item.dataset.action);
+  });
+}
+
+bindComposerInputContextMenu(inputEl);
+bindComposerInputContextMenu(document.getElementById('meeting-owner-input'));
 
 if (composerQuoteRemoveEl) {
   composerQuoteRemoveEl.addEventListener('click', () => {
@@ -3335,6 +3801,7 @@ inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
+    if (multiSelectMode) return;
     hideCommandPopup();
     send();
     return;
@@ -3343,6 +3810,11 @@ inputEl.addEventListener('keydown', (e) => {
     if (multiSelectMode) {
       e.preventDefault();
       exitMultiSelectMode();
+      return;
+    }
+    if (composerContextMenuEl && !composerContextMenuEl.hidden) {
+      e.preventDefault();
+      hideComposerContextMenu();
       return;
     }
     if (msgContextMenuEl && !msgContextMenuEl.hidden) {
@@ -3746,6 +4218,8 @@ inputEl.addEventListener('paste', async (e) => {
     currentSessionKey = await window.qizi.getSessionKey();
     currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
     loadMessages();
+    messages = finalizeHistoryMessages(messages);
+    flushSaveMessages();
     render();
     await refreshAgentTitleFromGateway();
   } catch {
@@ -3760,9 +4234,11 @@ window.addEventListener('beforeunload', () => {
 });
 
 window.addEventListener('focus', () => {
-  if (connected && !isLocalOwnedActiveRun()) {
-    syncHistoryFromGateway();
-  }
+  if (!connected || isLocalOwnedActiveRun()) return;
+  const now = Date.now();
+  if (now - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
+  lastSessionSyncAt = now;
+  syncHistoryFromGateway();
 });
 
 if (titlebarAgentBtn) {
@@ -3821,10 +4297,24 @@ if (multiselectCancelBtn) {
   multiselectCancelBtn.addEventListener('click', exitMultiSelectMode);
 }
 if (multiselectExportBtn) {
-  multiselectExportBtn.addEventListener('click', exportSelectedMessages);
+  multiselectExportBtn.addEventListener('click', (e) => {
+    if (!hasMultiSelectSelection() || multiselectExportBtn.disabled) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    void exportSelectedMessages();
+  });
 }
 if (multiselectSendBtn) {
-  multiselectSendBtn.addEventListener('click', openForwardModalForSelection);
+  multiselectSendBtn.addEventListener('click', (e) => {
+    if (!hasMultiSelectSelection() || multiselectSendBtn.disabled) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    void openForwardModalForSelection();
+  });
 }
 
 if (forwardCancelBtn) {

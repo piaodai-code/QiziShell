@@ -69,7 +69,7 @@
             </button>
           </div>
           <button type="button" class="icon-btn icon-btn-img" id="screenshot-btn" title="截屏 (Cmd+Shift+4 也行)">
-            <img src="assets/icons/scissors.png" alt="" aria-hidden="true">
+            <img src="assets/icons/camera.png" alt="" aria-hidden="true">
           </button>
           <button type="button" class="icon-btn icon-btn-img" id="pick-image-btn" title="从文件夹选择图片">
             <img src="assets/icons/picture.png" alt="" aria-hidden="true">
@@ -130,15 +130,12 @@
         <span class="composer-multiselect-hint" id="multiselect-hint">已选 0 条</span>
         <div class="composer-multiselect-actions">
           <button type="button" class="multiselect-btn" id="multiselect-cancel-btn">取消</button>
-          <button type="button" class="multiselect-btn" id="multiselect-export-btn" disabled>输出</button>
+          <button type="button" class="multiselect-btn" id="multiselect-export-btn" disabled>保存</button>
           <button type="button" class="multiselect-btn multiselect-btn-primary" id="multiselect-send-btn" disabled>发送</button>
         </div>
       </div>
     </footer>
     <footer class="meeting-toolbar" id="meeting-toolbar" hidden>
-      <div class="meeting-toolbar-notice" id="meeting-observe-bar" hidden>
-        <span>观察模式 · 群聊展示由 QiziShell 合成，Agent 私聊不受影响</span>
-      </div>
       <div class="meeting-toolbar-body">
         <div class="meeting-history-picker" id="meeting-history-picker">
           <button type="button" class="meeting-history-trigger" id="meeting-history-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="历史会议">
@@ -170,6 +167,10 @@
   </div>
   <!-- 图片放大 modal（点击消息气泡里的图打开） -->
   <div class="msg-context-menu" id="msg-context-menu" hidden role="menu">
+    <button type="button" class="msg-context-item" data-action="copy" role="menuitem">
+      <img src="assets/icons/copy.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>复制</span>
+    </button>
     <button type="button" class="msg-context-item" data-action="quote" role="menuitem">
       <img src="assets/icons/quotation.png" alt="" class="msg-context-icon" aria-hidden="true">
       <span>引用</span>
@@ -184,11 +185,29 @@
     </button>
     <button type="button" class="msg-context-item" data-action="export" role="menuitem">
       <img src="assets/icons/word.png" alt="" class="msg-context-icon" aria-hidden="true">
-      <span>输出</span>
+      <span>保存</span>
     </button>
     <button type="button" class="msg-context-item msg-context-item-meeting" data-action="start-meeting" data-chat-only="1" role="menuitem">
-      <img src="assets/icons/meeting-team.png" alt="" class="msg-context-icon msg-context-icon-meeting" aria-hidden="true">
+      <img src="assets/icons/meeting-menu.png" alt="" class="msg-context-icon msg-context-icon-meeting" aria-hidden="true">
       <span>发起会议</span>
+    </button>
+  </div>
+  <div class="msg-context-menu composer-context-menu" id="composer-context-menu" hidden role="menu">
+    <button type="button" class="msg-context-item" data-action="cut" role="menuitem">
+      <img src="assets/icons/scissors.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>剪切</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="copy" role="menuitem">
+      <img src="assets/icons/copy.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>复制</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="paste" role="menuitem">
+      <img src="assets/icons/paste.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>粘贴</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="select-all" role="menuitem">
+      <img src="assets/icons/select.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>全部选择</span>
     </button>
   </div>
   <div class="forward-modal" id="forward-modal" hidden role="dialog" aria-modal="true" aria-labelledby="forward-modal-title">

@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('qizi', {
   checkConnection: () => ipcRenderer.invoke('openclaw:check'),
   loadHistory: () => ipcRenderer.invoke('openclaw:history'),
+  loadHistoryForSession: (payload) => ipcRenderer.invoke('openclaw:history:session', payload),
   chatStream: (payload, runId) => ipcRenderer.invoke('openclaw:chat', { ...payload, runId }),
   onChatDelta: (callback) => {
     const handler = (_event, payload) => {
@@ -48,6 +49,11 @@ contextBridge.exposeInMainWorld('qizi', {
   getSessionKey: () => ipcRenderer.invoke('openclaw:getSessionKey'),
   listAgents: () => ipcRenderer.invoke('openclaw:agents:list'),
   forwardMessage: (payload) => ipcRenderer.invoke('openclaw:forward', payload),
+  onForwardSent: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:forward-sent', handler);
+    return () => ipcRenderer.removeListener('openclaw:forward-sent', handler);
+  },
   exportMessagesWord: (entries) => ipcRenderer.invoke('openclaw:export:word', { entries }),
   switchAgent: (agentId) => ipcRenderer.invoke('openclaw:session:switch', agentId),
   listModels: () => ipcRenderer.invoke('openclaw:models:list'),

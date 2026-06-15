@@ -623,15 +623,23 @@ function hasUnprocessedModeratorMentions(messages, roster, processed, moderatorA
   return false;
 }
 
-/** 主持收尾：有关键词；派活/总结里 @ 已发言者不算「还要 relay 一轮」 */
+/** 主持收尾：派活/总结里的 @ 仅是指派说明，不触发议事 relay */
 function isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount = 3, messages = []) {
-  if (!isMeetingClosingMessage(text, roundCount)) return false;
-  const mentions = parseMeetingMentions(text, roster, moderatorAgentId);
-  if (mentions.length === 0) return true;
-  const relayable = mentions.filter(
-    (m) => !shouldSkipRelayMention(text, m.agentId, messages, moderatorAgentId),
-  );
-  return relayable.length === 0;
+  return isMeetingClosingMessage(text, roundCount);
+}
+
+function findFirstClosingModeratorIndex(messages, moderatorAgentId, roster, roundCount = 3) {
+  if (!Array.isArray(messages) || !moderatorAgentId) return -1;
+  for (let i = 0; i < messages.length; i += 1) {
+    const msg = messages[i];
+    if (msg.speakerLabel === '任务书') continue;
+    if (msg.speakerAgentId !== moderatorAgentId) continue;
+    if (msg.streaming) continue;
+    if (isModeratorClosingMessage(msg.text, roster, moderatorAgentId, roundCount, messages)) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 function hasClosingModeratorMessage(messages, moderatorAgentId, roster = [], processed = new Set(), roundCount = 3) {
@@ -960,6 +968,7 @@ module.exports = {
   isMeetingCompleteText,
   isMeetingClosingMessage,
   isModeratorClosingMessage,
+  findFirstClosingModeratorIndex,
   hasUnprocessedModeratorMentions,
   hasClosingModeratorMessage,
   buildModeratorBriefingMessage,

@@ -508,8 +508,9 @@ body.meeting-mode .composer {
 }
 .multiselect-btn:hover:not(:disabled) { background: #e4e4e4; }
 .multiselect-btn:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: not-allowed;
+  pointer-events: none;
 }
 .multiselect-btn-primary {
   background: #1976d2;
@@ -739,6 +740,13 @@ body.meeting-mode .composer {
   opacity: 0.88;
 }
 .msg-context-item:hover:not(:disabled) { background: #f5f5f5; }
+.msg-context-item:disabled {
+  color: #bbb;
+  cursor: not-allowed;
+}
+.composer-context-menu {
+  min-width: 108px;
+}
 .msg-context-item.is-soon {
   color: #aaa;
   cursor: not-allowed;
@@ -2040,16 +2048,6 @@ body.drag-over .composer-pending {
   padding: 0;
 }
 .meeting-toolbar[hidden] { display: none !important; }
-.meeting-toolbar-notice {
-  padding: 8px 12px;
-  text-align: center;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--meta-text);
-  background: var(--bg);
-  border-bottom: 1px solid #eee;
-}
-.meeting-toolbar-notice[hidden] { display: none !important; }
 .meeting-toolbar-body {
   display: flex;
   align-items: center;
@@ -2271,15 +2269,6 @@ body.drag-over .composer-pending {
   flex-shrink: 0;
 }
 .meeting-exit-btn:hover { background: #f5fbff; }
-.meeting-observe-bar {
-  padding: 12px 16px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--meta-text);
-  border-top: 1px solid var(--border);
-  background: #fafafa;
-}
-.meeting-observe-bar[hidden] { display: none !important; }
 .composer--meeting .composer-tools,
 .composer--meeting .composer-input-wrap,
 .composer--meeting .emoji-picker { display: none !important; }

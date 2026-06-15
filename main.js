@@ -46,6 +46,7 @@ if (!app || typeof app.whenReady !== 'function') {
   process.exit(1);
 }
 
+const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -63,6 +64,235 @@ const {
 const { file: tmpFile } = require('tmp-promise');
 
 let mainWindow = null;
+
+const FORWARD_DEDUP_MS = 120_000;
+const FORWARD_REGISTRY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
+const FORWARD_REGISTRY_MAX_ENTRIES = 8000;
+const FORWARD_REGISTRY_PATH = () => path.join(app.getPath('userData'), 'forward-sent-registry.json');
+/** @type {Map<string, Promise<object>>} */
+const forwardInFlight = new Map();
+/** @type {Map<string, number>} */
+const recentForwardScopes = new Map();
+/** @type {Set<string>} */
+const meetingForwardDone = new Set();
+/** @type {Map<string, number> | null} */
+let forwardSentRegistry = null;
+/** @type {Map<string, { sessionKey: string, agentId: string, startedAt: number }>} */
+const pendingForwardRuns = new Map();
+const FORWARD_WATCH_MS = 5 * 60 * 1000;
+
+function watchForwardSession(sessionKey, agentId, gatewayRunId) {
+  if (gatewayRunId) {
+    pendingForwardRuns.set(gatewayRunId, {
+      sessionKey: String(sessionKey || '').trim(),
+      agentId: String(agentId || '').trim(),
+      startedAt: Date.now(),
+    });
+  }
+}
+
+function pruneForwardWatchState() {
+  const now = Date.now();
+  for (const [runId, meta] of pendingForwardRuns) {
+    if (now - meta.startedAt > FORWARD_WATCH_MS) pendingForwardRuns.delete(runId);
+  }
+}
+
+function finishForwardRun(gatewayRunId) {
+  pendingForwardRuns.delete(gatewayRunId);
+}
+
+const FORWARD_SCOPE_START = '【转发开始】';
+const FORWARD_SCOPE_END = '【转发结束】';
+const FORWARD_SCOPE_COMMENT = '【留言】';
+
+function extractForwardScopeContent(message) {
+  const trimmed = String(message || '').trim();
+  const start = trimmed.indexOf(FORWARD_SCOPE_START);
+  const end = trimmed.indexOf(FORWARD_SCOPE_END);
+  if (start >= 0 && end > start) {
+    const body = trimmed.slice(start + FORWARD_SCOPE_START.length, end).trim();
+    const commentIdx = trimmed.indexOf(FORWARD_SCOPE_COMMENT, end);
+    const comment = commentIdx >= 0
+      ? trimmed.slice(commentIdx + FORWARD_SCOPE_COMMENT.length).trim()
+      : '';
+    return comment ? `${body}\0${comment}` : body;
+  }
+  return trimmed;
+}
+
+function forwardHistoryFingerprint(msg) {
+  if (!msg || msg.who !== 'me') return null;
+  const text = String(msg.text || '');
+  if (!text.includes(FORWARD_SCOPE_START) && !/"kind"\s*:\s*"forwarded-message"/.test(text)) {
+    return null;
+  }
+  const content = extractForwardScopeContent(text);
+  if (!content) return null;
+  return content.includes('\0') ? content.split('\0')[0] : content;
+}
+
+function dedupeForwardHistoryMessages(list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  const seen = new Set();
+  const out = [];
+  for (const msg of list) {
+    if (msg?.who !== 'me') {
+      out.push(msg);
+      continue;
+    }
+    const fp = forwardHistoryFingerprint(msg);
+    if (!fp) {
+      out.push(msg);
+      continue;
+    }
+    if (seen.has(fp)) continue;
+    seen.add(fp);
+    out.push(msg);
+  }
+  return out;
+}
+
+function buildForwardDedupeScope(agentIds, message, dedupeScope) {
+  const explicit = typeof dedupeScope === 'string' ? dedupeScope.trim() : '';
+  if (explicit) return explicit;
+  const normalizedIds = [...new Set(agentIds.map((id) => id.trim()).filter(Boolean))].sort().join(',');
+  const contentKey = extractForwardScopeContent(message);
+  return crypto
+    .createHash('sha256')
+    .update(normalizedIds)
+    .update('\0')
+    .update(contentKey)
+    .digest('hex')
+    .slice(0, 40);
+}
+
+function buildForwardIdempotencyKey(scope, agentId) {
+  return `qizi-fwd-${scope}-${agentId}`.slice(0, 120);
+}
+
+function dedupeAgentEntries(rawAgents) {
+  const byId = new Map();
+  for (const agent of rawAgents) {
+    const id = typeof agent?.id === 'string' ? agent.id.trim() : '';
+    if (!id || byId.has(id)) continue;
+    byId.set(id, agent);
+  }
+  return [...byId.values()];
+}
+
+function uniqueAgentsMatchingIds(rawAgents, ids) {
+  const idSet = new Set(
+    (Array.isArray(ids) ? ids : [])
+      .filter((id) => typeof id === 'string' && id.trim())
+      .map((id) => id.trim()),
+  );
+  if (idSet.size === 0) return [];
+  return dedupeAgentEntries(rawAgents.filter((agent) => idSet.has(agent?.id)));
+}
+
+function pruneRecentForwardScopes(now = Date.now()) {
+  for (const [scope, ts] of recentForwardScopes) {
+    if (now - ts > FORWARD_DEDUP_MS) recentForwardScopes.delete(scope);
+  }
+}
+
+function loadForwardSentRegistry() {
+  if (forwardSentRegistry) return forwardSentRegistry;
+  forwardSentRegistry = new Map();
+  try {
+    const raw = fs.readFileSync(FORWARD_REGISTRY_PATH(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      for (const [key, ts] of Object.entries(parsed)) {
+        if (typeof key === 'string' && typeof ts === 'number') {
+          forwardSentRegistry.set(key, ts);
+        }
+      }
+    }
+  } catch {
+    // ignore missing or corrupt registry
+  }
+  pruneForwardSentRegistry();
+  for (const key of forwardSentRegistry.keys()) {
+    const marker = ':meeting-fwd:';
+    const pos = key.indexOf(marker);
+    if (pos >= 0) {
+      const meetingId = key.slice(pos + marker.length).split(':')[0];
+      if (meetingId) meetingForwardDone.add(meetingId);
+    }
+  }
+  return forwardSentRegistry;
+}
+
+function pruneForwardSentRegistry(now = Date.now()) {
+  if (!forwardSentRegistry) return;
+  for (const [key, ts] of forwardSentRegistry) {
+    if (now - ts > FORWARD_REGISTRY_RETENTION_MS) forwardSentRegistry.delete(key);
+  }
+  if (forwardSentRegistry.size <= FORWARD_REGISTRY_MAX_ENTRIES) return;
+  const sorted = [...forwardSentRegistry.entries()].sort((a, b) => a[1] - b[1]);
+  const dropCount = sorted.length - FORWARD_REGISTRY_MAX_ENTRIES;
+  for (let i = 0; i < dropCount; i += 1) {
+    forwardSentRegistry.delete(sorted[i][0]);
+  }
+}
+
+function saveForwardSentRegistry() {
+  if (!forwardSentRegistry) return;
+  pruneForwardSentRegistry();
+  try {
+    fs.writeFileSync(
+      FORWARD_REGISTRY_PATH(),
+      JSON.stringify(Object.fromEntries(forwardSentRegistry)),
+      'utf8',
+    );
+  } catch (err) {
+    console.warn('[qizi] save forward registry failed:', err.message);
+  }
+}
+
+function forwardBodyRegistryKey(agentId, message) {
+  const agent = String(agentId || '').trim();
+  if (!agent) return '';
+  const contentKey = extractForwardScopeContent(message);
+  const bodyOnly = contentKey.includes('\0') ? contentKey.split('\0')[0] : contentKey;
+  if (!bodyOnly) return '';
+  const hash = crypto.createHash('sha256').update(bodyOnly).digest('hex').slice(0, 32);
+  return `${agent}:fwd-body:${hash}`;
+}
+
+function forwardSentRegistryKey(agentId, scope) {
+  return `${String(agentId || '').trim()}:${String(scope || '').trim()}`;
+}
+
+function isForwardAlreadySent(agentId, scope) {
+  const key = forwardSentRegistryKey(agentId, scope);
+  if (!key || key === ':') return false;
+  return loadForwardSentRegistry().has(key);
+}
+
+function isForwardBodyAlreadySent(agentId, message) {
+  const key = forwardBodyRegistryKey(agentId, message);
+  if (!key || !key.includes(':fwd-body:')) return false;
+  return loadForwardSentRegistry().has(key);
+}
+
+function markForwardSent(agentId, scope, message) {
+  const key = forwardSentRegistryKey(agentId, scope);
+  if (key && key !== ':') {
+    loadForwardSentRegistry().set(key, Date.now());
+    if (scope.startsWith('meeting-fwd:')) {
+      const meetingId = scope.split(':')[1];
+      if (meetingId) meetingForwardDone.add(meetingId);
+    }
+  }
+  const bodyKey = forwardBodyRegistryKey(agentId, message);
+  if (bodyKey && bodyKey.includes(':fwd-body:')) {
+    loadForwardSentRegistry().set(bodyKey, Date.now());
+  }
+  saveForwardSentRegistry();
+}
 
 function getAuthorizedMainWindow(event) {
   if (!mainWindow || mainWindow.isDestroyed()) return null;
@@ -1305,6 +1535,16 @@ async function fetchLatestAssistantText() {
 
 function catchUpRunFromHistory(clientRunId, run, serverText) {
   if (!serverText || serverText.length <= run.fullText.length) return false;
+
+  const prior = String(run.priorAssistantText || '').trim();
+  const server = String(serverText || '').trim();
+  if (prior && server === prior && run.fullText.length <= prior.length) {
+    return false;
+  }
+  if (!run.fullText && prior && server === prior) {
+    return false;
+  }
+
   const delta = serverText.slice(run.fullText.length);
   run.fullText = serverText;
   run.lastEventAt = Date.now();
@@ -1405,11 +1645,11 @@ function isPayloadForCurrentSession(payload) {
   return !key || key === getSessionKey();
 }
 
-function handleExternalSessionChatEvent(payload) {
+function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}) {
   if (!payload || typeof payload.runId !== 'string') return;
   if (activeMeetingSessionKey && payload.sessionKey === activeMeetingSessionKey) return;
   if (isMeetingA2ASessionKey(payload.sessionKey)) return;
-  if (activeRuns.size > 0) return;
+  if (!allowWhileBusy && activeRuns.size > 0) return;
   if (!isPayloadForCurrentSession(payload)) return;
 
   const gatewayRunId = payload.runId;
@@ -1420,6 +1660,8 @@ function handleExternalSessionChatEvent(payload) {
   }
   run.lastEventAt = Date.now();
 
+  const sessionKey = payload.sessionKey;
+
   if (payload.state === 'delta') {
     const next = resolveDeltaText(run.fullText, payload);
     if (typeof next === 'string' && next !== run.fullText) {
@@ -1427,6 +1669,7 @@ function handleExternalSessionChatEvent(payload) {
         run.fullText = next;
         broadcastToRenderers('openclaw:session-chat', {
           state: 'delta',
+          sessionKey,
           gatewayRunId,
           delta: next,
           replace: true,
@@ -1438,6 +1681,7 @@ function handleExternalSessionChatEvent(payload) {
         if (delta) {
           broadcastToRenderers('openclaw:session-chat', {
             state: 'delta',
+            sessionKey,
             gatewayRunId,
             delta,
             replace: false,
@@ -1456,32 +1700,49 @@ function handleExternalSessionChatEvent(payload) {
     }
     broadcastToRenderers('openclaw:session-chat', {
       state: 'final',
+      sessionKey,
       gatewayRunId,
       text: run.fullText,
     });
     externalSessionRuns.delete(gatewayRunId);
+    finishForwardRun(gatewayRunId);
     return;
   }
 
   if (payload.state === 'aborted') {
     broadcastToRenderers('openclaw:session-chat', {
       state: 'aborted',
+      sessionKey,
       gatewayRunId,
       text: run.fullText,
     });
     externalSessionRuns.delete(gatewayRunId);
+    finishForwardRun(gatewayRunId);
     return;
   }
 
   if (payload.state === 'error') {
     broadcastToRenderers('openclaw:session-chat', {
       state: 'error',
+      sessionKey,
       gatewayRunId,
       error: payload.errorMessage || 'chat error',
       text: run.fullText,
     });
     externalSessionRuns.delete(gatewayRunId);
+    finishForwardRun(gatewayRunId);
   }
+}
+
+function handleForwardGatewayChatEvent(payload) {
+  if (!payload || typeof payload.runId !== 'string') return false;
+  const pending = pendingForwardRuns.get(payload.runId);
+  if (!pending) return false;
+  const payloadKey = String(payload.sessionKey || '').trim();
+  if (payloadKey && pending.sessionKey && payloadKey !== pending.sessionKey) return false;
+  if (!payloadKey && !isPayloadForCurrentSession(payload)) return false;
+  handleExternalSessionChatEvent(payload, { allowWhileBusy: true });
+  return true;
 }
 
 function broadcastMeetingEvent(event) {
@@ -1598,9 +1859,31 @@ function resolveExecAgentLabel(config, agentId) {
   return entry?.label || entry?.name || agentId;
 }
 
-async function maybeForwardMeetingConclusion(config, messages) {
+async function maybeForwardMeetingConclusion(config, messages, meetingId) {
   const agentId = String(config?.postMeetingExecAgentId || '').trim();
   if (!agentId) return null;
+
+  const normalizedMeetingId = String(meetingId || '').trim();
+  const dedupeScope = normalizedMeetingId
+    ? `meeting-fwd:${normalizedMeetingId}:${agentId}`
+    : undefined;
+  if (dedupeScope && isForwardAlreadySent(agentId, dedupeScope)) {
+    meetingForwardDone.add(normalizedMeetingId);
+    return {
+      ok: true,
+      agentId,
+      label: resolveExecAgentLabel(config, agentId),
+      deduped: true,
+    };
+  }
+  if (normalizedMeetingId && meetingForwardDone.has(normalizedMeetingId)) {
+    return {
+      ok: true,
+      agentId,
+      label: resolveExecAgentLabel(config, agentId),
+      deduped: true,
+    };
+  }
 
   const finalMsg = findModeratorFinalMessage(messages, config.moderatorAgentId);
   if (!finalMsg?.text?.trim()) {
@@ -1623,11 +1906,16 @@ async function maybeForwardMeetingConclusion(config, messages) {
     const result = await forwardMessageToAgents({
       agentIds: [agentId],
       message: outbound,
+      dedupeScope,
     });
+    if (result?.ok && normalizedMeetingId) {
+      meetingForwardDone.add(normalizedMeetingId);
+    }
     return {
       ok: Boolean(result?.ok),
       agentId,
       label: resolveExecAgentLabel(config, agentId),
+      deduped: Boolean(result?.deduped),
       error: result?.ok ? undefined : (result?.error || '转发失败'),
     };
   } catch (err) {
@@ -1671,6 +1959,7 @@ async function runMeetingBriefingFlow(config) {
             const forwardResult = await maybeForwardMeetingConclusion(
               config,
               event.payload?.messages,
+              event.payload?.meetingId,
             );
             clearActiveMeeting();
             broadcastMeetingEvent(event);
@@ -1730,8 +2019,12 @@ function handleSessionsChangedEvent(payload) {
   if (activeMeetingSessionKey && keys.has(activeMeetingSessionKey)) {
     refreshMeetingHistorySoon();
   }
-  if (keys.size > 0 && !keys.has(getSessionKey())) return;
-  broadcastToRenderers('openclaw:session-changed', { sessionKey: getSessionKey() });
+  const currentSession = getSessionKey();
+  const affectsCurrent = keys.size === 0 || keys.has(currentSession);
+  if (keys.size > 0 && !affectsCurrent) return;
+  broadcastToRenderers('openclaw:session-changed', {
+    sessionKey: currentSession,
+  });
 }
 
 function handleGatewayChatEvent(payload) {
@@ -1748,6 +2041,7 @@ function handleGatewayChatEvent(payload) {
     handleOwnedGatewayChatEvent(payload, matched);
     return;
   }
+  if (handleForwardGatewayChatEvent(payload)) return;
   handleExternalSessionChatEvent(payload);
 }
 
@@ -2115,7 +2409,7 @@ async function listAgents() {
     const result = await client.request('agents.list', {});
     const defaultId = result?.defaultId || 'main';
     const mainKey = result?.mainKey || 'main';
-    const rawAgents = Array.isArray(result?.agents) ? result.agents : [];
+    const rawAgents = dedupeAgentEntries(Array.isArray(result?.agents) ? result.agents : []);
     const [sessionModels, defaultsResult] = await Promise.all([
       fetchAgentMainSessionModels(client, mainKey),
       client.request('chat.history', { sessionKey: buildAgentSessionKey(defaultId, mainKey), limit: 1 }).catch(() => null),
@@ -2205,6 +2499,28 @@ async function setSessionModel(qualifiedModel) {
   }
 }
 
+async function loadChatHistoryForSession(sessionKey) {
+  const key = String(sessionKey || '').trim();
+  if (!key) {
+    return { ok: false, error: '未指定 session' };
+  }
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const result = await client.request('chat.history', {
+      sessionKey: key,
+      limit: 500,
+    });
+    return {
+      ok: true,
+      sessionKey: key,
+      messages: dedupeForwardHistoryMessages(convertHistoryMessages(result?.messages || [])),
+    };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
 async function loadChatHistory() {
   try {
     const client = ensureGateway();
@@ -2218,7 +2534,7 @@ async function loadChatHistory() {
       ok: true,
       sessionKey,
       sessionKeyChanged: false,
-      messages: convertHistoryMessages(result?.messages || []),
+      messages: dedupeForwardHistoryMessages(convertHistoryMessages(result?.messages || [])),
     };
   } catch (err) {
     return { ok: false, error: formatGatewayError(err) };
@@ -2395,7 +2711,7 @@ async function buildChatAttachments(images = [], files = []) {
   return attachments;
 }
 
-async function forwardMessageToAgents({ agentIds, message }) {
+async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
   const ids = Array.isArray(agentIds)
     ? [...new Set(agentIds.filter((id) => typeof id === 'string' && id.trim()))]
     : [];
@@ -2407,55 +2723,114 @@ async function forwardMessageToAgents({ agentIds, message }) {
     return { ok: false, error: '转发内容为空' };
   }
 
-  try {
-    const client = ensureGateway();
-    await client.waitForConnect();
-    const result = await client.request('agents.list', {});
-    const mainKey = result?.mainKey || 'main';
-    const rawAgents = Array.isArray(result?.agents) ? result.agents : [];
-    const idSet = new Set(ids);
-    const targets = rawAgents.filter((agent) => idSet.has(agent.id));
-    if (targets.length === 0) {
-      return { ok: false, error: '未找到所选 Agent' };
-    }
+  const scope = buildForwardDedupeScope(ids, trimmed, dedupeScope);
+  pruneRecentForwardScopes();
+  loadForwardSentRegistry();
+  const recentTs = recentForwardScopes.get(scope);
+  if (recentTs && Date.now() - recentTs < FORWARD_DEDUP_MS) {
+    return { ok: true, deduped: true, results: [] };
+  }
+  if (ids.every((agentId) => isForwardAlreadySent(agentId, scope) || isForwardBodyAlreadySent(agentId, trimmed))) {
+    return { ok: true, deduped: true, results: [] };
+  }
+  if (forwardInFlight.has(scope)) {
+    return forwardInFlight.get(scope);
+  }
 
-    const results = [];
-    for (const agent of targets) {
-      const sessionKey = pinnedSessionKeyForAgent(agent.id, mainKey);
-      const idempotencyKey = `qizi-fwd-${agent.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      try {
-        const ack = await client.request('chat.send', {
-          sessionKey,
-          message: trimmed,
-          deliver: false,
-          idempotencyKey,
-        });
-        results.push({
-          agentId: agent.id,
-          ok: true,
-          runId: (ack && ack.runId) || idempotencyKey,
-        });
-      } catch (err) {
-        results.push({
-          agentId: agent.id,
+  const work = (async () => {
+    try {
+      const client = ensureGateway();
+      await client.waitForConnect();
+      const result = await client.request('agents.list', {});
+      const mainKey = result?.mainKey || 'main';
+      const rawAgents = Array.isArray(result?.agents) ? result.agents : [];
+      const targets = uniqueAgentsMatchingIds(rawAgents, ids);
+      if (targets.length === 0) {
+        return { ok: false, error: '未找到所选 Agent' };
+      }
+      const matchedEntryCount = rawAgents.filter((agent) => ids.includes(agent?.id)).length;
+      if (matchedEntryCount > targets.length) {
+        console.warn(
+          `[qizi] forward: agents.list had ${matchedEntryCount} entries for ${targets.length} unique target(s); deduped before send`,
+        );
+      }
+
+      const results = [];
+      for (const agent of targets) {
+        const sessionKey = pinnedSessionKeyForAgent(agent.id, mainKey);
+        const idempotencyKey = buildForwardIdempotencyKey(scope, agent.id);
+        if (isForwardAlreadySent(agent.id, scope) || isForwardBodyAlreadySent(agent.id, trimmed)) {
+          results.push({
+            agentId: agent.id,
+            sessionKey,
+            ok: true,
+            deduped: true,
+            runId: idempotencyKey,
+          });
+          continue;
+        }
+        try {
+          const ack = await client.request('chat.send', {
+            sessionKey,
+            message: trimmed,
+            deliver: false,
+            idempotencyKey,
+          });
+          const gatewayRunId = (ack && ack.runId) || idempotencyKey;
+          markForwardSent(agent.id, scope, trimmed);
+          watchForwardSession(sessionKey, agent.id, gatewayRunId);
+          results.push({
+            agentId: agent.id,
+            sessionKey,
+            ok: true,
+            runId: gatewayRunId,
+          });
+        } catch (err) {
+          results.push({
+            agentId: agent.id,
+            sessionKey,
+            ok: false,
+            error: formatGatewayError(err),
+          });
+        }
+      }
+
+      const failed = results.filter((entry) => !entry.ok);
+      if (failed.length === results.length) {
+        return {
           ok: false,
-          error: formatGatewayError(err),
+          error: failed.map((entry) => entry.error).filter(Boolean).join('；') || '转发失败',
+          results,
+        };
+      }
+      pruneForwardWatchState();
+      if (failed.length === 0) {
+        recentForwardScopes.set(scope, Date.now());
+      }
+      const newSends = results.filter((entry) => entry.ok && !entry.deduped);
+      if (newSends.length > 0) {
+        broadcastToRenderers('openclaw:forward-sent', {
+          targets: newSends.map((entry) => ({
+            agentId: entry.agentId,
+            sessionKey: entry.sessionKey,
+            runId: entry.runId,
+          })),
         });
       }
-    }
-
-    const failed = results.filter((entry) => !entry.ok);
-    if (failed.length === results.length) {
       return {
-        ok: false,
-        error: failed.map((entry) => entry.error).filter(Boolean).join('；') || '转发失败',
+        ok: true,
+        deduped: newSends.length === 0,
         results,
       };
+    } catch (err) {
+      return { ok: false, error: formatGatewayError(err) };
+    } finally {
+      forwardInFlight.delete(scope);
     }
-    return { ok: true, results };
-  } catch (err) {
-    return { ok: false, error: formatGatewayError(err) };
-  }
+  })();
+
+  forwardInFlight.set(scope, work);
+  return work;
 }
 
 async function streamChat(event, { message, attachments, runId }) {
@@ -2474,11 +2849,19 @@ async function streamChat(event, { message, attachments, runId }) {
 
   const gatewayRunId = (ack && ack.runId) || idempotencyKey;
 
+  let priorAssistantText = '';
+  try {
+    priorAssistantText = await fetchLatestAssistantText() || '';
+  } catch {
+    priorAssistantText = '';
+  }
+
   return new Promise((resolve) => {
     registerActiveRun(runId, gatewayRunId, {
       gatewayRunId,
       sender: event.sender,
       fullText: '',
+      priorAssistantText,
       startedAt: Date.now(),
       lastEventAt: Date.now(),
       stableHistoryPolls: 0,
@@ -2757,6 +3140,10 @@ ipcMain.handle('openclaw:session:switch', (event, agentId) => {
 ipcMain.handle('openclaw:history', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return loadChatHistory();
+});
+ipcMain.handle('openclaw:history:session', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return loadChatHistoryForSession(payload?.sessionKey);
 });
 ipcMain.handle('openclaw:models:list', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();

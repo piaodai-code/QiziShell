@@ -15,6 +15,7 @@ const {
   isMeetingClosingMessage,
   isModeratorClosingMessage,
   hasClosingModeratorMessage,
+  findFirstClosingModeratorIndex,
   capMeetingSpeech,
   capModeratorSpeech,
   resolveModeratorSpeechMode,
@@ -359,7 +360,23 @@ async function startMeetingGroupRelay(config, deps) {
 
     const messages = transcript.getMessagesMutable();
 
-    const pending = findNextMention(messages, roster, processedMentionKeys, config.moderatorAgentId);
+    if (hasClosingModeratorMessage(
+      messages,
+      config.moderatorAgentId,
+      roster,
+      processedMentionKeys,
+      roundCount,
+    )) {
+      break;
+    }
+
+    const pending = findNextMention(
+      messages,
+      roster,
+      processedMentionKeys,
+      config.moderatorAgentId,
+      roundCount,
+    );
 
     if (pending) {
       nudgedAfterParticipant = false;
@@ -439,16 +456,6 @@ async function startMeetingGroupRelay(config, deps) {
       continue;
     }
 
-    if (hasClosingModeratorMessage(
-      messages,
-      config.moderatorAgentId,
-      roster,
-      processedMentionKeys,
-      roundCount,
-    )) {
-      break;
-    }
-
     if (messages.some((m) => m.streaming)) {
       if (await endLoopIteration({ skipWatchdog: true }) === 'break') break;
       continue;
@@ -468,6 +475,15 @@ async function startMeetingGroupRelay(config, deps) {
       && last.speakerLabel !== '任务书';
 
     if (lastIsParticipant) {
+      const closingIdx = findFirstClosingModeratorIndex(
+        visible,
+        config.moderatorAgentId,
+        roster,
+        roundCount,
+      );
+      if (closingIdx >= 0 && visible.length - 1 > closingIdx) {
+        break;
+      }
       if (!nudgedAfterParticipant) {
         lastNudgedMessageIndex = -1;
         const speechMode = resolveModeratorSpeechMode(
@@ -606,7 +622,7 @@ function collectSpokenAgentIds(messages) {
     .map((m) => m.speakerAgentId);
 }
 
-function findNextMention(messages, roster, processed, moderatorAgentId) {
+function findNextMention(messages, roster, processed, moderatorAgentId, roundCount = 2) {
   if (!Array.isArray(messages)) return null;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
@@ -615,6 +631,13 @@ function findNextMention(messages, roster, processed, moderatorAgentId) {
     if (msg.speakerAgentId !== moderatorAgentId) continue;
     const text = msg?.text || '';
     if (!text.trim()) continue;
+
+    if (isMeetingClosingMessage(text, roundCount)) {
+      for (const skipped of parseMeetingMentions(text, roster, moderatorAgentId)) {
+        processed.add(`${i}:${skipped.agentId}`);
+      }
+      continue;
+    }
 
     const mentions = parseMeetingMentions(text, roster, moderatorAgentId);
     const mention = pickRelayMention(text, mentions, messages, roster, moderatorAgentId, i);

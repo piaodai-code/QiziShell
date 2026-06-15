@@ -8,7 +8,6 @@
   const messagesEl = document.getElementById('meeting-messages');
   const composerEl = document.getElementById('composer');
   const composerBodyEl = document.getElementById('composer-body');
-  const observeBarEl = document.getElementById('meeting-observe-bar');
   const toolbarEl = document.getElementById('meeting-toolbar');
   const historyPickerEl = document.getElementById('meeting-history-picker');
   const historyTriggerEl = document.getElementById('meeting-history-trigger');
@@ -278,8 +277,10 @@
     return '请选择历史会议';
   }
 
-  function render() {
+  function render(options = {}) {
     if (!hubVisible || !messagesEl) return;
+    const preserveScroll = options.preserveScroll === true;
+    const prevScrollTop = preserveScroll ? messagesEl.scrollTop : 0;
     if (meetingMessages.length === 0) {
       messagesEl.innerHTML = `<div class="msg-hint">${escapeHtml(emptyHintText())}</div>`;
       return;
@@ -302,7 +303,11 @@
       row.querySelector('.msg-bubble').innerHTML = renderBubbleHtml(m.text, m.streaming);
       messagesEl.appendChild(row);
     }
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (preserveScroll) {
+      messagesEl.scrollTop = prevScrollTop;
+    } else {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
   }
 
   function setStatus(text) {
@@ -510,7 +515,6 @@
     document.body.classList.add('meeting-mode');
     if (toolbarEl) toolbarEl.hidden = false;
     if (composerBodyEl) composerBodyEl.hidden = true;
-    if (observeBarEl) observeBarEl.hidden = !(running && viewingLive);
     if (composerEl) composerEl.classList.add('composer--meeting');
     if (newMeetingBtn) newMeetingBtn.disabled = running;
     if (running && viewingLive) {
@@ -525,7 +529,6 @@
     setComposerExpanded(false);
     if (toolbarEl) toolbarEl.hidden = true;
     if (composerBodyEl) composerBodyEl.hidden = false;
-    if (observeBarEl) observeBarEl.hidden = true;
     if (composerEl) composerEl.classList.remove('composer--meeting');
     setStatus('');
   }
@@ -769,7 +772,6 @@
       updateComposerChrome();
       const streaming = meetingMessages.some((m) => m.streaming);
       setStatus(streaming ? '发言中…' : '会议进行中 · 群聊');
-      if (observeBarEl) observeBarEl.hidden = false;
     }
     if (event.type === 'relay_started') {
       setStatus('会议 relay 已启动…');
@@ -817,7 +819,6 @@
       viewingLive = false;
       updateComposerChrome();
       liveMeetingId = event.payload?.meetingId || liveMeetingId;
-      if (observeBarEl) observeBarEl.hidden = true;
       if (event.payload?.endedEarly || event.payload?.state === 'DONE_EARLY_IDLE') {
         const reason = event.payload?.endReason || '长时间无反馈';
         setStatus(`会议已提前结束 · ${reason}`);
@@ -844,7 +845,6 @@
       liveMeetingId = null;
       meetingStatus = '';
       if (newMeetingBtn) newMeetingBtn.disabled = false;
-      if (observeBarEl) observeBarEl.hidden = true;
       setStatus('会议已结束');
     }
   }
