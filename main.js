@@ -2212,7 +2212,7 @@ async function loadChatHistory() {
     const sessionKey = getSessionKey();
     const result = await client.request('chat.history', {
       sessionKey,
-      limit: 200,
+      limit: 500,
     });
     return {
       ok: true,

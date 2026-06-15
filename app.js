@@ -181,6 +181,8 @@ const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 const SAVE_DEBOUNCE_MS = 800;
 const STREAM_RENDER_MIN_MS = 48;
+/** 本地展示归档保留时长（Gateway 可能每日截断 main session，Shell 侧合并保留） */
+const MESSAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 let currentSessionKey = DEFAULT_SESSION_KEY;
 let currentAgentId = 'main';
@@ -1560,6 +1562,104 @@ function dedupeAssistantMessages(list) {
   return out;
 }
 
+function pruneMessagesByRetention(list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  const cutoff = Date.now() - MESSAGE_RETENTION_MS;
+  return list.filter((m) => m?.sentAtMs == null || m.sentAtMs >= cutoff);
+}
+
+function historyMessagesMatch(a, b) {
+  if (!a || !b || a.who !== b.who) return false;
+  const at = String(a.text || '').trim();
+  const bt = String(b.text || '').trim();
+  if (at && bt && at === bt) return true;
+  if (a.sentAtMs != null && b.sentAtMs != null && a.sentAtMs === b.sentAtMs) {
+    return at === bt || (!at && !bt);
+  }
+  return false;
+}
+
+function isLocalPrefixOfServer(local, server) {
+  if (!local.length || server.length < local.length) return false;
+  for (let i = 0; i < local.length; i += 1) {
+    if (!historyMessagesMatch(local[i], server[i])) return false;
+  }
+  return true;
+}
+
+function findSuffixPrefixOverlap(local, server) {
+  const max = Math.min(local.length, server.length);
+  for (let k = max; k > 0; k -= 1) {
+    let ok = true;
+    for (let i = 0; i < k; i += 1) {
+      if (!historyMessagesMatch(local[local.length - k + i], server[i])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return k;
+  }
+  return 0;
+}
+
+function findTrailingOverlapLength(local, server) {
+  const max = Math.min(local.length, server.length);
+  for (let k = max; k > 0; k -= 1) {
+    let ok = true;
+    for (let i = 0; i < k; i += 1) {
+      if (!historyMessagesMatch(local[local.length - k + i], server[server.length - k + i])) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok) return k;
+  }
+  return 0;
+}
+
+function isKnownInHistory(msg, list) {
+  if (!msg || !Array.isArray(list)) return false;
+  for (const item of list) {
+    if (historyMessagesMatch(item, msg)) return true;
+  }
+  return false;
+}
+
+/** Gateway 历史可能比本地短（如隔日 session 被截断）；合并时以本地为归档，只追加/刷新服务端新内容 */
+function mergeGatewayHistory(localMessages, serverMessages) {
+  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => ({ ...m, streaming: false }));
+  const server = Array.isArray(serverMessages) ? serverMessages : [];
+  if (!server.length) return dedupeAssistantMessages(local);
+  if (!local.length) {
+    return dedupeAssistantMessages(overlayLocalAttachmentsOntoServerHistory(server, []));
+  }
+
+  if (isLocalPrefixOfServer(local, server)) {
+    return dedupeAssistantMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
+  }
+
+  const suffixPrefixK = findSuffixPrefixOverlap(local, server);
+  if (suffixPrefixK > 0) {
+    const head = local.slice(0, local.length - suffixPrefixK);
+    const localTail = local.slice(local.length - suffixPrefixK);
+    const merged = overlayLocalAttachmentsOntoServerHistory(server, localTail);
+    return dedupeAssistantMessages([...head, ...merged]);
+  }
+
+  const suffixK = findTrailingOverlapLength(local, server);
+  if (suffixK === server.length) {
+    const head = local.slice(0, local.length - suffixK);
+    const localTail = local.slice(local.length - suffixK);
+    const merged = overlayLocalAttachmentsOntoServerHistory(server, localTail);
+    return dedupeAssistantMessages([...head, ...merged]);
+  }
+
+  const unknownServer = server.filter((sm) => !isKnownInHistory(sm, local));
+  if (!unknownServer.length) return dedupeAssistantMessages(local);
+  const appended = overlayLocalAttachmentsOntoServerHistory(unknownServer, []);
+  return dedupeAssistantMessages([...local, ...appended]);
+}
+
 function mergeHistories(localMessages, serverMessages) {
   if (!Array.isArray(serverMessages) || serverMessages.length === 0) {
     return Array.isArray(localMessages) && localMessages.length
@@ -1855,7 +1955,7 @@ function saveMessages(force) {
     saveTimer = null;
   }
   const write = () => {
-    const payload = messages.map((m) => ({
+    const payload = pruneMessagesByRetention(messages).map((m) => ({
       who: m.who,
       text: m.text,
       quote: m.quote || undefined,
@@ -1906,7 +2006,9 @@ function loadMessages() {
     }
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
-      messages = parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }));
+      messages = pruneMessagesByRetention(
+        parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
+      );
     }
   } catch {
     messages = [];
@@ -2184,13 +2286,7 @@ async function syncHistoryFromGateway() {
 
     if (result.messages.length === 0 && messages.length > 0) return;
 
-    if (!isLocalOwnedActiveRun()) {
-      messages = dedupeAssistantMessages(
-        overlayLocalAttachmentsOntoServerHistory(result.messages, messages),
-      );
-    } else {
-      messages = mergeHistories(messages, result.messages);
-    }
+    messages = mergeGatewayHistory(messages, result.messages);
 
     flushSaveMessages();
     render();
