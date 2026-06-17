@@ -20,6 +20,7 @@
       </div>
       <div class="titlebar-right">
         <span class="status-pill" id="status">连接中…</span>
+        <span class="debug-pill" id="debug-pill" hidden>debug: off</span>
         <div class="titlebar-menu-wrap">
           <button type="button" class="icon-btn" id="settings-btn" title="菜单" aria-label="菜单" aria-haspopup="menu" aria-expanded="false">⋯</button>
           <div class="app-menu-popup" id="app-menu-popup" hidden role="menu">
@@ -79,6 +80,10 @@
           </button>
           <button type="button" class="icon-btn icon-btn-img icon-btn-mic" id="mic-btn" title="语音输入（请先在设置中安装语音识别）" disabled aria-disabled="true">
             <img src="assets/icons/mic.png" alt="" aria-hidden="true">
+          </button>
+          <span class="composer-tools-separator" aria-hidden="true">|</span>
+          <button type="button" class="icon-btn icon-btn-img icon-btn-history" id="composer-history-btn" title="历史消息（近两个月）" aria-label="历史消息">
+            <img src="assets/icons/history-inline.png" alt="" aria-hidden="true">
           </button>
         </div>
         <div class="context-meter" id="context-meter" title="Context 占用">
@@ -400,6 +405,19 @@
     </div>
   </div>
   <div class="aux-modal-dim" id="aux-modal-dim" hidden aria-hidden="true"></div>
+  <div class="btw-side-dock" id="btw-side-dock" hidden role="dialog" aria-modal="true" aria-labelledby="btw-side-title">
+    <div class="btw-side-card">
+      <div class="btw-side-header">
+        <span class="btw-side-label" id="btw-side-title">BTW 侧问</span>
+        <button type="button" class="btw-side-close" id="btw-side-close" title="关闭 (Esc)" aria-label="关闭">×</button>
+      </div>
+      <div class="btw-side-body">
+        <div class="btw-side-question" id="btw-side-question"></div>
+        <div class="btw-side-answer" id="btw-side-answer"></div>
+        <div class="btw-side-hint" id="btw-side-hint">Enter 或 Esc 关闭 · 不会写入会话历史</div>
+      </div>
+    </div>
+  </div>
   <script src="dompurify.min.js"></script>
   <script src="marked.min.js"></script>
   <script src="message-time.js"></script>

@@ -53,7 +53,7 @@ const path = require('path');
 const https = require('https');
 const http = require('http');
 const { GatewayWsClient } = require('./gateway-ws');
-const { extractMessageSentTimeFromRaw } = require('./message-time');
+const { extractMessageSentTimeFromRaw, stripLeadingEnvelopeTimestamp, stripSenderUntrustedMetadata } = require('./message-time');
 const {
   initSttManager,
   getSttStatus,
@@ -69,6 +69,34 @@ const FORWARD_DEDUP_MS = 120_000;
 const FORWARD_REGISTRY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const FORWARD_REGISTRY_MAX_ENTRIES = 8000;
 const FORWARD_REGISTRY_PATH = () => path.join(app.getPath('userData'), 'forward-sent-registry.json');
+function normalizeDebugMode(input) {
+  const mode = String(input || '').trim().toLowerCase();
+  if (mode === 'stream' || mode === 'session' || mode === 'all') return mode;
+  return '';
+}
+function getEnvDebugMode() {
+  const mode = normalizeDebugMode(process.env.QIZI_DEBUG);
+  if (mode) return mode;
+  if (process.env.QIZI_DEBUG_STREAM === '1') return 'stream';
+  return '';
+}
+const ENV_DEBUG_MODE = getEnvDebugMode();
+let runtimeDebugMode = '';
+
+function getRuntimeDebugMode() {
+  return runtimeDebugMode || '';
+}
+
+function debugEvent(channel, event, payload) {
+  const mode = getRuntimeDebugMode();
+  const enabled = mode === 'all' || mode === channel;
+  if (!enabled) return;
+  try {
+    console.log(`[qizi:main:${channel}] ${event}`, payload || {});
+  } catch {
+    // ignore debug log failures
+  }
+}
 /** @type {Map<string, Promise<object>>} */
 const forwardInFlight = new Map();
 /** @type {Map<string, number>} */
@@ -323,6 +351,8 @@ function isAllowedSttAudioPath(audioPath) {
   return allowedRoots.some((root) => resolved.startsWith(root));
 }
 let aboutWindow = null;
+let historyWindow = null;
+let historyWindowContext = null;
 let updateWindow = null;
 let pendingUpdateInfo = null;
 let auxiliaryModalRefCount = 0;
@@ -351,6 +381,9 @@ const activeRuns = new Map();
 /** @type {Map<string, number>} gatewayRunId -> clientRunId */
 const gatewayRunIndex = new Map();
 const STREAM_TIMEOUT_MS = 15 * 60 * 1000;
+const BTW_TIMEOUT_MS = 2 * 60 * 1000;
+/** @type {Map<string, { sender: Electron.WebContents, question: string, startedAt: number, timeout?: NodeJS.Timeout }>} */
+const pendingBtwRuns = new Map();
 let openClawConfigCache = null;
 let sessionKey = null;
 const DEFAULT_SESSION_KEY = 'agent:main:main';
@@ -403,7 +436,9 @@ function getSessionKeyPath() {
 }
 
 function persistSessionKey(key) {
+  const prev = sessionKey;
   sessionKey = key;
+  debugEvent('session', 'persist_session_key', { from: prev, to: key });
   try {
     const keyPath = getSessionKeyPath();
     fs.mkdirSync(path.dirname(keyPath), { recursive: true });
@@ -649,6 +684,7 @@ function loadShellSettings() {
       token: typeof parsed.token === 'string' ? parsed.token.trim() : undefined,
       launchAtLogin: parsed.launchAtLogin === true,
       showMainOnLaunch: parsed.showMainOnLaunch !== false,
+      debugMode: normalizeDebugMode(parsed.debugMode),
     };
   } catch {
     return {};
@@ -662,11 +698,13 @@ function saveShellSettings(next) {
     token: typeof next.token === 'string' && next.token.trim()
       ? next.token.trim()
       : current.token,
-    launchAtLogin: next.launchAtLogin === true,
-    showMainOnLaunch: next.showMainOnLaunch !== false,
+    launchAtLogin: next.launchAtLogin == null ? current.launchAtLogin === true : next.launchAtLogin === true,
+    showMainOnLaunch: next.showMainOnLaunch == null ? current.showMainOnLaunch !== false : next.showMainOnLaunch !== false,
+    debugMode: normalizeDebugMode(next.debugMode || current.debugMode),
   };
   if (!merged.wsUrl) delete merged.wsUrl;
   if (!merged.token) delete merged.token;
+  if (!merged.debugMode) delete merged.debugMode;
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true, mode: 0o700 });
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2), { encoding: 'utf8', mode: 0o600 });
   if (process.platform === 'darwin') {
@@ -677,6 +715,28 @@ function saveShellSettings(next) {
   }
   openClawConfigCache = null;
   return merged;
+}
+
+function applyRuntimeDebugMode(mode, { persist = false } = {}) {
+  const normalized = normalizeDebugMode(mode);
+  if (ENV_DEBUG_MODE) {
+    runtimeDebugMode = ENV_DEBUG_MODE;
+    return { ok: true, mode: runtimeDebugMode, source: 'env' };
+  }
+  runtimeDebugMode = normalized;
+  if (persist) {
+    saveShellSettings({ debugMode: normalized });
+  }
+  return { ok: true, mode: runtimeDebugMode, source: 'settings' };
+}
+
+function initRuntimeDebugMode() {
+  if (ENV_DEBUG_MODE) {
+    runtimeDebugMode = ENV_DEBUG_MODE;
+    return;
+  }
+  const shell = loadShellSettings();
+  runtimeDebugMode = normalizeDebugMode(shell.debugMode);
 }
 
 function resolveGatewayConfigSource() {
@@ -710,6 +770,8 @@ function getSettingsSnapshot() {
     shellSettingsPath: SETTINGS_PATH,
     launchAtLogin: shell.launchAtLogin === true,
     showMainOnLaunch: shell.showMainOnLaunch !== false,
+    debugMode: getRuntimeDebugMode(),
+    debugModeSource: ENV_DEBUG_MODE ? 'env' : 'settings',
     envOverrides: Boolean(process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN),
   };
 }
@@ -808,6 +870,63 @@ function createAuxiliaryModalWindow(options) {
     setMainWindowAuxModalDim(false);
   });
   return win;
+}
+
+function getAuthorizedHistoryWindow(event) {
+  if (!historyWindow || historyWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== historyWindow) return null;
+  return historyWindow;
+}
+
+function closeHistoryWindow() {
+  if (historyWindow && !historyWindow.isDestroyed()) {
+    historyWindow.close();
+  }
+  historyWindow = null;
+  historyWindowContext = null;
+}
+
+function openHistoryWindow(context) {
+  historyWindowContext = context || {};
+  const title = `${historyWindowContext.agentLabel || 'Agent'} · 历史消息`;
+
+  if (historyWindow && !historyWindow.isDestroyed()) {
+    historyWindow.setTitle(title);
+    safeSendTo(historyWindow.webContents, 'openclaw:history:refresh', historyWindowContext);
+    historyWindow.show();
+    historyWindow.focus();
+    return;
+  }
+
+  const mainRef = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  historyWindow = new BrowserWindow({
+    width: 480,
+    height: 760,
+    minWidth: 360,
+    minHeight: 420,
+    title,
+    backgroundColor: '#eceff1',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'history-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  historyWindow.setMenu(null);
+  historyWindow.once('ready-to-show', () => {
+    if (mainRef && !mainRef.isDestroyed()) {
+      centerAuxiliaryWindowOnParent(historyWindow, mainRef);
+    }
+    historyWindow.show();
+    historyWindow.focus();
+  });
+  historyWindow.loadFile(path.join(__dirname, 'history.html'));
+  historyWindow.on('closed', () => {
+    historyWindow = null;
+    historyWindowContext = null;
+  });
 }
 
 function openAbout() {
@@ -1075,6 +1194,52 @@ function safeSendTo(sender, channel, payload) {
   }
 }
 
+function sendToMainRenderer(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return safeSendTo(mainWindow.webContents, channel, payload);
+  }
+  return false;
+}
+
+function sendStreamDeltaToRenderer(run, clientRunId, text, replace = false) {
+  const payload = {
+    runId: clientRunId,
+    delta: text,
+    replace: replace === true,
+  };
+  debugEvent('stream', 'delta_emit', {
+    runId: clientRunId,
+    replace: replace === true,
+    deltaLength: String(text || '').length,
+  });
+  sendToMainRenderer('openclaw:delta', payload);
+  if (run?.sender) {
+    safeSendTo(run.sender, 'openclaw:delta', payload);
+  }
+}
+
+function sendStreamDoneToRenderer(run, clientRunId, payload) {
+  const fullPayload = { runId: clientRunId, ...payload };
+  debugEvent('stream', 'done_emit', {
+    runId: clientRunId,
+    textLength: String(payload?.text || '').length,
+    aborted: payload?.aborted === true,
+  });
+  sendToMainRenderer('openclaw:done', fullPayload);
+  if (run?.sender) {
+    safeSendTo(run.sender, 'openclaw:done', fullPayload);
+  }
+}
+
+function sendStreamErrorToRenderer(run, clientRunId, error) {
+  const payload = { runId: clientRunId, error };
+  debugEvent('stream', 'error_emit', { runId: clientRunId, error: String(error || '') });
+  sendToMainRenderer('openclaw:error', payload);
+  if (run?.sender) {
+    safeSendTo(run.sender, 'openclaw:error', payload);
+  }
+}
+
 function broadcastToRenderers(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     safeSendTo(mainWindow.webContents, channel, payload);
@@ -1219,6 +1384,9 @@ function convertHistoryMessages(serverMessages) {
       const { text, images } = extractMessageParts(m);
       const files = extractOpenClawFileMeta(m);
       let resolvedText = text;
+      if (role === 'user') {
+        resolvedText = stripLeadingEnvelopeTimestamp(stripSenderUntrustedMetadata(resolvedText));
+      }
       if (!resolvedText && m?.errorMessage) {
         resolvedText = `[错误] ${m.errorMessage}`;
       }
@@ -1442,7 +1610,11 @@ function resolveDeltaText(currentText, payload) {
       return currentText;
     }
     if (payload.replace === true) return payload.deltaText;
-    if (!currentText) return typeof snapshot === 'string' ? snapshot : payload.deltaText;
+    // 首包优先 deltaText：snapshot 可能仍挂着上一轮助手全文
+    if (!currentText) {
+      if (payload.deltaText) return payload.deltaText;
+      return typeof snapshot === 'string' ? snapshot : currentText;
+    }
     if (typeof snapshot === 'string') {
       const prefixLength = snapshot.length - payload.deltaText.length;
       if (prefixLength === currentText.length && snapshot.slice(0, prefixLength) === currentText) {
@@ -1451,7 +1623,10 @@ function resolveDeltaText(currentText, payload) {
       if (looksLikeLeakedToolPayloadText(snapshot)) {
         return currentText;
       }
-      return snapshot;
+      if (snapshot.startsWith(currentText)) {
+        return snapshot;
+      }
+      return `${currentText}${payload.deltaText}`;
     }
     return `${currentText}${payload.deltaText}`;
   }
@@ -1470,6 +1645,71 @@ function findClientRunByGatewayRunId(gatewayRunId) {
     return null;
   }
   return { clientRunId, run };
+}
+
+function bindRunToGatewayRunId(clientRunId, run, gatewayRunId) {
+  if (!run || !gatewayRunId) return;
+  if (run.gatewayRunId && run.gatewayRunId !== gatewayRunId) {
+    gatewayRunIndex.delete(run.gatewayRunId);
+  }
+  run.gatewayRunId = gatewayRunId;
+  gatewayRunIndex.set(gatewayRunId, clientRunId);
+}
+
+function pickLatestActiveRun() {
+  let latest = null;
+  for (const [clientRunId, run] of activeRuns.entries()) {
+    if (!latest || Number(run.startedAt || 0) > Number(latest.run.startedAt || 0)) {
+      latest = { clientRunId, run };
+    }
+  }
+  return latest;
+}
+
+function findOwnedRunForChatPayload(payload) {
+  const gatewayRunId = payload?.runId == null ? '' : String(payload.runId);
+  if (!gatewayRunId) return null;
+
+  const direct = findClientRunByGatewayRunId(gatewayRunId);
+  if (direct) return direct;
+
+  for (const [clientRunId, run] of activeRuns.entries()) {
+    if (run.gatewayRunId === gatewayRunId || String(clientRunId) === gatewayRunId) {
+      return { clientRunId, run };
+    }
+  }
+
+  if (activeRuns.size === 1) {
+    const [clientRunId, run] = activeRuns.entries().next().value;
+    bindRunToGatewayRunId(clientRunId, run, gatewayRunId);
+    debugEvent('stream', 'run_bind_single_active', {
+      clientRunId,
+      gatewayRunId,
+      payloadSessionKey: payload?.sessionKey || null,
+    });
+    return { clientRunId, run };
+  }
+
+  // Some gateways emit chat deltas before ack runId mapping settles.
+  // If payload belongs to current session, attach it to the newest local run.
+  const payloadSessionKey = typeof payload?.sessionKey === 'string' ? payload.sessionKey : '';
+  const currentSessionKey = getSessionKey();
+  if (!payloadSessionKey || payloadSessionKey === currentSessionKey) {
+    const fallback = pickLatestActiveRun();
+    if (fallback) {
+      const { clientRunId, run } = fallback;
+      bindRunToGatewayRunId(clientRunId, run, gatewayRunId);
+      debugEvent('stream', 'run_bind_session_fallback', {
+        clientRunId,
+        gatewayRunId,
+        payloadSessionKey: payloadSessionKey || null,
+        currentSessionKey,
+      });
+      return fallback;
+    }
+  }
+
+  return null;
 }
 
 function registerActiveRun(clientRunId, gatewayRunId, run) {
@@ -1533,74 +1773,6 @@ async function fetchLatestAssistantText() {
   return [...msgs].reverse().find((m) => m.who === 'them')?.text || null;
 }
 
-function catchUpRunFromHistory(clientRunId, run, serverText) {
-  if (!serverText || serverText.length <= run.fullText.length) return false;
-
-  const prior = String(run.priorAssistantText || '').trim();
-  const server = String(serverText || '').trim();
-  if (prior && server === prior && run.fullText.length <= prior.length) {
-    return false;
-  }
-  if (!run.fullText && prior && server === prior) {
-    return false;
-  }
-
-  const delta = serverText.slice(run.fullText.length);
-  run.fullText = serverText;
-  run.lastEventAt = Date.now();
-  safeSendTo(run.sender, 'openclaw:delta', { runId: clientRunId, delta, catchUp: true });
-  return true;
-}
-
-function pollRunRecovery(clientRunId, attempt = 0) {
-  const run = activeRuns.get(clientRunId);
-  if (!run) return;
-
-  const sinceEvent = Date.now() - (run.lastEventAt || run.startedAt || Date.now());
-
-  void (async () => {
-    try {
-      if (sinceEvent < 3000 && attempt < 2) {
-        run.recoverTimer = setTimeout(() => pollRunRecovery(clientRunId, attempt + 1), 1500);
-        run.recoverTimer.unref?.();
-        return;
-      }
-
-      const serverText = await fetchLatestAssistantText();
-      if (!activeRuns.has(clientRunId)) return;
-
-      if (serverText && serverText.length > run.fullText.length) {
-        catchUpRunFromHistory(clientRunId, run, serverText);
-        run.stableHistoryPolls = 0;
-        run.recoverTimer = setTimeout(() => pollRunRecovery(clientRunId, attempt + 1), 2000);
-        run.recoverTimer.unref?.();
-        return;
-      }
-
-      if (serverText && serverText.length === run.fullText.length && run.fullText.length > 0) {
-        run.stableHistoryPolls = (run.stableHistoryPolls || 0) + 1;
-        if (run.stableHistoryPolls >= 2 && sinceEvent > 5000) {
-          finishClientRun(clientRunId, { ok: true });
-          return;
-        }
-      }
-
-      if (attempt >= 10) {
-        finishClientRun(clientRunId, { ok: true });
-        return;
-      }
-
-      run.recoverTimer = setTimeout(() => pollRunRecovery(clientRunId, attempt + 1), 2500);
-      run.recoverTimer.unref?.();
-    } catch {
-      if (attempt < 8 && activeRuns.has(clientRunId)) {
-        run.recoverTimer = setTimeout(() => pollRunRecovery(clientRunId, attempt + 1), 2000);
-        run.recoverTimer.unref?.();
-      }
-    }
-  })();
-}
-
 async function recoverActiveRunsAfterReconnect() {
   if (activeRuns.size === 0) return;
   for (const [clientRunId, run] of activeRuns.entries()) {
@@ -1608,16 +1780,40 @@ async function recoverActiveRunsAfterReconnect() {
     run.lastEventAt = Date.now();
     clearRunRecoverTimer(run);
     armRunTimeout(clientRunId, run);
-    try {
-      const serverText = await fetchLatestAssistantText();
-      if (activeRuns.has(clientRunId) && serverText) {
-        catchUpRunFromHistory(clientRunId, run, serverText);
-      }
-    } catch {
-      // 重连后 history 拉取失败也不报错，继续等 live event
-    }
-    pollRunRecovery(clientRunId, 0);
   }
+}
+
+function stripPriorAssistantPrefix(run, text) {
+  const priorRaw = String(run.priorAssistantText || '');
+  const prior = priorRaw.trim();
+  let next = String(text || '');
+  if (!prior) return next;
+  if (next.trim() === prior) return '';
+  if (priorRaw && next.startsWith(priorRaw) && next.length > priorRaw.length) {
+    return next.slice(priorRaw.length);
+  }
+  if (next.startsWith(prior) && next.length > prior.length) {
+    return next.slice(prior.length);
+  }
+  return next;
+}
+
+function advanceOwnedStream(run, rawNext) {
+  if (typeof rawNext !== 'string') return null;
+  const next = stripPriorAssistantPrefix(run, rawNext);
+  if (!next) return null;
+  const current = String(run.fullText || '');
+
+  if (!current) {
+    return { fullText: next, delta: next };
+  }
+
+  if (next === current) return null;
+  if (!next.startsWith(current)) return null;
+
+  const delta = next.slice(current.length);
+  if (!delta) return null;
+  return { fullText: next, delta };
 }
 
 function finishClientRun(clientRunId, outcome) {
@@ -1626,11 +1822,11 @@ function finishClientRun(clientRunId, outcome) {
   unregisterActiveRun(clientRunId);
   const fullText = run.fullText;
   if (outcome.aborted) {
-    safeSendTo(run.sender, 'openclaw:done', { runId: clientRunId, aborted: true, text: fullText });
+    sendStreamDoneToRenderer(run, clientRunId, { aborted: true, text: fullText });
   } else if (outcome.error) {
-    safeSendTo(run.sender, 'openclaw:error', { runId: clientRunId, error: outcome.error });
+    sendStreamErrorToRenderer(run, clientRunId, outcome.error);
   } else {
-    safeSendTo(run.sender, 'openclaw:done', { runId: clientRunId, text: fullText });
+    sendStreamDoneToRenderer(run, clientRunId, { text: fullText });
   }
   if (run.done) {
     run.done({ ...outcome, text: fullText });
@@ -2021,6 +2217,11 @@ function handleSessionsChangedEvent(payload) {
   }
   const currentSession = getSessionKey();
   const affectsCurrent = keys.size === 0 || keys.has(currentSession);
+  debugEvent('session', 'sessions_changed', {
+    currentSession,
+    affectsCurrent,
+    keyCount: keys.size,
+  });
   if (keys.size > 0 && !affectsCurrent) return;
   broadcastToRenderers('openclaw:session-changed', {
     sessionKey: currentSession,
@@ -2028,7 +2229,7 @@ function handleSessionsChangedEvent(payload) {
 }
 
 function handleGatewayChatEvent(payload) {
-  if (!payload || typeof payload.runId !== 'string') return;
+  if (!payload || payload.runId == null) return;
   if (handleMeetingGatewayChatEvent(payload)) return;
   if (activeMeetingSessionKey && payload.sessionKey === activeMeetingSessionKey) {
     if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
@@ -2036,46 +2237,49 @@ function handleGatewayChatEvent(payload) {
     }
     return;
   }
-  const matched = findClientRunByGatewayRunId(payload.runId);
+  const matched = findOwnedRunForChatPayload(payload);
   if (matched) {
     handleOwnedGatewayChatEvent(payload, matched);
     return;
   }
+  debugEvent('stream', 'unmatched_chat_event', {
+    runId: String(payload.runId || ''),
+    state: payload.state || null,
+    sessionKey: payload.sessionKey || null,
+    activeRunIds: [...activeRuns.keys()],
+  });
   if (handleForwardGatewayChatEvent(payload)) return;
   handleExternalSessionChatEvent(payload);
 }
 
 function handleOwnedGatewayChatEvent(payload, matched) {
   const { clientRunId, run } = matched;
+  const incomingRunId = payload.runId == null ? '' : String(payload.runId);
+  if (incomingRunId && run.gatewayRunId !== incomingRunId) {
+    gatewayRunIndex.delete(run.gatewayRunId);
+    run.gatewayRunId = incomingRunId;
+    gatewayRunIndex.set(incomingRunId, clientRunId);
+  }
   run.lastEventAt = Date.now();
   run.stableHistoryPolls = 0;
   clearRunRecoverTimer(run);
 
   if (payload.state === 'delta') {
-    const next = resolveDeltaText(run.fullText, payload);
-    if (typeof next === 'string' && next !== run.fullText) {
-      if (payload.replace === true) {
-        run.fullText = next;
-        safeSendTo(run.sender, 'openclaw:delta', { runId: clientRunId, delta: next, replace: true });
-      } else {
-        const delta = next.startsWith(run.fullText) ? next.slice(run.fullText.length) : next;
-        run.fullText = next;
-        if (delta) {
-          safeSendTo(run.sender, 'openclaw:delta', { runId: clientRunId, delta });
-        }
-      }
-    }
+    const rawNext = resolveDeltaText(run.fullText, payload);
+    const advance = advanceOwnedStream(run, rawNext);
+    if (!advance) return;
+    run.fullText = advance.fullText;
+    sendStreamDeltaToRenderer(run, clientRunId, advance.fullText, true);
     return;
   }
 
   if (payload.state === 'final') {
-    const finalText = extractMessageText(payload.message);
-    if (
-      finalText
-      && finalText.length >= run.fullText.length
-      && !looksLikeLeakedToolPayloadText(finalText)
-    ) {
-      run.fullText = finalText;
+    let finalText = extractMessageText(payload.message);
+    if (finalText && !looksLikeLeakedToolPayloadText(finalText)) {
+      finalText = stripPriorAssistantPrefix(run, finalText) || finalText;
+      if (finalText.length >= run.fullText.length) {
+        run.fullText = finalText;
+      }
     }
     finishClientRun(clientRunId, { ok: true });
     return;
@@ -2091,6 +2295,118 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   }
 }
 
+function isBtwSlashCommand(message) {
+  const trimmed = String(message || '').trim();
+  return /^\/(?:btw|side)(?:\s|$)/i.test(trimmed);
+}
+
+function parseBtwQuestion(message) {
+  const trimmed = String(message || '').trim();
+  const match = trimmed.match(/^\/(?:btw|side)\s+([\s\S]+)$/i);
+  return match ? match[1].trim() : '';
+}
+
+function parseChatSideResult(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  if (payload.kind !== 'btw') return null;
+  if (typeof payload.sessionKey !== 'string') return null;
+  if (typeof payload.text !== 'string') return null;
+  return {
+    kind: 'btw',
+    runId: typeof payload.runId === 'string' ? payload.runId : '',
+    sessionKey: payload.sessionKey,
+    question: typeof payload.question === 'string' ? payload.question : '',
+    text: payload.text,
+    isError: payload.isError === true,
+    ts: Number(payload.ts) || Date.now(),
+    seq: payload.seq,
+  };
+}
+
+function clearPendingBtwRun(gatewayRunId) {
+  const pending = pendingBtwRuns.get(gatewayRunId);
+  if (!pending) return null;
+  if (pending.timeout) clearTimeout(pending.timeout);
+  pendingBtwRuns.delete(gatewayRunId);
+  return pending;
+}
+
+function deliverBtwSideResult(sideResult) {
+  const pending = sideResult.runId ? clearPendingBtwRun(sideResult.runId) : null;
+  if (pending) {
+    safeSendTo(pending.sender, 'openclaw:side-result', sideResult);
+    return;
+  }
+  broadcastToRenderers('openclaw:side-result', sideResult);
+}
+
+function handleGatewaySideResultEvent(payload) {
+  const sideResult = parseChatSideResult(payload);
+  if (!sideResult) return;
+  if (!isPayloadForCurrentSession(sideResult)) return;
+  deliverBtwSideResult(sideResult);
+}
+
+function clearAllPendingBtwRuns() {
+  for (const gatewayRunId of [...pendingBtwRuns.keys()]) {
+    clearPendingBtwRun(gatewayRunId);
+  }
+}
+
+async function sendDetachedBtwChat(event, { message, attachments }) {
+  const trimmedMessage = String(message || '').trim();
+  const question = parseBtwQuestion(trimmedMessage);
+  if (!question) {
+    return { ok: false, error: '请在 /btw 或 /side 后输入问题' };
+  }
+
+  const client = ensureGateway();
+  await client.waitForConnect();
+
+  const idempotencyKey = `qizi-btw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const ack = await client.request('chat.send', {
+    sessionKey: getSessionKey(),
+    message: trimmedMessage,
+    deliver: false,
+    idempotencyKey,
+    attachments: attachments && attachments.length > 0 ? attachments : undefined,
+  });
+  const gatewayRunId = (ack && ack.runId) || idempotencyKey;
+
+  const timeout = setTimeout(() => {
+    if (!pendingBtwRuns.has(gatewayRunId)) return;
+    clearPendingBtwRun(gatewayRunId);
+    deliverBtwSideResult({
+      kind: 'btw',
+      runId: gatewayRunId,
+      sessionKey: getSessionKey(),
+      question,
+      text: '侧问超时，请重试',
+      isError: true,
+      ts: Date.now(),
+    });
+  }, BTW_TIMEOUT_MS);
+  timeout.unref?.();
+
+  pendingBtwRuns.set(gatewayRunId, {
+    sender: event.sender,
+    question,
+    startedAt: Date.now(),
+    timeout,
+  });
+
+  return { ok: true, gatewayRunId, question };
+}
+
+async function ensureGatewaySessionSubscription(client) {
+  if (!client?.connected) return;
+  try {
+    await client.request('sessions.messages.subscribe', { key: getSessionKey() });
+  } catch (err) {
+    console.warn('[qizi] sessions.messages.subscribe failed:', err.message);
+  }
+}
+
 function attachGatewayHandlers(client) {
   client.removeAllListeners('event');
   client.removeAllListeners('connected');
@@ -2100,11 +2416,16 @@ function attachGatewayHandlers(client) {
       handleGatewayChatEvent(frame.payload);
       return;
     }
+    if (frame.event === 'chat.side_result') {
+      handleGatewaySideResultEvent(frame.payload);
+      return;
+    }
     if (frame.event === 'sessions.changed') {
       handleSessionsChangedEvent(frame.payload);
     }
   });
   client.on('connected', () => {
+    void ensureGatewaySessionSubscription(client);
     broadcastToRenderers('openclaw:gateway-status', {
       connected: true,
       reconnected: activeRuns.size > 0,
@@ -2121,6 +2442,7 @@ function attachGatewayHandlers(client) {
     } else {
       suspendActiveRuns();
     }
+    clearAllPendingBtwRuns();
     broadcastToRenderers('openclaw:gateway-status', {
       connected: false,
       reconnecting: !isQuitting,
@@ -2336,8 +2658,11 @@ async function checkConnection() {
   try {
     const client = ensureGateway();
     await client.waitForConnect();
-    return { ok: true, wsUrl, sessionKey: getSessionKey() };
+    const current = getSessionKey();
+    debugEvent('session', 'connection_ok', { sessionKey: current });
+    return { ok: true, wsUrl, sessionKey: current };
   } catch (err) {
+    debugEvent('session', 'connection_error', { error: formatGatewayError(err) });
     return { ok: false, error: formatGatewayError(err) };
   }
 }
@@ -2438,6 +2763,7 @@ async function switchToAgent(agentId) {
     return { ok: false, error: '未指定 Agent' };
   }
   try {
+    debugEvent('session', 'switch_agent_start', { agentId, fromSessionKey: getSessionKey() });
     const client = ensureGateway();
     await client.waitForConnect();
     const result = await client.request('agents.list', {});
@@ -2453,8 +2779,12 @@ async function switchToAgent(agentId) {
       finishClientRun(clientRunId, { aborted: true });
     }
 
+    closeHistoryWindow();
+
     const newSessionKey = pinnedSessionKeyForAgent(agentId, mainKey);
     persistSessionKey(newSessionKey);
+    debugEvent('session', 'switch_agent_success', { agentId, sessionKey: newSessionKey });
+    await ensureGatewaySessionSubscription(client);
     const agent = await enrichAgentEntry(client, found, { defaultId });
     const currentModel = await fetchSessionCurrentModel(client, newSessionKey, {
       modelProvider: result?.defaults?.modelProvider,
@@ -2470,6 +2800,7 @@ async function switchToAgent(agentId) {
       agent,
     };
   } catch (err) {
+    debugEvent('session', 'switch_agent_failed', { agentId, error: formatGatewayError(err) });
     return { ok: false, error: formatGatewayError(err) };
   }
 }
@@ -2833,32 +3164,17 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
   return work;
 }
 
-async function streamChat(event, { message, attachments, runId }) {
+async function streamChat(event, { message, attachments, runId, priorAssistantText: priorFromRenderer }) {
   const client = ensureGateway();
   await client.waitForConnect();
 
+  const priorAssistantText = typeof priorFromRenderer === 'string' ? priorFromRenderer : '';
+
   const idempotencyKey = `qizi-${runId}-${Date.now()}`;
 
-  const ack = await client.request('chat.send', {
-    sessionKey: getSessionKey(),
-    message: message || '',
-    deliver: false,
-    idempotencyKey,
-    attachments: attachments && attachments.length > 0 ? attachments : undefined,
-  });
-
-  const gatewayRunId = (ack && ack.runId) || idempotencyKey;
-
-  let priorAssistantText = '';
-  try {
-    priorAssistantText = await fetchLatestAssistantText() || '';
-  } catch {
-    priorAssistantText = '';
-  }
-
   return new Promise((resolve) => {
-    registerActiveRun(runId, gatewayRunId, {
-      gatewayRunId,
+    registerActiveRun(runId, idempotencyKey, {
+      gatewayRunId: idempotencyKey,
       sender: event.sender,
       fullText: '',
       priorAssistantText,
@@ -2875,11 +3191,38 @@ async function streamChat(event, { message, attachments, runId }) {
         }
       },
     });
+
     const run = activeRuns.get(runId);
     if (run) {
       armRunTimeout(runId, run);
-      pollRunRecovery(runId, 0);
     }
+
+    void (async () => {
+      try {
+        const ack = await client.request('chat.send', {
+          sessionKey: getSessionKey(),
+          message: message || '',
+          deliver: false,
+          idempotencyKey,
+          attachments: attachments && attachments.length > 0 ? attachments : undefined,
+        });
+
+        const gatewayRunId = (ack && ack.runId) || idempotencyKey;
+        const activeRun = activeRuns.get(runId);
+        if (activeRun && activeRun.gatewayRunId !== gatewayRunId) {
+          gatewayRunIndex.delete(activeRun.gatewayRunId);
+          activeRun.gatewayRunId = gatewayRunId;
+          gatewayRunIndex.set(gatewayRunId, runId);
+        }
+
+      } catch (err) {
+        if (activeRuns.has(runId)) {
+          finishClientRun(runId, { error: formatGatewayError(err) });
+        } else {
+          resolve({ ok: false, error: formatGatewayError(err) });
+        }
+      }
+    })();
   });
 }
 
@@ -2915,6 +3258,25 @@ ipcMain.handle('openclaw:settings:save', (event, payload) => {
   } catch (err) {
     return { ok: false, error: err.message || '保存失败' };
   }
+});
+ipcMain.handle('openclaw:debug:get', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return {
+    ok: true,
+    mode: getRuntimeDebugMode(),
+    source: ENV_DEBUG_MODE ? 'env' : 'settings',
+  };
+});
+ipcMain.handle('openclaw:debug:set', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const requested = normalizeDebugMode(payload?.mode || payload);
+  const result = applyRuntimeDebugMode(requested, { persist: true });
+  debugEvent('session', 'debug_mode_set', {
+    requested,
+    mode: result.mode,
+    source: result.source,
+  });
+  return result;
 });
 ipcMain.handle('openclaw:open-settings', () => {
   openSettings();
@@ -3383,7 +3745,18 @@ ipcMain.handle('openclaw:normalize-image', async (event, dataUrl) => {
   }
 });
 
-ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId }) => {
+ipcMain.handle('openclaw:history:open', (event, context) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  openHistoryWindow(context || {});
+  return { ok: true };
+});
+
+ipcMain.handle('openclaw:history:context', (event) => {
+  if (!getAuthorizedHistoryWindow(event)) return null;
+  return historyWindowContext;
+});
+
+ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, priorAssistantText }) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     const imageList = Array.isArray(images) ? images : [];
@@ -3398,7 +3771,12 @@ ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId })
       else defaultCaption = '（附件）';
     }
     const outboundMessage = trimmedMessage || defaultCaption;
-    return await streamChat(event, { message: outboundMessage, attachments, runId });
+    return await streamChat(event, {
+      message: outboundMessage,
+      attachments,
+      runId,
+      priorAssistantText,
+    });
   } catch (err) {
     const errMessage = formatGatewayError(err);
     safeSendTo(event.sender, 'openclaw:error', { runId, error: errMessage });
@@ -3406,7 +3784,20 @@ ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId })
   }
 });
 
+ipcMain.handle('openclaw:btw:send', async (event, { message, images, files }) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  try {
+    const imageList = Array.isArray(images) ? images : [];
+    const fileList = Array.isArray(files) ? files : [];
+    const attachments = await buildChatAttachments(imageList, fileList);
+    return await sendDetachedBtwChat(event, { message, attachments });
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+});
+
 app.whenReady().then(() => {
+  initRuntimeDebugMode();
   initSttManager(app);
   createWindow();
   createTray();

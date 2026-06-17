@@ -1,6 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('qizi', {
+  sendBtw: (payload) => ipcRenderer.invoke('openclaw:btw:send', payload),
+  onSideResult: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:side-result', handler);
+    return () => ipcRenderer.removeListener('openclaw:side-result', handler);
+  },
+  openHistory: (context) => ipcRenderer.invoke('openclaw:history:open', context),
   checkConnection: () => ipcRenderer.invoke('openclaw:check'),
   loadHistory: () => ipcRenderer.invoke('openclaw:history'),
   loadHistoryForSession: (payload) => ipcRenderer.invoke('openclaw:history:session', payload),
@@ -67,6 +74,8 @@ contextBridge.exposeInMainWorld('qizi', {
   getSettings: () => ipcRenderer.invoke('openclaw:settings:get'),
   testGatewaySettings: (payload) => ipcRenderer.invoke('openclaw:settings:test', payload),
   saveSettings: (payload) => ipcRenderer.invoke('openclaw:settings:save', payload),
+  getDebugMode: () => ipcRenderer.invoke('openclaw:debug:get'),
+  setDebugMode: (payload) => ipcRenderer.invoke('openclaw:debug:set', payload),
   openSettings: () => ipcRenderer.invoke('openclaw:open-settings'),
   openAbout: () => ipcRenderer.invoke('openclaw:open-about'),
   openUpdate: () => ipcRenderer.invoke('openclaw:open-update'),

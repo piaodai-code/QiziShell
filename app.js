@@ -15,6 +15,7 @@ function formatGatewayEnvelopeTime(input) {
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const statusEl = document.getElementById('status');
+const debugPillEl = document.getElementById('debug-pill');
 const cmdPopup = document.getElementById('cmd-popup');
 const composerPendingEl = document.getElementById('composer-pending');
 const composerQuoteEl = document.getElementById('composer-quote');
@@ -27,6 +28,7 @@ const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
 const titlebarAgentBtn = document.getElementById('titlebar-agent-btn');
 const titlebarAgentAvatar = document.getElementById('titlebar-agent-avatar');
+const composerHistoryBtn = document.getElementById('composer-history-btn');
 const agentPopup = document.getElementById('agent-popup');
 const contextMeter = document.getElementById('context-meter');
 const contextMeterFill = document.getElementById('context-meter-fill');
@@ -91,6 +93,10 @@ const sttRecordingStopBtn = document.getElementById('stt-recording-stop-btn');
 const sttRecordingCancelBtn = document.getElementById('stt-recording-cancel-btn');
 const composerInputWrapEl = document.getElementById('composer-input-wrap');
 const auxModalDimEl = document.getElementById('aux-modal-dim');
+const btwSideDockEl = document.getElementById('btw-side-dock');
+const btwSideQuestionEl = document.getElementById('btw-side-question');
+const btwSideAnswerEl = document.getElementById('btw-side-answer');
+const btwSideCloseBtn = document.getElementById('btw-side-close');
 
 let activeSettingsTab = 'gateway';
 
@@ -118,6 +124,19 @@ const STT_RECOGNIZING_HINT = '正在识别，请稍候……';
 const SETTINGS_STT_RESULT_PLACEHOLDER = '识别结果将显示在这里…';
 let sttComposerPendingActive = false;
 
+let btwPendingRunId = null;
+let btwDismissKeyHandler = null;
+let btwAuxDimActive = false;
+let btwUserDismissed = false;
+
+const INPUT_HISTORY_MAX = 100;
+const inputHistory = [];
+let inputHistoryIndex = -1;
+let inputHistoryDraft = '';
+let inputHistorySuppressInput = false;
+
+let cmdPopupActiveIndex = -1;
+
 let pendingModelUpdate = false;
 let currentModelQualified = null;
 let modelCatalogCache = null;
@@ -134,8 +153,54 @@ const SLASH_COMMANDS = [
   { cmd: '/sessions', desc: '查看会话列表' },
   { cmd: '/steer', desc: '转向指定会话' },
   { cmd: '/redirect', desc: '重定向到指定会话' },
+  { cmd: '/debug', desc: '设置调试日志档位' },
   { cmd: '/help', desc: '查看帮助' },
 ];
+
+function getDebugMode() {
+  const mode = String(localStorage.getItem('qizi:debug') || '').trim().toLowerCase();
+  if (mode === 'stream' || mode === 'session' || mode === 'all') return mode;
+  if (localStorage.getItem('qizi:debug-stream') === '1') return 'stream';
+  return '';
+}
+
+function normalizeDebugMode(input) {
+  const mode = String(input || '').trim().toLowerCase();
+  if (mode === 'stream' || mode === 'session' || mode === 'all') return mode;
+  return '';
+}
+
+let debugMode = normalizeDebugMode(getDebugMode());
+function applyLocalDebugMode(mode) {
+  debugMode = normalizeDebugMode(mode);
+  if (debugMode) {
+    localStorage.setItem('qizi:debug', debugMode);
+    if (debugMode === 'stream') localStorage.setItem('qizi:debug-stream', '1');
+    else localStorage.removeItem('qizi:debug-stream');
+  } else {
+    localStorage.removeItem('qizi:debug');
+    localStorage.removeItem('qizi:debug-stream');
+  }
+  if (debugPillEl) {
+    if (debugMode) {
+      debugPillEl.hidden = false;
+      debugPillEl.textContent = `debug: ${debugMode}`;
+    } else {
+      debugPillEl.hidden = true;
+      debugPillEl.textContent = 'debug: off';
+    }
+  }
+}
+
+function debugEvent(channel, event, payload) {
+  const enabled = debugMode === 'all' || debugMode === channel;
+  if (!enabled) return;
+  try {
+    console.debug(`[qizi:${channel}] ${event}`, payload || {});
+  } catch {
+    // ignore debug log failures
+  }
+}
 
 let messages = [];
 let busy = false;
@@ -184,17 +249,24 @@ const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 const SAVE_DEBOUNCE_MS = 800;
 const STREAM_RENDER_MIN_MS = 48;
-/** 本地展示归档保留时长（Gateway 可能每日截断 main session，Shell 侧合并保留） */
-const MESSAGE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+/** 本地归档保留时长（历史窗口与本地存储） */
+const MESSAGE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
+const MESSAGE_RETENTION_TAIL_WITHOUT_MS = 300;
+// 本地写完就存；Gateway history 合并仍关闭，避免干扰流式
+const ENABLE_LOCAL_MESSAGE_SAVE = true;
+const ENABLE_GATEWAY_HISTORY_SYNC = false;
 
 let currentSessionKey = DEFAULT_SESSION_KEY;
 let currentAgentId = 'main';
+/** 切换 Agent 时递增，配合 sessionKey 标记避免旧 stream IPC 写入新 Agent */
+let chatScopeEpoch = 0;
 /** @type {Map<string, object>} */
 let agentCatalog = new Map();
 
 let saveTimer = null;
 let streamRenderTimer = null;
 let streamRenderRunId = null;
+let streamPaintRaf = null;
 let lastStreamRenderAt = 0;
 
 // 把 File 转成 dataUrl（base64）
@@ -345,6 +417,19 @@ function escapeHtml(text) {
     .replace(/>/g, '&gt;');
 }
 
+const INLINE_EMOJI_SEGMENT_RE = /^(?:\p{Extended_Pictographic}(?:\uFE0F)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F)?)*|[\u{1F1E6}-\u{1F1FF}]{2})$/u;
+const INLINE_EMOJI_SPLIT_RE = /(\p{Extended_Pictographic}(?:\uFE0F)?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F)?)*|[\u{1F1E6}-\u{1F1FF}]{2})/gu;
+
+function wrapInlineEmojisForHtml(text, { escape = false } = {}) {
+  return String(text || '').split(INLINE_EMOJI_SPLIT_RE).map((part) => {
+    if (!part) return '';
+    if (INLINE_EMOJI_SEGMENT_RE.test(part)) {
+      return `<span class="msg-inline-emoji">${part}</span>`;
+    }
+    return escape ? escapeHtml(part) : part;
+  }).join('');
+}
+
 function getMarkedParser() {
   const root = window.marked;
   if (!root) return null;
@@ -404,10 +489,19 @@ function parseMarkdown(text, options = {}) {
 }
 
 function shouldUseStreamingPlainText(message) {
-  if (!message || message.who !== 'them' || message.streaming !== true) return false;
-  if (!busy) return false;
-  if (activeRunId == null || message.runId == null) return true;
-  return Number(message.runId) === Number(activeRunId);
+  return Boolean(message && message.who === 'them' && message.streaming === true);
+}
+
+function runIdsMatch(a, b) {
+  if (a == null || b == null) return false;
+  return a === b || Number(a) === Number(b);
+}
+
+function findStreamingMessageByRunId(runId) {
+  if (runId == null) return null;
+  return messages.find(
+    (m) => m.who === 'them' && m.streaming && runIdsMatch(m.runId, runId),
+  ) || null;
 }
 
 function normalizeStreamingFlags() {
@@ -427,16 +521,22 @@ function renderMessageContent(text, { streaming = false, extraImages = [] } = {}
   });
   // 网关/历史里偶发泄漏的裸 base64 长串（非 [image:…] 包裹）
   plainText = plainText.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n');
-  plainText = plainText.replace(/\n{3,}/g, '\n\n').trim();
+  plainText = plainText.replace(/\n{3,}/g, '\n\n');
+  if (!streaming) {
+    plainText = plainText.trim();
+  }
   let html = '';
   if (images.length > 0) {
     html += '<div class="msg-images">' + images.map((url) => `<img class="msg-image" src="${url}" />`).join('') + '</div>';
   }
   if (plainText) {
-    if (streaming) {
-      html += `<pre class="msg-stream-plain">${escapeHtml(plainText)}</pre>`;
+    const textWithEmojis = wrapInlineEmojisForHtml(plainText);
+    if (streaming && isStreamingPlaceholderText(plainText)) {
+      html += '<span class="msg-typing-indicator" aria-hidden="true">…</span>';
+    } else if (streaming) {
+      html += `<pre class="msg-stream-plain">${wrapInlineEmojisForHtml(plainText, { escape: true })}</pre>`;
     } else {
-      html += parseMarkdown(plainText);
+      html += parseMarkdown(textWithEmojis, { breaks: true });
     }
   }
   return { html, plainText, images };
@@ -453,6 +553,15 @@ function isAttachmentPlaceholder(text) {
   const trimmed = (text || '').trim();
   if (!trimmed) return true;
   return ATTACHMENT_ONLY_CAPTIONS.has(trimmed);
+}
+
+function isStreamingPlaceholderText(text) {
+  const trimmed = String(text || '').trim();
+  return !trimmed || trimmed === '…';
+}
+
+function streamingTextForMerge(text) {
+  return isStreamingPlaceholderText(text) ? '' : String(text || '');
 }
 
 const DEFAULT_INPUT_HEIGHT = 'calc(90px + 6mm)';
@@ -554,7 +663,7 @@ function render(options = {}) {
         ${renderMessageAvatarHtml(m.who)}
         <div class="msg-content">
           <div class="msg-bubble"></div>
-          <div class="msg-meta">${m.time || ''}${m.streaming ? ' · 输入中…' : ''}</div>
+          <div class="msg-meta">${m.time || ''}${m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '')}</div>
         </div>
         ${renderMessageSelectCheckHtml(i)}
       `;
@@ -834,7 +943,47 @@ function normalizeUserMessageRecord(msg, localFallback = null) {
     return { ...base, text: extractReplyTextFromOutbound(base.text) };
   }
 
+  const plain = normalizeUserMessagePlainText(base.text);
+  if (plain && plain !== String(base.text || '').trim()) {
+    return { ...base, text: plain };
+  }
+
   return base;
+}
+
+function normalizeUserMessagePlainText(text) {
+  let body = String(text || '');
+  if (typeof MessageTimeApi.stripSenderUntrustedMetadata === 'function') {
+    body = MessageTimeApi.stripSenderUntrustedMetadata(body);
+  } else {
+    body = body.replace(/^Sender \(untrusted metadata\):\s*```json[\s\S]*?```\s*/m, '').trim();
+  }
+  if (typeof MessageTimeApi.stripLeadingEnvelopeTimestamp === 'function') {
+    body = MessageTimeApi.stripLeadingEnvelopeTimestamp(body);
+  }
+
+  const forwardParsed = parseStoredForwardMessage(body);
+  if (forwardParsed?.forward) return String(forwardParsed.comment || '').trim();
+
+  const quoteParsed = parseStoredQuoteMessage(body);
+  if (quoteParsed?.quote) return String(quoteParsed.reply || '').trim();
+
+  if (body.includes('【转发开始】')) return extractCommentTextFromForwardOutbound(body);
+  if (body.includes('【引用开始】')) return extractReplyTextFromOutbound(body);
+
+  return body.trim();
+}
+
+function userMessageTextsMatch(aText, bText) {
+  const at = normalizeUserMessagePlainText(aText);
+  const bt = normalizeUserMessagePlainText(bText);
+  return Boolean(at && bt && at === bt);
+}
+
+function userMessagesEquivalent(a, b) {
+  if (!a || !b || a.who !== 'me' || b.who !== 'me') return false;
+  if (historyForwardFingerprintsMatch(a, b)) return true;
+  return userMessageTextsMatch(a.text, b.text);
 }
 
 function findLocalUserMessageForServer(server, localList) {
@@ -856,6 +1005,11 @@ function findLocalUserMessageForServer(server, localList) {
       if (historyForwardFingerprintsMatch(candidate, server)) return candidate;
     }
     const localText = String(candidate.text || '').trim();
+    const serverPlain = normalizeUserMessagePlainText(serverText);
+    const localPlain = normalizeUserMessagePlainText(localText);
+    if (localPlain && serverPlain && localPlain === serverPlain) {
+      return candidate;
+    }
     if (localText && (localText === serverText || localText === serverReply)) {
       return candidate;
     }
@@ -1718,14 +1872,18 @@ function assistantTextsMatch(a, b) {
   return String(a?.text || '').trim() === String(b?.text || '').trim();
 }
 
-// 流式期间仅用 history 中「延续当前正文」的更长片段，避免被无关中间气泡覆盖。
-function shouldPreferHistoryStreamText(localText, serverText) {
-  const local = String(localText || '');
-  const server = String(serverText || '');
-  if (!server || server.length <= local.length) return false;
-  if (!local) return false;
-  return server.startsWith(local);
-}
+/*
+ * 消息同步架构
+ * ─────────────────────────────────────────────────────────────
+ * 本地发送（owned run）：
+ *   chat.send 前先 registerActiveRun，避免 Gateway 早到的 delta 丢失
+ *   进行中：仅 IPC openclaw:delta → applyStreamingDelta，禁止 history merge
+ *   结束：openclaw:done → finishAssistant → flushSaveMessages（本地归档）
+ *   历史窗口：只读 localStorage，近两个月，不参与流式
+ *
+ * 外部 Webchat / 断线续传：session-chat 或 pollExternalStreamHistory
+ * 30 天保留：pruneMessagesByRetention / serializeMessagesForStorage，不参与实时流式
+ */
 
 function getAssistantMessageBeforeTarget(target) {
   const idx = messages.indexOf(target);
@@ -1736,25 +1894,69 @@ function getAssistantMessageBeforeTarget(target) {
   return null;
 }
 
+function getLastFinalizedAssistantText() {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.who === 'them' && !m.streaming && !isStreamingPlaceholderText(m.text)) {
+      return String(m.text || '');
+    }
+  }
+  return '';
+}
+
+function stripPriorAssistantReplay(target, text) {
+  const priorRaw = String(getAssistantMessageBeforeTarget(target)?.text || '');
+  const prior = priorRaw.trim();
+  let next = String(text || '');
+  if (!prior) return next;
+  if (next.trim() === prior) return '';
+  if (priorRaw && next.startsWith(priorRaw) && next.length > priorRaw.length) {
+    return next.slice(priorRaw.length);
+  }
+  if (next.startsWith(prior) && next.length > prior.length) {
+    return next.slice(prior.length);
+  }
+  return next;
+}
+
 /** 是否用 Gateway 历史刷新当前流式气泡（排除上一轮已完成回复） */
 function shouldApplyHistoryStreamText(target, serverText) {
-  const local = String(target?.text || '');
+  const local = streamingTextForMerge(target?.text);
   const server = String(serverText || '');
-  if (!server || server.length <= local.length) return false;
+  if (!server || !local) return false;
+  if (server.length <= local.length) return false;
 
   const prevText = String(getAssistantMessageBeforeTarget(target)?.text || '').trim();
   const serverTrim = server.trim();
-
-  if (prevText && serverTrim === prevText && local.length <= prevText.length) {
-    return false;
-  }
-
-  if (!local) {
-    if (!prevText) return true;
-    return serverTrim !== prevText;
-  }
+  if (prevText && serverTrim === prevText) return false;
 
   return server.startsWith(local);
+}
+
+function findUserMessageBeforeTarget(target) {
+  const idx = messages.indexOf(target);
+  if (idx <= 0) return null;
+  for (let i = idx - 1; i >= 0; i -= 1) {
+    if (userMessageHasPayload(messages[i])) return messages[i];
+  }
+  return null;
+}
+
+function findRelevantAssistantFromHistory(historyMessages, streamingTarget) {
+  if (!Array.isArray(historyMessages) || !streamingTarget) return null;
+  const userMsg = findUserMessageBeforeTarget(streamingTarget);
+  if (!userMsg) {
+    return [...historyMessages].reverse().find((m) => m.who === 'them') || null;
+  }
+  for (let i = 0; i < historyMessages.length; i += 1) {
+    const entry = historyMessages[i];
+    if (entry.who !== 'me' || !userMessagesEquivalent(entry, userMsg)) continue;
+    for (let j = i + 1; j < historyMessages.length; j += 1) {
+      if (historyMessages[j].who === 'them') return historyMessages[j];
+    }
+    return null;
+  }
+  return null;
 }
 
 function dedupeAssistantMessages(list) {
@@ -1883,24 +2085,128 @@ function dedupeForwardUserMessages(list) {
   return out;
 }
 
+function dedupeAdjacentUserMessages(list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  const out = [];
+  for (const msg of list) {
+    if (msg?.who !== 'me') {
+      out.push(msg);
+      continue;
+    }
+    const prev = out.length > 0 ? out[out.length - 1] : null;
+    if (prev?.who === 'me' && userMessagesEquivalent(prev, msg)) continue;
+    out.push(msg);
+  }
+  return out;
+}
+
 function finalizeHistoryMessages(list) {
-  return dedupeAssistantMessages(dedupeForwardUserMessages(list));
+  return dedupeAssistantMessages(
+    dedupeAdjacentUserMessages(dedupeForwardUserMessages(list)),
+  );
+}
+
+function backfillMessageSentAtMs(msg) {
+  if (!msg) return msg;
+  if (typeof msg.sentAtMs === 'number' && Number.isFinite(msg.sentAtMs)) return msg;
+  if (typeof MessageTimeApi.extractMessageSentTimeFromRaw === 'function') {
+    const sent = MessageTimeApi.extractMessageSentTimeFromRaw({
+      sentTime: msg.sentTime,
+      sentAtMs: msg.sentAtMs,
+      time: msg.time,
+      text: msg.text,
+    });
+    if (sent.sentAtMs != null) {
+      return {
+        ...msg,
+        sentAtMs: sent.sentAtMs,
+        sentTime: msg.sentTime || sent.time || msg.sentTime,
+      };
+    }
+  }
+  return msg;
 }
 
 function pruneMessagesByRetention(list) {
   if (!Array.isArray(list) || list.length === 0) return list;
   const cutoff = Date.now() - MESSAGE_RETENTION_MS;
-  return list.filter((m) => m?.sentAtMs == null || m.sentAtMs >= cutoff);
+  const enriched = list.map((m) => backfillMessageSentAtMs(m));
+  const tailStart = Math.max(0, enriched.length - MESSAGE_RETENTION_TAIL_WITHOUT_MS);
+  return enriched.filter((m, i) => {
+    const ms = m.sentAtMs;
+    if (typeof ms === 'number' && Number.isFinite(ms)) return ms >= cutoff;
+    return i >= tailStart;
+  });
+}
+
+function serializeMessagesForStorage(list) {
+  return finalizeHistoryMessages(
+    pruneMessagesByRetention(list).map((m) => ({ ...m, streaming: false })),
+  ).map((m) => ({
+    who: m.who,
+    text: m.text,
+    quote: m.quote || undefined,
+    forward: m.forward || undefined,
+    sentTime: m.sentTime || undefined,
+    sentAtMs: m.sentAtMs ?? undefined,
+    images: Array.isArray(m.images) && m.images.length > 0 ? m.images : undefined,
+    files: Array.isArray(m.files) && m.files.length > 0
+      ? m.files.map(({ name, mimeType, size }) => ({ name, mimeType, size }))
+      : undefined,
+    time: m.time,
+    runId: m.runId,
+    streaming: false,
+  }));
+}
+
+function syncCurrentRunIdFromMessages() {
+  let max = currentRunId;
+  for (const msg of messages) {
+    if (msg?.runId == null) continue;
+    const n = Number(msg.runId);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  currentRunId = max;
+}
+
+function pruneAllStoredMessageSessions() {
+  try {
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && (key.startsWith(STORAGE_PREFIX) || key === LEGACY_STORAGE_KEY)) {
+        keys.push(key);
+      }
+    }
+    for (const key of keys) {
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) continue;
+      const normalized = parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }));
+      const payload = serializeMessagesForStorage(normalized);
+      if (key === LEGACY_STORAGE_KEY) {
+        const migratedKey = messagesStorageKey(DEFAULT_SESSION_KEY);
+        localStorage.setItem(migratedKey, JSON.stringify(payload));
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      } else {
+        localStorage.setItem(key, JSON.stringify(payload));
+      }
+    }
+  } catch (err) {
+    console.warn('[qizi] 清理本地历史归档失败', err);
+  }
 }
 
 function historyMessagesMatch(a, b) {
   if (!a || !b || a.who !== b.who) return false;
   if (historyForwardFingerprintsMatch(a, b)) return true;
+  if (a.who === 'me' && b.who === 'me' && userMessageTextsMatch(a.text, b.text)) return true;
   const at = String(a.text || '').trim();
   const bt = String(b.text || '').trim();
   if (at && bt && at === bt) return true;
   if (a.sentAtMs != null && b.sentAtMs != null && a.sentAtMs === b.sentAtMs) {
-    return at === bt || (!at && !bt);
+    return userMessageTextsMatch(a.text, b.text) || at === bt || (!at && !bt);
   }
   return false;
 }
@@ -2007,14 +2313,16 @@ function reattachInFlightStreaming(merged, inflightPrior) {
       idx = out.findIndex((m) => m.gatewayRunId === live.gatewayRunId);
     }
     if (idx < 0 && live.who === 'them') {
-      for (let i = out.length - 1; i >= 0; i -= 1) {
-        if (out[i].who !== 'them') continue;
-        const serverText = String(out[i].text || '');
-        const liveText = String(live.text || '');
-        if (!serverText || !liveText || serverText.startsWith(liveText) || liveText.startsWith(serverText)) {
-          idx = i;
+      const liveText = streamingTextForMerge(live.text);
+      if (liveText) {
+        for (let i = out.length - 1; i >= 0; i -= 1) {
+          if (out[i].who !== 'them') continue;
+          const serverText = String(out[i].text || '');
+          if (serverText.startsWith(liveText) || liveText.startsWith(serverText)) {
+            idx = i;
+          }
+          break;
         }
-        break;
       }
     }
     if (idx >= 0) {
@@ -2088,14 +2396,13 @@ function mergeGatewayHistory(localMessages, serverMessages) {
 }
 
 function rebuildMessagesFromGateway(serverMessages, localMessages) {
-  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => ({ ...m, streaming: false }));
-  const localUsers = local.filter((m) => m.who === 'me');
+  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => (
+    m.streaming ? { ...m } : { ...m, streaming: false }
+  ));
   const server = dedupeForwardUserMessages(
     (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
   );
-  return finalizeHistoryMessages(
-    overlayLocalAttachmentsOntoServerHistory(server, localUsers),
-  );
+  return mergeGatewayHistory(local, server);
 }
 
 function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages) {
@@ -2173,6 +2480,196 @@ function isStopCommand(text) {
   return normalized === '/stop' || normalized === '/abort';
 }
 
+function isBtwSlashCommand(text) {
+  const trimmed = String(text || '').trim();
+  return /^\/(?:btw|side)(?:\s|$)/i.test(trimmed);
+}
+
+function parseDebugCommand(text) {
+  const trimmed = String(text || '').trim();
+  const match = trimmed.match(/^\/debug(?:\s+(\S+))?\s*$/i);
+  if (!match) return null;
+  const arg = String(match[1] || '').trim().toLowerCase();
+  if (!arg) return { action: 'show' };
+  if (arg === 'off' || arg === '0') return { action: 'set', mode: '' };
+  if (arg === 'stream' || arg === 'session' || arg === 'all') return { action: 'set', mode: arg };
+  return { action: 'invalid', arg };
+}
+
+async function handleDebugCommand(text) {
+  const parsed = parseDebugCommand(text);
+  if (!parsed) return false;
+
+  inputEl.value = '';
+  resetInputHeight();
+  hideCommandPopup();
+  updateComposerSendBtn();
+
+  if (!window.qizi.getDebugMode || !window.qizi.setDebugMode) {
+    setStatus('当前版本不支持 debug 命令', 'error');
+    return true;
+  }
+
+  if (parsed.action === 'show') {
+    const current = await window.qizi.getDebugMode();
+    const mode = current?.mode || '';
+    applyLocalDebugMode(mode);
+    setStatus(`Debug 模式：${mode || 'off'}（来源：${current?.source || 'settings'}）`, 'ok');
+    return true;
+  }
+
+  if (parsed.action === 'invalid') {
+    setStatus('用法：/debug [off|stream|session|all]', 'error');
+    return true;
+  }
+
+  const result = await window.qizi.setDebugMode({ mode: parsed.mode });
+  if (!result?.ok) {
+    setStatus(result?.error || '设置 Debug 模式失败', 'error');
+    return true;
+  }
+  applyLocalDebugMode(result.mode);
+  setStatus(`Debug 模式已设为：${result.mode || 'off'}（来源：${result.source || 'settings'}）`, 'ok');
+  return true;
+}
+
+function parseBtwQuestion(text) {
+  const match = String(text || '').trim().match(/^\/(?:btw|side)\s+([\s\S]+)$/i);
+  return match ? match[1].trim() : '';
+}
+
+function setBtwAuxDim(active) {
+  if (!auxModalDimEl) return;
+  btwAuxDimActive = Boolean(active);
+  auxModalDimEl.hidden = !btwAuxDimActive;
+  auxModalDimEl.setAttribute('aria-hidden', btwAuxDimActive ? 'false' : 'true');
+}
+
+function positionBtwSideDock() {
+  if (!btwSideDockEl) return;
+  const composer = document.getElementById('composer');
+  const height = composer ? composer.getBoundingClientRect().height : 120;
+  btwSideDockEl.style.setProperty('--btw-dock-bottom', `${Math.ceil(height) + 8}px`);
+}
+
+function unbindBtwDismissKeys() {
+  if (!btwDismissKeyHandler) return;
+  document.removeEventListener('keydown', btwDismissKeyHandler, true);
+  btwDismissKeyHandler = null;
+}
+
+function dismissBtwSideCard() {
+  if (!btwSideDockEl || btwSideDockEl.hidden) return;
+  btwUserDismissed = true;
+  btwSideDockEl.hidden = true;
+  btwPendingRunId = null;
+  if (btwSideQuestionEl) btwSideQuestionEl.textContent = '';
+  if (btwSideAnswerEl) {
+    btwSideAnswerEl.textContent = '';
+    btwSideAnswerEl.className = 'btw-side-answer';
+  }
+  setBtwAuxDim(false);
+  unbindBtwDismissKeys();
+}
+
+function bindBtwDismissKeys() {
+  unbindBtwDismissKeys();
+  btwDismissKeyHandler = (e) => {
+    if (btwSideDockEl?.hidden) return;
+    if (e.key === 'Escape' || e.key === 'Enter') {
+      e.preventDefault();
+      dismissBtwSideCard();
+    }
+  };
+  document.addEventListener('keydown', btwDismissKeyHandler, true);
+}
+
+function showBtwSideCard({ question = '', text = '', loading = false, isError = false } = {}) {
+  if (!btwSideDockEl || !btwSideAnswerEl) return;
+  if (btwSideQuestionEl) {
+    btwSideQuestionEl.textContent = question ? `问：${question}` : '';
+  }
+  btwSideAnswerEl.className = 'btw-side-answer';
+  if (loading) {
+    btwSideAnswerEl.classList.add('is-loading');
+    btwSideAnswerEl.textContent = '正在侧问…';
+  } else if (isError) {
+    btwSideAnswerEl.classList.add('is-error');
+    btwSideAnswerEl.textContent = text || '侧问失败';
+  } else {
+    btwSideAnswerEl.innerHTML = parseMarkdown(text || '');
+  }
+  btwSideDockEl.hidden = false;
+  positionBtwSideDock();
+  setBtwAuxDim(true);
+  bindBtwDismissKeys();
+}
+
+function handleBtwSideResult(payload) {
+  if (!payload || payload.kind !== 'btw') return;
+  if (payload.sessionKey && payload.sessionKey !== currentSessionKey) return;
+  if (btwUserDismissed) return;
+  if (btwPendingRunId && payload.runId && payload.runId !== btwPendingRunId) return;
+  btwPendingRunId = null;
+  showBtwSideCard({
+    question: payload.question || parseBtwQuestion(''),
+    text: payload.text || '',
+    isError: payload.isError === true,
+    loading: false,
+  });
+}
+
+async function sendBtw(text) {
+  const trimmed = String(text || '').trim();
+  const question = parseBtwQuestion(trimmed);
+
+  inputEl.value = '';
+  resetInputHeight();
+  clearPendingQuote();
+  hideCommandPopup();
+  updateComposerSendBtn();
+
+  if (!question) {
+    showBtwSideCard({
+      text: '请在 /btw 或 /side 后输入问题，例如：/btw 当前在做什么？',
+      isError: true,
+    });
+    return;
+  }
+
+  rememberSentInput(trimmed);
+
+  if (!connected) {
+    await checkConnection();
+    if (!connected) return;
+  }
+
+  btwUserDismissed = false;
+  btwPendingRunId = null;
+  showBtwSideCard({ question, loading: true });
+
+  try {
+    const result = await window.qizi.sendBtw({ message: trimmed });
+    if (!result?.ok) {
+      btwPendingRunId = null;
+      showBtwSideCard({
+        question,
+        text: result?.error || '发送失败',
+        isError: true,
+      });
+      return;
+    }
+    btwPendingRunId = result.gatewayRunId || null;
+  } catch (err) {
+    btwPendingRunId = null;
+    showBtwSideCard({
+      question,
+      text: err.message || '发送失败',
+      isError: true,
+    });
+  }
+}
+
 async function handleStopCommand() {
   if (busy) {
     await abortRun();
@@ -2192,7 +2689,11 @@ async function handleStopCommand() {
 function applyLoadedSessionKey(result) {
   if (!result?.sessionKey || result.sessionKey === currentSessionKey) return false;
   if (multiSelectMode) exitMultiSelectMode();
-  flushSaveMessages();
+  const prevSessionKey = currentSessionKey;
+  debugEvent('session', 'apply_loaded_session_key', { from: prevSessionKey, to: result.sessionKey });
+  chatScopeEpoch += 1;
+  flushSaveMessagesToSession(prevSessionKey);
+  messages = [];
   currentSessionKey = result.sessionKey;
   currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   loadMessages();
@@ -2248,6 +2749,23 @@ function updateAgentTitleLabel(agent) {
     titlebarAgentBtn.title = `切换 Agent · ${formatAgentLabel(info)}`;
     titlebarAgentBtn.setAttribute('aria-label', `切换 Agent · ${formatAgentLabel(info)}`);
   }
+}
+
+function openMessageHistoryWindow() {
+  if (window.MeetingView?.isVisible?.()) return;
+  const agent = getCurrentAgentInfo();
+  void window.qizi.openHistory({
+    sessionKey: currentSessionKey,
+    agentId: currentAgentId,
+    agentLabel: formatAgentLabel(agent),
+    agent: {
+      id: agent.id,
+      label: formatAgentLabel(agent),
+      emoji: agent.emoji || null,
+      avatarDataUrl: agent.avatarDataUrl || null,
+    },
+    retentionMs: MESSAGE_RETENTION_MS,
+  });
 }
 
 function applyAgentCatalog(agents) {
@@ -2319,8 +2837,8 @@ function setStatus(text, kind) {
   statusEl.dataset.kind = kind || '';
 }
 
-function writeMessagesToStorage(items) {
-  const storageKey = messagesStorageKey();
+function writeMessagesToStorageKey(sessionKey, items) {
+  const storageKey = messagesStorageKey(sessionKey);
   let slice = items;
   while (slice.length > 0) {
     try {
@@ -2334,34 +2852,29 @@ function writeMessagesToStorage(items) {
   return false;
 }
 
+function writeMessagesToStorage(items) {
+  return writeMessagesToStorageKey(currentSessionKey, items);
+}
+
+function persistMessagesForSession(sessionKey, sourceMessages) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
+  const payload = serializeMessagesForStorage(sourceMessages);
+  if (!writeMessagesToStorageKey(sessionKey, payload)) {
+    console.warn('[qizi] localStorage 空间不足，部分历史未能保存');
+  }
+}
+
 function saveMessages(force) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
+  const captureKey = currentSessionKey;
   if (!force && saveTimer) return;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
   const write = () => {
-    const sanitized = finalizeHistoryMessages(
-      pruneMessagesByRetention(messages).map((m) => ({ ...m, streaming: false })),
-    );
-    const payload = sanitized.map((m) => ({
-      who: m.who,
-      text: m.text,
-      quote: m.quote || undefined,
-      forward: m.forward || undefined,
-      sentTime: m.sentTime || undefined,
-      sentAtMs: m.sentAtMs ?? undefined,
-      images: Array.isArray(m.images) && m.images.length > 0 ? m.images : undefined,
-      files: Array.isArray(m.files) && m.files.length > 0
-        ? m.files.map(({ name, mimeType, size }) => ({ name, mimeType, size }))
-        : undefined,
-      time: m.time,
-      runId: m.runId,
-      streaming: false,
-    }));
-    if (!writeMessagesToStorage(payload)) {
-      console.warn('[qizi] localStorage 空间不足，部分历史未能保存');
-    }
+    saveTimer = null;
+    persistMessagesForSession(captureKey, messages);
   };
   if (force) {
     write();
@@ -2370,15 +2883,24 @@ function saveMessages(force) {
   }
 }
 
-function flushSaveMessages() {
+function flushSaveMessagesToSession(sessionKey) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  saveMessages(true);
+  persistMessagesForSession(sessionKey, messages);
+}
+
+function flushSaveMessages() {
+  flushSaveMessagesToSession(currentSessionKey);
 }
 
 function loadMessages() {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) {
+    messages = [];
+    return;
+  }
   try {
     const storageKey = messagesStorageKey();
     let raw = localStorage.getItem(storageKey);
@@ -2395,9 +2917,12 @@ function loadMessages() {
     }
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
-      messages = pruneMessagesByRetention(
-        finalizeHistoryMessages(parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }))),
+      messages = finalizeHistoryMessages(
+        pruneMessagesByRetention(
+          parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
+        ),
       );
+      syncCurrentRunIdFromMessages();
     }
   } catch {
     messages = [];
@@ -2406,28 +2931,35 @@ function loadMessages() {
 
 function updateStreamingBubble(runId) {
   if (!messagesEl || runId == null) return;
-  const msgIndex = messages.findIndex((msg) => msg.runId === runId && msg.streaming);
-  const m = msgIndex >= 0 ? messages[msgIndex] : null;
+  const m = findStreamingMessageByRunId(runId)
+    || findAssistantStreamTarget(runId)
+    || messages.find((msg) => msg.who === 'them' && msg.streaming && runIdsMatch(msg.runId, runId));
   if (!m) {
     render();
     return;
   }
-  let row = messagesEl.querySelector(`[data-run-id="${runId}"]`);
+  const msgIndex = messages.indexOf(m);
+  let row = messagesEl.querySelector(`[data-run-id="${m.runId}"]`);
   if (!row) {
     render();
-    row = messagesEl.querySelector(`[data-run-id="${runId}"]`);
+    row = messagesEl.querySelector(`[data-run-id="${m.runId}"]`);
     if (!row) return;
   }
   const bubble = row.querySelector('.msg-bubble');
   if (bubble) {
     bubble.innerHTML = renderMessageBubbleContent(m, msgIndex).html;
   }
+  const meta = row.querySelector('.msg-meta');
+  if (meta) {
+    const suffix = m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '');
+    meta.textContent = `${m.time || ''}${suffix}`;
+  }
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function isLocalOwnedActiveRun() {
   if (!busy || activeRunId == null) return false;
-  const target = messages.find((m) => m.runId === activeRunId);
+  const target = messages.find((m) => runIdsMatch(m.runId, activeRunId));
   return Boolean(target && !target.external);
 }
 
@@ -2439,6 +2971,7 @@ function stopSessionWatch() {
 }
 
 async function tickSessionWatch() {
+  if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (window.MeetingView?.isVisible?.()) return;
   if (!connected || isLocalOwnedActiveRun()) return;
 
@@ -2475,6 +3008,10 @@ async function tickSessionWatch() {
 }
 
 function startSessionWatch() {
+  if (!ENABLE_GATEWAY_HISTORY_SYNC) {
+    stopSessionWatch();
+    return;
+  }
   stopSessionWatch();
   sessionWatchTimer = setInterval(() => {
     tickSessionWatch();
@@ -2502,6 +3039,7 @@ async function handleExternalSessionChat(payload) {
         gatewayRunId,
       };
       messages.push(target);
+      startExternalStreamHistoryPoll(target.runId);
     } else {
       if (payload.text && payload.text.length >= (target.text || '').length) {
         target.text = payload.text;
@@ -2538,53 +3076,103 @@ async function handleExternalSessionChat(payload) {
   }
 }
 
+function isMessageInCurrentChatScope(message) {
+  if (!message) return false;
+  if (message.sessionKey && message.sessionKey !== currentSessionKey) return false;
+  if (message.chatEpoch != null && message.chatEpoch !== chatScopeEpoch) return false;
+  return true;
+}
+
+function findScopedAssistantByRunId(runId, { requireStreaming = false } = {}) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const candidate = messages[i];
+    if (candidate.who !== 'them') continue;
+    if (!runIdsMatch(candidate.runId, runId)) continue;
+    if (requireStreaming && !candidate.streaming) continue;
+    if (!isMessageInCurrentChatScope(candidate)) continue;
+    return candidate;
+  }
+  return null;
+}
+
 function findAssistantStreamTarget(runId) {
   if (runId != null) {
-    const numericRunId = Number(runId);
-    const byRunId = messages.find(
-      (m) => m.who === 'them' && (m.runId === runId || Number(m.runId) === numericRunId),
-    );
-    if (byRunId) return byRunId;
+    return findScopedAssistantByRunId(runId) || null;
+  }
+  if (activeRunId != null) {
+    const active = findScopedAssistantByRunId(activeRunId, { requireStreaming: true });
+    if (active) return active;
   }
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i].who === 'them' && messages[i].streaming) {
-      return messages[i];
+    const candidate = messages[i];
+    if (candidate.who === 'them' && candidate.streaming && isMessageInCurrentChatScope(candidate)) {
+      return candidate;
     }
   }
   return null;
 }
 
-function scheduleStreamingUpdate(runId) {
+function paintStreamingBubble(runId) {
   streamRenderRunId = runId;
-  if (streamRenderTimer) return;
-  const elapsed = Date.now() - lastStreamRenderAt;
-  const delay = Math.max(0, STREAM_RENDER_MIN_MS - elapsed);
-  streamRenderTimer = setTimeout(() => {
-    streamRenderTimer = null;
+  if (streamPaintRaf != null) return;
+  streamPaintRaf = requestAnimationFrame(() => {
+    streamPaintRaf = null;
     lastStreamRenderAt = Date.now();
     updateStreamingBubble(streamRenderRunId);
-  }, delay);
+  });
+}
+
+function scheduleStreamingUpdate(runId) {
+  paintStreamingBubble(runId);
+}
+
+function isPriorAssistantReplay(target, incomingText) {
+  const prevThem = getAssistantMessageBeforeTarget(target);
+  if (!prevThem) return false;
+  const prevText = String(prevThem.text || '').trim();
+  const incoming = String(incomingText || '').trim();
+  return Boolean(prevText && incoming && incoming === prevText);
 }
 
 function applyStreamingDelta(delta, runId, replace) {
   const target = findAssistantStreamTarget(runId);
-  if (!target) return;
-
-  const prevLength = (target.text || '').length;
-  target.text = replace ? delta : `${target.text || ''}${delta}`;
-  target.streaming = true;
-  target.lastDeltaAt = Date.now();
-
-  if (prevLength === 0) {
-    if (streamRenderTimer) {
-      clearTimeout(streamRenderTimer);
-      streamRenderTimer = null;
-    }
-    lastStreamRenderAt = Date.now();
-    updateStreamingBubble(runId ?? target.runId);
+  if (!target) {
+    debugEvent('stream', 'delta_target_missing', {
+      runId,
+      replace: replace === true,
+      deltaLength: String(delta || '').length,
+      activeRunId,
+      busy,
+      tail: messages.slice(-4).map((m) => ({
+        who: m.who,
+        runId: m.runId,
+        streaming: m.streaming === true,
+        sessionKey: m.sessionKey,
+      })),
+    });
     return;
   }
-  scheduleStreamingUpdate(runId ?? target.runId);
+
+  const incoming = String(delta || '');
+  if (!incoming) return;
+
+  let nextText;
+  if (replace || isStreamingPlaceholderText(target.text)) {
+    nextText = stripPriorAssistantReplay(target, incoming);
+  } else {
+    nextText = stripPriorAssistantReplay(
+      target,
+      `${streamingTextForMerge(target.text)}${incoming}`,
+    );
+  }
+  if (!nextText) return;
+  if (isPriorAssistantReplay(target, nextText)) return;
+
+  target.text = nextText;
+  target.streaming = true;
+  target.queued = false;
+  target.lastDeltaAt = Date.now();
+  paintStreamingBubble(runId ?? target.runId);
 }
 
 function userMessageHasPayload(m) {
@@ -2637,6 +3225,7 @@ function historySignature(historyMessages) {
 }
 
 async function syncHistoryFromGateway(options = {}) {
+  if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   const task = () => syncHistoryFromGatewayOnce(options);
   const run = syncHistoryChain.then(task, task);
   syncHistoryChain = run.catch(() => {});
@@ -2644,6 +3233,7 @@ async function syncHistoryFromGateway(options = {}) {
 }
 
 async function syncHistoryFromGatewayOnce(options = {}) {
+  if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (!window.qizi.loadHistory) return;
   try {
     const result = await window.qizi.loadHistory();
@@ -2654,17 +3244,10 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     }
 
     if (isLocalOwnedActiveRun()) {
-      const streamingMsgs = messages.filter((m) => m.streaming && !m.external);
-      if (streamingMsgs.length > 0) {
-        for (const sm of streamingMsgs) {
-          const lastThem = [...result.messages].reverse().find((m) => m.who === 'them');
-          if (lastThem && shouldApplyHistoryStreamText(sm, lastThem.text)) {
-            sm.text = lastThem.text;
-            scheduleStreamingUpdate(sm.runId);
-          }
-        }
-        return;
-      }
+      return;
+    }
+
+    if (messages.some((m) => m.who === 'them' && m.streaming && !m.external)) {
       return;
     }
 
@@ -2675,9 +3258,9 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     } else {
       const streamingThem = messages.filter((m) => m.who === 'them' && m.streaming);
       for (const sm of streamingThem) {
-        const lastThem = [...result.messages].reverse().find((m) => m.who === 'them');
-        if (lastThem && shouldApplyHistoryStreamText(sm, lastThem.text)) {
-          sm.text = lastThem.text;
+        const relevantThem = findRelevantAssistantFromHistory(result.messages, sm);
+        if (relevantThem && shouldApplyHistoryStreamText(sm, relevantThem.text)) {
+          sm.text = relevantThem.text;
           scheduleStreamingUpdate(sm.runId);
         }
       }
@@ -2719,9 +3302,9 @@ function stopStreamHistoryPoll() {
   streamPollStableCount = 0;
 }
 
-async function pollStreamHistoryOnce(runId) {
+async function pollExternalStreamHistoryOnce(runId) {
   const target = findAssistantStreamTarget(runId);
-  if (!target || !target.streaming) {
+  if (!target || !target.streaming || !target.external) {
     stopStreamHistoryPoll();
     return;
   }
@@ -2733,9 +3316,9 @@ async function pollStreamHistoryOnce(runId) {
     ]);
 
     if (historyResult?.ok) {
-      const lastThem = [...historyResult.messages].reverse().find((m) => m.who === 'them');
-      if (lastThem && shouldApplyHistoryStreamText(target, lastThem.text)) {
-        target.text = lastThem.text;
+      const relevantThem = findRelevantAssistantFromHistory(historyResult.messages, target);
+      if (relevantThem && shouldApplyHistoryStreamText(target, relevantThem.text)) {
+        target.text = relevantThem.text;
         streamPollStableCount = 0;
         scheduleStreamingUpdate(runId);
       } else {
@@ -2752,10 +3335,10 @@ async function pollStreamHistoryOnce(runId) {
   }
 }
 
-function startStreamHistoryPoll(runId) {
+function startExternalStreamHistoryPoll(runId) {
   stopStreamHistoryPoll();
   streamPollTimer = setInterval(() => {
-    pollStreamHistoryOnce(runId);
+    pollExternalStreamHistoryOnce(runId);
   }, 2000);
 }
 
@@ -2774,7 +3357,7 @@ async function resumeInterruptedSession(options = {}) {
   if (existing) {
     setBusy(true);
     activeRunId = existing.runId;
-    startStreamHistoryPoll(existing.runId);
+    startExternalStreamHistoryPoll(existing.runId);
     return;
   }
 
@@ -2782,39 +3365,51 @@ async function resumeInterruptedSession(options = {}) {
   if (localStreaming) {
     setBusy(true);
     activeRunId = localStreaming.runId;
-    startStreamHistoryPoll(localStreaming.runId);
+    startExternalStreamHistoryPoll(localStreaming.runId);
     return;
   }
 
   const history = await window.qizi.loadHistory();
-  const serverLastThem = history?.ok
-    ? [...history.messages].reverse().find((m) => m.who === 'them')
-    : null;
 
   currentRunId += 1;
   const target = {
     who: 'them',
-    text: serverLastThem?.text || '',
+    text: '…',
     time: now(),
     streaming: true,
     runId: currentRunId,
+    streamingStartedAt: Date.now(),
+    lastDeltaAt: Date.now(),
     external: Boolean(options.external),
   };
   messages.push(target);
+
+  if (history?.ok) {
+    const relevantThem = findRelevantAssistantFromHistory(history.messages, target);
+    if (relevantThem && shouldApplyHistoryStreamText(target, relevantThem.text)) {
+      target.text = relevantThem.text;
+    }
+  }
 
   setBusy(true);
   activeRunId = target.runId;
   render();
   setStatus(options.external ? 'Webchat 回复中，同步…' : '检测到进行中的回复，正在续传…', 'pending');
 
-  await pollStreamHistoryOnce(target.runId);
-  startStreamHistoryPoll(target.runId);
+  await pollExternalStreamHistoryOnce(target.runId);
+  if (target.external) {
+    startExternalStreamHistoryPoll(target.runId);
+  }
 }
 
 function finishAssistant({ error, runId, text } = {}) {
   if (streamRenderTimer) {
     clearTimeout(streamRenderTimer);
     streamRenderTimer = null;
+  }
+  if (streamPaintRaf != null) {
+    cancelAnimationFrame(streamPaintRaf);
+    streamPaintRaf = null;
   }
   if (userAborted && !error) return;
   let target = null;
@@ -2823,23 +3418,58 @@ function finishAssistant({ error, runId, text } = {}) {
   }
   if (!target) {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i].who === 'them' && messages[i].streaming) {
-        target = messages[i];
+      const candidate = messages[i];
+      if (candidate.who === 'them' && candidate.streaming && isMessageInCurrentChatScope(candidate)) {
+        target = candidate;
         break;
       }
     }
   }
   if (!target) {
     setBusy(false);
+    activeRunId = null;
     return;
   }
-  if (!target.streaming && !error && !(text && text.length > (target.text || '').length)) {
+  if (!isMessageInCurrentChatScope(target)) {
+    setBusy(false);
+    activeRunId = null;
     return;
   }
-  if (typeof text === 'string' && text.length > (target.text || '').length) {
-    target.text = text;
+
+  const streamed = streamingTextForMerge(target.text);
+  let incomingText = typeof text === 'string' ? text : '';
+  if (incomingText && isPriorAssistantReplay(target, incomingText)) {
+    incomingText = '';
+  }
+  if (incomingText && streamed && !isStreamingPlaceholderText(streamed)) {
+    if (incomingText.trim() === streamed.trim()) {
+      incomingText = '';
+    } else if (incomingText.length < streamed.length) {
+      incomingText = '';
+    }
+  }
+  const hasIncomingText = incomingText.length > 0;
+  const placeholder = isStreamingPlaceholderText(target.text);
+  const canGrowText = hasIncomingText && incomingText.length > (target.text || '').length;
+
+  if (!target.streaming && !error && !canGrowText && !placeholder) {
+    if (runId == null || runIdsMatch(runId, activeRunId)) {
+      setBusy(false);
+      activeRunId = null;
+    }
+    return;
+  }
+
+  if (canGrowText || (hasIncomingText && placeholder)) {
+    target.text = incomingText;
   }
   target.streaming = false;
+  target.queued = false;
+  if (!target.sentAtMs) {
+    const completedAtMs = Date.now();
+    target.sentAtMs = completedAtMs;
+    if (!target.sentTime) target.sentTime = formatGatewayEnvelopeTime(completedAtMs);
+  }
   // 如果有错误，追加错误信息（不覆盖已输出内容）
   if (error && !String(error).includes('连接断开') && !String(error).includes('Gateway')) {
     target.text = target.text ? `${target.text}\n\n[错误] ${error}` : `[错误] ${error}`;
@@ -2850,8 +3480,9 @@ function finishAssistant({ error, runId, text } = {}) {
     updateModelBadge(target.text);
   }
 
-  if (runId == null || runId === activeRunId) {
+  if (runId == null || runIdsMatch(runId, activeRunId)) {
     setBusy(false);
+    activeRunId = null;
     stopStreamHistoryPoll();
     if (target.external) {
       externalSessionRunId = null;
@@ -3163,6 +3794,7 @@ async function switchToAgent(agentId) {
 
   hideAgentPopup();
   setStatus('切换 Agent…', 'pending');
+  dismissBtwSideCard();
 
   if (busy) {
     userAborted = true;
@@ -3180,41 +3812,67 @@ async function switchToAgent(agentId) {
     }
   }
 
-  flushSaveMessages();
+  const prevSessionKey = currentSessionKey;
+  debugEvent('session', 'switch_agent_start', {
+    fromAgent: currentAgentId,
+    toAgent: agentId,
+    fromSessionKey: prevSessionKey,
+  });
+  chatScopeEpoch += 1;
+  flushSaveMessagesToSession(prevSessionKey);
+  messages = [];
+  pendingQueue = [];
+  pendingImages = [];
+  pendingFiles = [];
+  activeRunId = null;
 
   try {
     const result = await window.qizi.switchAgent(agentId);
     if (!result?.ok) {
+      currentSessionKey = prevSessionKey;
+      currentAgentId = parseAgentIdFromSessionKey(prevSessionKey);
+      loadMessages();
+      render();
       setStatus(result?.error || '切换失败', 'error');
       return;
     }
 
-    currentSessionKey = result.sessionKey || buildAgentSessionKeyFallback(agentId);
+    let nextSessionKey = result.sessionKey || buildAgentSessionKeyFallback(agentId);
+    try {
+      const canonicalKey = await window.qizi.getSessionKey();
+      if (canonicalKey) nextSessionKey = canonicalKey;
+    } catch {
+      // ignore
+    }
+    currentSessionKey = nextSessionKey;
     currentAgentId = agentId;
+    debugEvent('session', 'switch_agent_success', {
+      agentId,
+      sessionKey: nextSessionKey,
+    });
     if (result.agent) {
       agentCatalog.set(agentId, result.agent);
     }
-    messages = [];
-    pendingQueue = [];
-    pendingImages = [];
-    pendingFiles = [];
-    currentRunId = 0;
-    activeRunId = null;
     userAborted = false;
     modelCatalogExpiresAt = 0;
 
     updateAgentTitleLabel(result.agent || { id: agentId });
     loadMessages();
     messages = finalizeHistoryMessages(messages);
+    syncCurrentRunIdFromMessages();
     flushSaveMessages();
     render();
 
-    lastSyncedHistorySignature = '';
-    lastSessionSyncAt = 0;
-    await syncHistoryFromGateway({ rebuildFromServer: true });
-    const sessionInfo = await window.qizi.getSessionInfo();
-    if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
-      await resumeInterruptedSession();
+    if (ENABLE_GATEWAY_HISTORY_SYNC) {
+      lastSyncedHistorySignature = '';
+      lastSessionSyncAt = 0;
+      await syncHistoryFromGateway();
+      const sessionInfo = await window.qizi.getSessionInfo();
+      if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
+        await resumeInterruptedSession();
+      } else {
+        clearStaleStreamingState({ force: true });
+      }
     } else {
       clearStaleStreamingState({ force: true });
     }
@@ -3222,6 +3880,15 @@ async function switchToAgent(agentId) {
     await refreshSessionInfo();
     setStatus('已连接', 'ok');
   } catch (err) {
+    currentSessionKey = prevSessionKey;
+    currentAgentId = parseAgentIdFromSessionKey(prevSessionKey);
+    debugEvent('session', 'switch_agent_failed', {
+      agentId,
+      fallbackSessionKey: prevSessionKey,
+      error: err.message || '切换失败',
+    });
+    loadMessages();
+    render();
     setStatus(err.message || '切换失败', 'error');
   }
 }
@@ -3369,26 +4036,35 @@ async function checkConnection() {
     const result = await window.qizi.checkConnection();
     if (result.ok) {
       connected = true;
+      debugEvent('session', 'connection_ok', {
+        sessionKey: result.sessionKey || currentSessionKey,
+      });
       setStatus('已连接', 'ok');
       messages = finalizeHistoryMessages(messages);
       flushSaveMessages();
       lastSyncedHistorySignature = '';
       lastSessionSyncAt = 0;
       await refreshCurrentModelBadge();
-      await syncHistoryFromGateway({ rebuildFromServer: true });
-      const sessionInfo = await window.qizi.getSessionInfo();
-      if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
-        await resumeInterruptedSession();
-      } else {
+      if (ENABLE_GATEWAY_HISTORY_SYNC) {
+        await syncHistoryFromGateway();
+        const sessionInfo = await window.qizi.getSessionInfo();
+        if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
+          await resumeInterruptedSession();
+        } else if (!isLocalOwnedActiveRun()) {
+          clearStaleStreamingState({ force: true });
+        }
+      } else if (!isLocalOwnedActiveRun()) {
         clearStaleStreamingState({ force: true });
       }
       startSessionWatch();
     } else {
       connected = false;
+      debugEvent('session', 'connection_error_result', { error: result.error || '连接失败' });
       setStatus(result.error || '连接失败', 'error');
     }
   } catch (err) {
     connected = false;
+    debugEvent('session', 'connection_error_throw', { error: err.message || '连接失败' });
     setStatus(err.message || '连接失败', 'error');
   }
 }
@@ -3446,12 +4122,107 @@ async function abortRun() {
 }
 
 
+function isCommandPopupVisible() {
+  return !!(cmdPopup && !cmdPopup.hidden);
+}
+
+function getSlashCommandToken(value) {
+  const trimmed = String(value || '').trimStart();
+  if (!trimmed.startsWith('/')) return '';
+  const match = trimmed.match(/^(\S+)/);
+  return match ? match[1] : '';
+}
+
+function getSlashCommandArgs(value) {
+  const trimmed = String(value || '').trimStart();
+  const token = getSlashCommandToken(trimmed);
+  if (!token) return '';
+  return trimmed.slice(token.length).trim();
+}
+
+function isExactSlashCommandToken(token) {
+  const normalized = String(token || '').toLowerCase();
+  return SLASH_COMMANDS.some((c) => c.cmd.toLowerCase() === normalized);
+}
+
+function shouldApplyCommandPopupSelection() {
+  if (!isCommandPopupVisible()) return false;
+  const token = getSlashCommandToken(inputEl?.value || '');
+  if (!token) return false;
+  if (getSlashCommandArgs(inputEl?.value || '')) return false;
+  return !isExactSlashCommandToken(token);
+}
+
+function syncCommandPopupForInput(value) {
+  const v = String(value || '');
+  if (!v.startsWith('/')) {
+    hideCommandPopup();
+    return;
+  }
+  const filter = v.split(/\s/, 1)[0];
+  if (getSlashCommandArgs(v) || isExactSlashCommandToken(filter)) {
+    hideCommandPopup();
+    return;
+  }
+  showCommandPopup(filter);
+}
+
+function getCommandPopupItems() {
+  if (!cmdPopup) return [];
+  return [...cmdPopup.querySelectorAll('.cmd-item')];
+}
+
+function setCommandPopupActiveIndex(index) {
+  const items = getCommandPopupItems();
+  if (items.length === 0) {
+    cmdPopupActiveIndex = -1;
+    return;
+  }
+  const next = Math.max(0, Math.min(index, items.length - 1));
+  cmdPopupActiveIndex = next;
+  items.forEach((el, i) => {
+    el.classList.toggle('is-active', i === next);
+    if (i === next) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function applyCommandSelection(cmd) {
+  if (!inputEl || !cmd) return;
+  inputEl.value = `${cmd} `;
+  inputEl.focus();
+  hideCommandPopup();
+  resetInputHeight();
+  updateComposerSendBtn();
+}
+
+function navigateCommandPopup(direction) {
+  const items = getCommandPopupItems();
+  if (items.length === 0) return false;
+  if (cmdPopupActiveIndex < 0) {
+    setCommandPopupActiveIndex(direction === 'up' ? items.length - 1 : 0);
+    return true;
+  }
+  const delta = direction === 'up' ? -1 : 1;
+  setCommandPopupActiveIndex(cmdPopupActiveIndex + delta);
+  return true;
+}
+
+function selectActiveCommandPopupItem() {
+  const items = getCommandPopupItems();
+  if (items.length === 0) return false;
+  const idx = cmdPopupActiveIndex >= 0 ? cmdPopupActiveIndex : 0;
+  const cmd = items[idx]?.dataset.cmd;
+  if (!cmd) return false;
+  applyCommandSelection(cmd);
+  return true;
+}
+
 function showCommandPopup(filter) {
   if (!cmdPopup) return;
   const q = (filter || '').toLowerCase();
   const items = SLASH_COMMANDS.filter((c) => !q || c.cmd.toLowerCase().includes(q));
   if (items.length === 0) {
-    cmdPopup.hidden = true;
+    hideCommandPopup();
     return;
   }
   cmdPopup.innerHTML = items
@@ -3464,16 +4235,90 @@ function showCommandPopup(filter) {
   cmdPopup.querySelectorAll('.cmd-item').forEach((el) => {
     el.addEventListener('mousedown', (e) => {
       e.preventDefault();
-      const cmd = el.dataset.cmd;
-      inputEl.value = cmd + ' ';
-      inputEl.focus();
-      cmdPopup.hidden = true;
+      applyCommandSelection(el.dataset.cmd);
+    });
+    el.addEventListener('mouseenter', () => {
+      const list = getCommandPopupItems();
+      const idx = list.indexOf(el);
+      if (idx >= 0) setCommandPopupActiveIndex(idx);
     });
   });
+  setCommandPopupActiveIndex(0);
 }
 
 function hideCommandPopup() {
+  cmdPopupActiveIndex = -1;
   if (cmdPopup) cmdPopup.hidden = true;
+}
+
+function isCaretOnFirstLine(el) {
+  if (!el) return true;
+  const pos = el.selectionStart ?? 0;
+  return !String(el.value || '').slice(0, pos).includes('\n');
+}
+
+function isCaretOnLastLine(el) {
+  if (!el) return true;
+  const pos = el.selectionStart ?? 0;
+  return !String(el.value || '').slice(pos).includes('\n');
+}
+
+function rememberSentInput(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return;
+  const last = inputHistory[inputHistory.length - 1];
+  if (last === trimmed) return;
+  inputHistory.push(trimmed);
+  if (inputHistory.length > INPUT_HISTORY_MAX) inputHistory.shift();
+  inputHistoryIndex = -1;
+  inputHistoryDraft = '';
+}
+
+function applyInputHistoryValue(value) {
+  if (!inputEl) return;
+  inputHistorySuppressInput = true;
+  inputEl.value = value;
+  resetInputHeight();
+  updateComposerSendBtn();
+  const end = value.length;
+  inputEl.setSelectionRange(end, end);
+  if (value.startsWith('/')) {
+    syncCommandPopupForInput(value);
+  } else {
+    hideCommandPopup();
+  }
+  queueMicrotask(() => {
+    inputHistorySuppressInput = false;
+  });
+}
+
+function navigateInputHistory(direction) {
+  if (!inputEl || inputHistory.length === 0) return false;
+
+  if (direction === 'up') {
+    if (inputHistoryIndex === -1) {
+      inputHistoryDraft = inputEl.value;
+      inputHistoryIndex = inputHistory.length - 1;
+    } else if (inputHistoryIndex > 0) {
+      inputHistoryIndex -= 1;
+    }
+    applyInputHistoryValue(inputHistory[inputHistoryIndex]);
+    return true;
+  }
+
+  if (direction === 'down') {
+    if (inputHistoryIndex === -1) return false;
+    if (inputHistoryIndex < inputHistory.length - 1) {
+      inputHistoryIndex += 1;
+      applyInputHistoryValue(inputHistory[inputHistoryIndex]);
+    } else {
+      inputHistoryIndex = -1;
+      applyInputHistoryValue(inputHistoryDraft);
+    }
+    return true;
+  }
+
+  return false;
 }
 
 async function send() {
@@ -3484,6 +4329,14 @@ async function send() {
     resetInputHeight();
     hideCommandPopup();
     await handleStopCommand();
+    return;
+  }
+  if (text && isBtwSlashCommand(text)) {
+    await sendBtw(text);
+    return;
+  }
+  if (text && text.trimStart().toLowerCase().startsWith('/debug')) {
+    await handleDebugCommand(text);
     return;
   }
   if (!connected) {
@@ -3522,6 +4375,8 @@ async function send() {
   const quoteSnapshot = pendingQuote ? { ...pendingQuote } : undefined;
   const sentAtMs = Date.now();
 
+  rememberSentInput(text);
+
   // 立刻把 user 消息 push + 渲染（不卡 UI，方案 A3）
   messages.push({
     who: 'me',
@@ -3532,6 +4387,8 @@ async function send() {
     time: now(),
     sentTime: formatGatewayEnvelopeTime(sentAtMs),
     sentAtMs,
+    sessionKey: currentSessionKey,
+    chatEpoch: chatScopeEpoch,
   });
   inputEl.value = '';
   resetInputHeight();
@@ -3544,26 +4401,27 @@ async function send() {
   // 如果当前没在跑 stream → 立刻开始流式；否则入队排队
   const assistantMsg = {
     who: 'them',
-    text: busy ? '…' : '',         // 排队中显示三点，开了 stream 后清空
+    text: busy ? '' : '…',
     time: now(),
-    streaming: true,
+    streaming: !busy,
     queued: busy,
     queuedAt: busy ? Date.now() : null,
     runId: myRunId,
-    streamingStartedAt: Date.now(), // 心跳探活：流式起始时间
-    lastDeltaAt: Date.now(),         // 心跳探活：最近一次收到 delta 的时间
+    streamingStartedAt: Date.now(),
+    lastDeltaAt: Date.now(),
+    sessionKey: currentSessionKey,
+    chatEpoch: chatScopeEpoch,
   };
   messages.push(assistantMsg);
   flushSaveMessages();
-  render();
 
   if (busy) {
-    // 旧 stream 还在跑，入队等它跑完由 processQueue() 处理
     pendingQueue.push(assistantMsg);
+    render();
   } else {
-    // 没在跑，立刻起 stream
     setBusy(true);
     activeRunId = myRunId;
+    render();
     runStream(assistantMsg);
   }
 }
@@ -3574,18 +4432,23 @@ async function send() {
 async function runStream(assistantMsg) {
   const myRunId = assistantMsg.runId;
   activeRunId = myRunId;
-  startStreamHistoryPoll(myRunId);
+  debugEvent('stream', 'run_start', { runId: myRunId, sessionKey: currentSessionKey });
 
   try {
     const payload = toChatPayload(assistantMsg);
-    const result = await window.qizi.chatStream(payload, myRunId);
-    if (result && result.ok === false && result.error && !result.aborted) {
+    const result = await window.qizi.chatStream({
+      ...payload,
+      priorAssistantText: '',
+    }, myRunId);
+    if (result?.ok === true) {
+      // IPC openclaw:done 丢失时，使用 invoke 返回值兜底收尾
+      finishAssistant({ runId: myRunId, text: result.text || '' });
+    } else if (result?.ok === false && result?.error && !result?.aborted) {
       finishAssistant({ error: result.error, runId: myRunId });
     }
   } catch (err) {
     finishAssistant({ error: err.message || '发送失败', runId: myRunId });
   } finally {
-    // 主动 abort 后队列已经被 abortRun 清空，这里不启动 processQueue
     if (userAborted) {
       setBusy(false);
       activeRunId = null;
@@ -3593,7 +4456,7 @@ async function runStream(assistantMsg) {
     }
     if (pendingQueue.length > 0) {
       setTimeout(processQueue, QUEUE_INTER_MS);
-    } else {
+    } else if (!messages.some((m) => m.who === 'them' && m.streaming)) {
       setBusy(false);
       activeRunId = null;
     }
@@ -3616,10 +4479,11 @@ function processQueue() {
   next.queued = false;
   next.queuedAt = null;
   next.streaming = true;
-  next.text = '';   // 清理排队中的 '…'
+  next.text = '…';
   saveMessages();
-  render();
   setBusy(true);
+  activeRunId = next.runId;
+  render();
   runStream(next);
 }
 
@@ -3628,10 +4492,15 @@ window.qizi.onChatDelta((delta, runId, replace) => {
 });
 
 window.qizi.onChatDone((runId, payload) => {
+  debugEvent('stream', 'run_done_event', {
+    runId,
+    textLength: String(payload?.text || '').length,
+    activeRunId,
+  });
   finishAssistant({ runId, text: payload?.text });
-  if (!busy) {
-    void syncHistoryFromGateway();
-  }
+  setTimeout(() => {
+    if (!busy) void syncHistoryFromGateway();
+  }, 0);
 });
 
 if (window.qizi.onGatewayStatus) {
@@ -3648,13 +4517,15 @@ if (window.qizi.onGatewayStatus) {
       connected = true;
       if (payload.reconnected && busy) {
         setStatus('已重连，继续接收…', 'ok');
-        syncHistoryFromGateway();
+        if (!isLocalOwnedActiveRun()) {
+          syncHistoryFromGateway();
+        }
       } else {
         setStatus('已连接', 'ok');
         refreshCurrentModelBadge();
         if (!busy) {
           lastSyncedHistorySignature = '';
-          syncHistoryFromGateway({ rebuildFromServer: true });
+          syncHistoryFromGateway();
         }
       }
       startSessionWatch();
@@ -3670,9 +4541,17 @@ if (window.qizi.onSessionChat) {
 
 if (window.qizi.onSessionChanged) {
   window.qizi.onSessionChanged(() => {
+    debugEvent('session', 'session_changed_event', { sessionKey: currentSessionKey });
+    dismissBtwSideCard();
     if (!isLocalOwnedActiveRun()) {
       syncHistoryFromGateway({ preserveExternalStream: true });
     }
+  });
+}
+
+if (window.qizi.onSideResult) {
+  window.qizi.onSideResult((payload) => {
+    handleBtwSideResult(payload);
   });
 }
 
@@ -3684,6 +4563,7 @@ if (window.qizi.onSessionChanged) {
 // 用户主动 abort 时，立即保存已输出内容，不等待 500ms
 
 window.qizi.onChatError((message, runId) => {
+  debugEvent('stream', 'run_error_event', { runId, message: String(message || '') });
   finishAssistant({ error: message, runId });
 });
 
@@ -3797,11 +4677,69 @@ if (composerQuoteRemoveEl) {
   });
 }
 
+if (btwSideCloseBtn) {
+  btwSideCloseBtn.addEventListener('click', () => {
+    dismissBtwSideCard();
+    inputEl?.focus();
+  });
+}
+
+if (auxModalDimEl) {
+  auxModalDimEl.addEventListener('click', () => {
+    if (btwAuxDimActive && !btwSideDockEl?.hidden) {
+      dismissBtwSideCard();
+      inputEl?.focus();
+    }
+  });
+}
+
 inputEl.addEventListener('keydown', (e) => {
+  if (isCommandPopupVisible()) {
+    if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      if (e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      navigateCommandPopup('up');
+      return;
+    }
+    if (e.key === 'ArrowDown' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+      if (e.isComposing || e.keyCode === 229) return;
+      e.preventDefault();
+      navigateCommandPopup('down');
+      return;
+    }
+    if (e.key === 'Tab' && !e.shiftKey) {
+      if (shouldApplyCommandPopupSelection()) {
+        e.preventDefault();
+        selectActiveCommandPopupItem();
+      }
+      return;
+    }
+  }
+  if (e.key === 'ArrowUp' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (inputEl.selectionStart !== inputEl.selectionEnd) return;
+    if (!isCaretOnFirstLine(inputEl)) return;
+    if (navigateInputHistory('up')) {
+      e.preventDefault();
+      hideCommandPopup();
+    }
+    return;
+  }
+  if (e.key === 'ArrowDown' && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey) {
+    if (e.isComposing || e.keyCode === 229) return;
+    if (inputEl.selectionStart !== inputEl.selectionEnd) return;
+    if (!isCaretOnLastLine(inputEl)) return;
+    if (navigateInputHistory('down')) {
+      e.preventDefault();
+      hideCommandPopup();
+    }
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     if (multiSelectMode) return;
+    if (shouldApplyCommandPopupSelection() && selectActiveCommandPopupItem()) return;
     hideCommandPopup();
     send();
     return;
@@ -3837,10 +4775,13 @@ inputEl.addEventListener('keydown', (e) => {
 });
 
 inputEl.addEventListener('input', () => {
+  if (!inputHistorySuppressInput && inputHistoryIndex !== -1) {
+    inputHistoryIndex = -1;
+    inputHistoryDraft = '';
+  }
   const v = inputEl.value;
   if (v.startsWith('/')) {
-    const filter = v.split(/\s/, 1)[0];
-    showCommandPopup(filter);
+    syncCommandPopupForInput(v);
   } else {
     hideCommandPopup();
   }
@@ -4133,10 +5074,12 @@ if (emojiBtn) {
     inputEl.style.height = '';
     inputEl.style.maxHeight = '';
     positionEmojiPicker();
+    if (btwSideDockEl && !btwSideDockEl.hidden) positionBtwSideDock();
   }
   function onUp() {
     document.removeEventListener('mousemove', onDrag);
     document.removeEventListener('mouseup', onUp);
+    if (btwSideDockEl && !btwSideDockEl.hidden) positionBtwSideDock();
   }
 })();
 
@@ -4214,11 +5157,19 @@ inputEl.addEventListener('paste', async (e) => {
 });
 
 (async function bootstrap() {
+  applyLocalDebugMode(debugMode);
   try {
+    if (window.qizi.getDebugMode) {
+      const debugInfo = await window.qizi.getDebugMode();
+      applyLocalDebugMode(debugInfo?.mode || '');
+    }
+    pruneAllStoredMessageSessions();
+    chatScopeEpoch += 1;
     currentSessionKey = await window.qizi.getSessionKey();
     currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
     loadMessages();
     messages = finalizeHistoryMessages(messages);
+    syncCurrentRunIdFromMessages();
     flushSaveMessages();
     render();
     await refreshAgentTitleFromGateway();
@@ -4234,6 +5185,7 @@ window.addEventListener('beforeunload', () => {
 });
 
 window.addEventListener('focus', () => {
+  if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (!connected || isLocalOwnedActiveRun()) return;
   const now = Date.now();
   if (now - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
@@ -4245,6 +5197,13 @@ if (titlebarAgentBtn) {
   titlebarAgentBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     showAgentPopup();
+  });
+}
+
+if (composerHistoryBtn) {
+  composerHistoryBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openMessageHistoryWindow();
   });
 }
 
@@ -4331,6 +5290,7 @@ if (forwardModal) {
 window.addEventListener('resize', () => {
   if (forwardModal && !forwardModal.hidden) updateForwardPreviewEllipsis();
   positionEmojiPicker();
+  if (btwSideDockEl && !btwSideDockEl.hidden) positionBtwSideDock();
 });
 
 /* ---------------- 设置 ---------------- */
@@ -5333,6 +6293,10 @@ window.addEventListener('qizi-meeting-exited', () => {
   restoreMeetingTitlebar(true);
   render();
 });
+
+window.QiziShellText = {
+  wrapInlineEmojisForHtml,
+};
 
 window.QiziShellMsgOps = {
   showContextMenu: (x, y, index, source = 'meeting') => showMessageContextMenu(x, y, index, source),
