@@ -8,7 +8,7 @@ const { buildExportWordHtml } = require('./export-html');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
 const { startMeetingGroupRelay } = require('./meeting-group');
 const { saveMeetingRecord, listMeetingRecords, loadMeetingRecordFile, loadMeetingRecordById } = require('./meeting-store');
-const { isMeetingA2ASessionKey } = require('./meeting-protocol');
+const { isMeetingA2ASessionKey, isModeratorPostCloseStub } = require('./meeting-protocol');
 const {
   findModeratorFinalMessage,
   buildMeetingForwardPayload,
@@ -367,6 +367,10 @@ let activeMeetingSessionKey = null;
 let activeMeetingMeta = null;
 /** @type {{ appendOwnerNote: (text: string) => void } | null} */
 let activeMeetingRelay = null;
+/** @type {object | null} */
+let activeMeetingForwardConfig = null;
+/** @type {Array<object>} */
+let activeMeetingTranscript = [];
 let meetingHistoryPollTimer = null;
 let controlUiWindow = null;
 let controlUiLaunchUrl = null;
@@ -1600,6 +1604,8 @@ function clearActiveMeeting() {
   activeMeetingSessionKey = null;
   activeMeetingMeta = null;
   activeMeetingRelay = null;
+  activeMeetingForwardConfig = null;
+  activeMeetingTranscript = [];
 }
 
 function resolveDeltaText(currentText, payload) {
@@ -1938,8 +1944,10 @@ function handleForwardGatewayChatEvent(payload) {
   if (!pending) return false;
   const payloadKey = String(payload.sessionKey || '').trim();
   if (payloadKey && pending.sessionKey && payloadKey !== pending.sessionKey) return false;
-  if (!payloadKey && !isPayloadForCurrentSession(payload)) return false;
-  handleExternalSessionChatEvent(payload, { allowWhileBusy: true });
+  if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
+    finishForwardRun(payload.runId);
+  }
+  // 会议派活/手动转发：不在 Shell 里模拟外部流式会话，避免 busy 卡死导致后续消息只排队不发
   return true;
 }
 
@@ -2061,7 +2069,19 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
   const agentId = String(config?.postMeetingExecAgentId || '').trim();
   if (!agentId) return null;
 
+  const execSessionKey = pinnedSessionKeyForAgent(agentId);
   const normalizedMeetingId = String(meetingId || '').trim();
+  const label = resolveExecAgentLabel(config, agentId);
+  const goal = String(config?.goal || '').trim();
+
+  const finalMsg = findModeratorFinalMessage(messages, config.moderatorAgentId);
+  let forwardMessage = '';
+  if (finalMsg?.text?.trim()
+    && !isMeetingClosingStub(finalMsg.text)
+    && !isModeratorPostCloseStub(finalMsg.text)) {
+    forwardMessage = buildMeetingForwardPayload(config, finalMsg);
+  }
+
   const dedupeScope = normalizedMeetingId
     ? `meeting-fwd:${normalizedMeetingId}:${agentId}`
     : undefined;
@@ -2070,7 +2090,10 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
     return {
       ok: true,
       agentId,
-      label: resolveExecAgentLabel(config, agentId),
+      sessionKey: execSessionKey,
+      forwardMessage,
+      goal,
+      label,
       deduped: true,
     };
   }
@@ -2078,29 +2101,37 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
     return {
       ok: true,
       agentId,
-      label: resolveExecAgentLabel(config, agentId),
+      sessionKey: execSessionKey,
+      forwardMessage,
+      goal,
+      label,
       deduped: true,
     };
   }
 
-  const finalMsg = findModeratorFinalMessage(messages, config.moderatorAgentId);
   if (!finalMsg?.text?.trim()) {
     return {
       ok: false,
       agentId,
+      sessionKey: execSessionKey,
+      goal,
+      label,
       error: '未找到主持最终总结，无法派活',
     };
   }
-  if (isMeetingClosingStub(finalMsg.text)) {
+  if (isMeetingClosingStub(finalMsg.text) || isModeratorPostCloseStub(finalMsg.text)) {
     return {
       ok: false,
       agentId,
+      sessionKey: execSessionKey,
+      goal,
+      label,
       error: '主持仅回复了「会议结束」等收尾语，缺少可派活的最终总结',
     };
   }
 
   try {
-    const outbound = buildMeetingForwardPayload(config, finalMsg);
+    const outbound = forwardMessage || buildMeetingForwardPayload(config, finalMsg);
     const result = await forwardMessageToAgents({
       agentIds: [agentId],
       message: outbound,
@@ -2109,10 +2140,15 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
     if (result?.ok && normalizedMeetingId) {
       meetingForwardDone.add(normalizedMeetingId);
     }
+    const sentSessionKey = result?.results?.find((entry) => entry.agentId === agentId)?.sessionKey
+      || execSessionKey;
     return {
       ok: Boolean(result?.ok),
       agentId,
-      label: resolveExecAgentLabel(config, agentId),
+      sessionKey: sentSessionKey,
+      forwardMessage: outbound,
+      goal,
+      label,
       deduped: Boolean(result?.deduped),
       error: result?.ok ? undefined : (result?.error || '转发失败'),
     };
@@ -2120,7 +2156,10 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
     return {
       ok: false,
       agentId,
-      label: resolveExecAgentLabel(config, agentId),
+      sessionKey: execSessionKey,
+      forwardMessage,
+      goal,
+      label,
       error: err?.message || String(err),
     };
   }
@@ -2129,6 +2168,8 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
 async function runMeetingBriefingFlow(config) {
   meetingBriefingRunning = true;
   meetingBriefingCancelled = false;
+  activeMeetingForwardConfig = { ...(config || {}) };
+  activeMeetingTranscript = [];
   try {
     await startMeetingGroupRelay(config, {
       chatTurn: (sessionKey, message, opts) => runMeetingChatTurn(sessionKey, message, opts || {}),
@@ -2149,6 +2190,9 @@ async function runMeetingBriefingFlow(config) {
           });
         }
         if (event.type === 'transcript') {
+          if (Array.isArray(event.payload?.messages)) {
+            activeMeetingTranscript = event.payload.messages;
+          }
           broadcastMeetingEvent(event);
           return;
         }
@@ -3346,16 +3390,28 @@ ipcMain.handle('qizi-meeting:start', async (event, config) => {
   }
 });
 
-ipcMain.handle('qizi-meeting:cancel', (event) => {
+ipcMain.handle('qizi-meeting:cancel', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   meetingBriefingCancelled = true;
   if (meetingEngine) meetingEngine.cancel();
+  let forwardResult = null;
+  if (activeMeetingForwardConfig?.postMeetingExecAgentId && activeMeetingTranscript.length > 0) {
+    forwardResult = await maybeForwardMeetingConclusion(
+      activeMeetingForwardConfig,
+      activeMeetingTranscript,
+      activeMeetingMeta?.meetingId,
+    );
+  }
   clearActiveMeeting();
   for (const [runId, run] of [...pendingMeetingRuns.entries()]) {
     if (run.timeout) clearTimeout(run.timeout);
     run.reject(new Error('会议已取消'));
     pendingMeetingRuns.delete(runId);
   }
+  if (forwardResult) {
+    broadcastMeetingEvent({ type: 'post_meeting_forward', payload: forwardResult });
+  }
+  broadcastMeetingEvent({ type: 'cancelled', payload: {} });
   return { ok: true };
 });
 

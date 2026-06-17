@@ -143,12 +143,21 @@ function resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount) {
   };
 }
 
-function capModeratorSpeech(text, messages, roster, moderatorId, roundCount) {
-  const mode = resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount);
+function capModeratorSpeech(text, messages, roster, moderatorId, roundCount, speechKindOverride) {
+  const mode = speechKindOverride
+    ? {
+      kind: speechKindOverride,
+      hardChars: speechKindOverride === 'final_summary' ? 0 : MEETING_MODERATOR_SUMMARY_HARD_CHARS,
+    }
+    : resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount);
+  const raw = String(text || '').trim();
   if (mode.kind === 'final_summary') {
-    return String(text || '').trim();
+    return raw;
   }
-  return capMeetingSpeech(text, mode.hardChars);
+  if (/最终总结|🏁\s*最终总结/i.test(raw)) {
+    return raw;
+  }
+  return capMeetingSpeech(raw, mode.hardChars);
 }
 
 function meetingSpeechGuidance(softMax, hardMax) {
@@ -556,15 +565,26 @@ function buildModeratorIdlePrompt({
   const dispatchHint = buildModeratorDispatchHint(roster, messages);
   const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
   const rounds = normalizeRoundCount(roundCount);
-  const actionHint = speechKind === 'final_summary'
-    ? '请按 **最终总结格式（仅结论+派活）** 收尾并写「会议结束」，**不要 @ 任何人**。'
-    : (speechKind === 'round_summary'
-      ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
-      : (next
-        ? `建议现在 @：@${next.agentId}（${next.label}）`
-        : (remaining.length
-          ? `建议 @ 以下议事 Agent 之一：${remaining.map((r) => `@${r.agentId}（${r.label}）`).join('、')}`
-          : '请 @ 下一位议事 Agent 或作本轮总结。')));
+  if (speechKind === 'final_summary') {
+    return [
+      '[系统 · QiziShell]',
+      '当前处于**最终总结/收尾**阶段。',
+      '若你已发过完整最终总结，请**只**回复「会议结束」四字，**不要**重复总结、**不要** @ 任何人。',
+      '若尚未发最终总结，请按 **最终总结格式（仅结论+派活）** 一次性写完并末尾写「会议结束」，**不要 @ 任何人**。',
+      moderatorSpeechGuidance('final_summary', softChars, hardChars),
+      `本次会议共 ${rounds} 轮；全部结束后写「会议结束」且不要 @ 任何人。`,
+      '',
+      '## 当前群聊记录',
+      transcript || '（暂无）',
+    ].filter(Boolean).join('\n');
+  }
+  const actionHint = speechKind === 'round_summary'
+    ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
+    : (next
+      ? `建议现在 @：@${next.agentId}（${next.label}）`
+      : (remaining.length
+        ? `建议 @ 以下议事 Agent 之一：${remaining.map((r) => `@${r.agentId}（${r.label}）`).join('、')}`
+        : '请 @ 下一位议事 Agent 或作本轮总结。'));
   return [
     '[系统 · QiziShell]',
     '你的上一条发言里没有可被 relay 识别的 @（**必须**写 @agentId，例如 @mo_bao）。',
@@ -583,27 +603,79 @@ function isMeetingCompleteText(text) {
   return isMeetingClosingMessage(text);
 }
 
-/** 主持收尾/派活完成 → relay 必须立即停止（不再 @ 触发议事发言） */
-function isMeetingClosingMessage(text, roundCount = 3) {
-  const t = String(text || '');
-  if (!t.trim()) return false;
-  if (/会议结束|派活完毕|今日讨论结论|按此结论执行|讨论圆满结束|任务已派发|会议收尾/i.test(t)) {
+/** 任务书/开场里复述的「写会议结束」等说明，不是实际收尾 */
+function stripMeetingEndInstructions(text) {
+  return String(text || '')
+    .replace(/写[「『"'""]?会议结束[」』"'""]?/gi, '')
+    .replace(/作最终总结并写[「『"'""]?会议结束[」』"'""]?/gi, '')
+    .replace(/全部结束后[^。\n]{0,48}会议结束/gi, '')
+    .replace(/结束后写[「『"'""]?会议结束[」』"'""]?/gi, '')
+    .replace(/届时[^。\n]{0,24}会议结束/gi, '');
+}
+
+/** 明确的收尾标记（非规则复述） */
+function hasExplicitMeetingEndMarker(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (/\*\*会议结束\*\*\s*$/.test(t)) return true;
+  if (/^\s*\*\*会议结束\*\*\s*$/m.test(t)) return true;
+  if (/^会议结束[。.!！…]*\s*$/m.test(t)) return true;
+  if (/会议已(正式)?结束[。.!！…\s]*$/i.test(t)) return true;
+  const stripped = stripMeetingEndInstructions(t).trim();
+  if (stripped && /会议结束[。.!！…]*\s*$/.test(stripped)) return true;
+  if (stripped && /会议已(正式)?结束[。.!！…\s]*$/i.test(stripped)) return true;
+  return false;
+}
+
+/** 主持已宣布收尾、不再派发的短回复（idle nudge 后常见） */
+function isModeratorPostCloseStub(text) {
+  const t = String(text || '').trim();
+  if (!t || t.length > 500) return false;
+  if (/会议已(正式)?结束/i.test(t) && /不再动作|不再派发|不再发言|等待老大|本主持.*不再/i.test(t)) {
     return true;
   }
-  if (/最终总结/i.test(t) && /派活|派给|执行|@/i.test(t)) {
-    return true;
-  }
-  const rounds = normalizeRoundCount(roundCount);
-  if (new RegExp(`${rounds}\\s*轮.*(结束|完成|完毕)|第\\s*${rounds}\\s*轮.*(结束|完成|完毕)`, 'i').test(t)) {
-    return true;
-  }
-  if (/三轮.*(结束|完成|完毕)/i.test(t) && rounds >= 3) {
-    return true;
-  }
-  if (/派活给\s*@|派给\s*@|执行人.*@/i.test(t)) {
+  if (t.length <= 80 && /会议已(正式)?结束|会议结束/i.test(t) && !/写[「『]会议结束/.test(t)) {
     return true;
   }
   return false;
+}
+
+/** 强收尾信号：即便消息里仍有未处理 @，也应停止 relay */
+function isStrongMeetingClosingMessage(text, roundCount = 3) {
+  const t = String(text || '');
+  if (!t.trim()) return false;
+  if (/派活完毕|今日讨论结论|按此结论执行|讨论圆满结束|任务已派发|会议收尾/i.test(t)) {
+    return true;
+  }
+  if (hasExplicitMeetingEndMarker(t)) {
+    return true;
+  }
+  if (isModeratorPostCloseStub(t)) {
+    return true;
+  }
+  if (/\*\*结论\*\*/i.test(t) && /\*\*派活\*\*/i.test(t) && /会议结束/i.test(t)) {
+    return true;
+  }
+  const rounds = normalizeRoundCount(roundCount);
+  if (new RegExp(`第\\s*${rounds}\\s*轮[^。\\n]{0,24}(已全部)?(结束|完成|完毕)(?=[。.!！…\\s]|$)`, 'i').test(t)) {
+    return true;
+  }
+  if (new RegExp(`${rounds}\\s*轮\\s*(全部|已)?(结束|完成|完毕)(?=[。.!！…\\s]|$)`, 'i').test(t)) {
+    return true;
+  }
+  if (/三轮\s*(全部|已)?(结束|完成|完毕)(?=[。.!！…\s]|$)/i.test(t) && rounds >= 3) {
+    return true;
+  }
+  if ((/派活给\s*@|派给\s*@|执行人[：:]\s*@/i.test(t) || /\*\*派活\*\*/i.test(t))
+    && (/最终总结|今日讨论结论/i.test(t) || hasExplicitMeetingEndMarker(t))) {
+    return true;
+  }
+  return false;
+}
+
+/** 主持收尾/派活完成 → relay 必须立即停止（不再 @ 触发议事发言） */
+function isMeetingClosingMessage(text, roundCount = 3) {
+  return isStrongMeetingClosingMessage(text, roundCount);
 }
 
 function hasUnprocessedModeratorMentions(messages, roster, processed, moderatorAgentId) {
@@ -625,6 +697,7 @@ function hasUnprocessedModeratorMentions(messages, roster, processed, moderatorA
 
 /** 主持收尾：派活/总结里的 @ 仅是指派说明，不触发议事 relay */
 function isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount = 3, messages = []) {
+  if (isModeratorPostCloseStub(text)) return true;
   return isMeetingClosingMessage(text, roundCount);
 }
 
@@ -649,11 +722,19 @@ function hasClosingModeratorMessage(messages, moderatorAgentId, roster = [], pro
     if (msg.speakerLabel === '任务书') continue;
     if (msg.speakerAgentId !== moderatorAgentId) continue;
     if (msg.streaming) continue;
-    if (isModeratorClosingMessage(msg.text, roster, moderatorAgentId, roundCount, messages)) {
+    const text = msg?.text || '';
+    if (isModeratorPostCloseStub(text)) {
       return true;
     }
-    // 只认最近一条主持发言是否收尾；旧消息里遗留的 @ 不再阻塞结束
-    return false;
+    if (!isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount, messages)) {
+      return false;
+    }
+    if (hasUnprocessedModeratorMentions(messages, roster, processed, moderatorAgentId)
+      && !isStrongMeetingClosingMessage(text, roundCount)
+      && !isModeratorPostCloseStub(text)) {
+      return false;
+    }
+    return true;
   }
   return false;
 }
@@ -968,6 +1049,7 @@ module.exports = {
   isMeetingCompleteText,
   isMeetingClosingMessage,
   isModeratorClosingMessage,
+  isModeratorPostCloseStub,
   findFirstClosingModeratorIndex,
   hasUnprocessedModeratorMentions,
   hasClosingModeratorMessage,

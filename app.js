@@ -2475,6 +2475,35 @@ function clearStaleStreamingState(options = {}) {
   return cleared;
 }
 
+/** 清掉未真正发出的排队占位，恢复可正常 chat.send */
+function resetOutboundChatState({ clearQueue = true } = {}) {
+  stopStreamHistoryPoll();
+  externalSessionRunId = null;
+  if (clearQueue) {
+    for (const queued of pendingQueue) {
+      const idx = messages.indexOf(queued);
+      if (idx >= 0) messages.splice(idx, 1);
+    }
+    pendingQueue = [];
+  }
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.who === 'them' && m.queued && !String(m.text || '').trim()) {
+      messages.splice(i, 1);
+      continue;
+    }
+    if (m.queued) {
+      m.queued = false;
+      m.streaming = false;
+    }
+    if (m.external && m.streaming) {
+      m.streaming = false;
+    }
+  }
+  setBusy(false);
+  activeRunId = null;
+}
+
 function isStopCommand(text) {
   const normalized = String(text || '').trim().toLowerCase();
   return normalized === '/stop' || normalized === '/abort';
@@ -2901,32 +2930,78 @@ function loadMessages() {
     messages = [];
     return;
   }
+  messages = readStoredMessagesForSession(currentSessionKey);
+}
+
+function readStoredMessagesForSession(sessionKey) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return [];
   try {
-    const storageKey = messagesStorageKey();
+    const storageKey = messagesStorageKey(sessionKey);
     let raw = localStorage.getItem(storageKey);
-    if (!raw && currentSessionKey === DEFAULT_SESSION_KEY) {
+    if (!raw && sessionKey === DEFAULT_SESSION_KEY) {
       raw = localStorage.getItem(LEGACY_STORAGE_KEY);
       if (raw) {
         localStorage.setItem(storageKey, raw);
         localStorage.removeItem(LEGACY_STORAGE_KEY);
       }
     }
-    if (!raw) {
-      messages = [];
-      return;
-    }
+    if (!raw) return [];
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      messages = finalizeHistoryMessages(
-        pruneMessagesByRetention(
-          parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
-        ),
-      );
-      syncCurrentRunIdFromMessages();
-    }
+    if (!Array.isArray(parsed)) return [];
+    return finalizeHistoryMessages(
+      pruneMessagesByRetention(
+        parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
+      ),
+    );
   } catch {
-    messages = [];
+    return [];
   }
+}
+
+async function pullGatewaySessionToLocal(sessionKey) {
+  if (!sessionKey || !window.qizi?.loadHistoryForSession) return false;
+  try {
+    const result = await window.qizi.loadHistoryForSession({ sessionKey });
+    if (!result?.ok || !Array.isArray(result.messages) || result.messages.length === 0) {
+      return false;
+    }
+    const local = readStoredMessagesForSession(sessionKey);
+    const merged = mergeGatewayHistory(local, result.messages);
+    persistMessagesForSession(sessionKey, merged);
+    if (sessionKey === currentSessionKey) {
+      messages = merged;
+      syncCurrentRunIdFromMessages();
+      resetOutboundChatState({ clearQueue: true });
+      flushSaveMessages();
+      render();
+    }
+    return true;
+  } catch (err) {
+    console.warn('[qizi] 同步执行 Agent 会话失败', err);
+    return false;
+  }
+}
+
+async function openExecAgentAfterMeetingForward(detail) {
+  const agentId = String(detail?.agentId || '').trim();
+  const sessionKey = String(detail?.sessionKey || '').trim();
+  const label = detail?.label || agentId || '执行 Agent';
+  if (!agentId) return;
+
+  if (window.MeetingView?.isVisible?.()) {
+    window.MeetingView.leaveView();
+  }
+
+  if (agentId !== currentAgentId) {
+    await switchToAgent(agentId);
+  }
+
+  const targetKey = sessionKey || currentSessionKey;
+  // 派活已由 Gateway chat.send 写入；只拉历史，勿再本地伪造一条 user 转发（会干扰合并与发送状态）
+  await pullGatewaySessionToLocal(targetKey);
+  resetOutboundChatState({ clearQueue: true });
+  render();
+  setStatus(`会议派活已送达 ${label}，请在该会话继续执行`, 'ok');
 }
 
 function updateStreamingBubble(runId) {
@@ -3070,6 +3145,7 @@ async function handleExternalSessionChat(payload) {
     stopStreamHistoryPoll();
     await syncHistoryFromGateway();
     clearStaleStreamingState({ force: true });
+    resetOutboundChatState({ clearQueue: false });
     render();
     flushSaveMessages();
     setStatus('已连接', 'ok');
@@ -3876,6 +3952,7 @@ async function switchToAgent(agentId) {
     } else {
       clearStaleStreamingState({ force: true });
     }
+    resetOutboundChatState({ clearQueue: true });
     await refreshCurrentModelBadge();
     await refreshSessionInfo();
     setStatus('已连接', 'ok');
@@ -6269,6 +6346,12 @@ function restoreMeetingTitlebar(clearBackup = false) {
   }
   updateAgentTitleLabel(getCurrentAgentInfo());
 }
+
+window.addEventListener('qizi-meeting-exec-forward', (event) => {
+  const detail = event?.detail || {};
+  if (!detail.ok || !detail.agentId) return;
+  void openExecAgentAfterMeetingForward(detail);
+});
 
 window.addEventListener('qizi-meeting-entered', (event) => {
   applyMeetingTitlebar(event.detail || {});

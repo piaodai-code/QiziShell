@@ -14,6 +14,7 @@ const {
   isMeetingCompleteText,
   isMeetingClosingMessage,
   isModeratorClosingMessage,
+  isModeratorPostCloseStub,
   hasClosingModeratorMessage,
   findFirstClosingModeratorIndex,
   capMeetingSpeech,
@@ -189,6 +190,16 @@ async function startMeetingGroupRelay(config, deps) {
     if (isIdleWatchdogPaused()) return 'continue';
 
     const messages = visible || transcript.getMessages();
+    if (hasClosingModeratorMessage(
+      messages,
+      config.moderatorAgentId,
+      roster,
+      processedMentionKeys,
+      roundCount,
+    )) {
+      return 'break';
+    }
+
     if (findNextMention(messages, roster, processedMentionKeys, config.moderatorAgentId)) {
       return 'continue';
     }
@@ -321,6 +332,7 @@ async function startMeetingGroupRelay(config, deps) {
         roster,
         config.moderatorAgentId,
         roundCount,
+        speechMode?.kind,
       );
       if (!trimmedNudge) {
         onEvent?.({
@@ -520,13 +532,16 @@ async function startMeetingGroupRelay(config, deps) {
     staleParticipantLoops = 0;
 
     if (lastIsModerator) {
-      if (isModeratorClosingMessage(
-        last.text,
-        roster,
-        config.moderatorAgentId,
-        roundCount,
+      if (hasClosingModeratorMessage(
         visible,
+        config.moderatorAgentId,
+        roster,
+        processedMentionKeys,
+        roundCount,
       )) {
+        break;
+      }
+      if (isModeratorPostCloseStub(last.text)) {
         break;
       }
       const lastIndex = visible.length - 1;
@@ -632,11 +647,11 @@ function findNextMention(messages, roster, processed, moderatorAgentId, roundCou
     const text = msg?.text || '';
     if (!text.trim()) continue;
 
-    if (isMeetingClosingMessage(text, roundCount)) {
+    if (isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount, messages)) {
       for (const skipped of parseMeetingMentions(text, roster, moderatorAgentId)) {
         processed.add(`${i}:${skipped.agentId}`);
       }
-      continue;
+      return null;
     }
 
     const mentions = parseMeetingMentions(text, roster, moderatorAgentId);

@@ -748,7 +748,8 @@
   }
 
   function handleEvent(event) {
-    if (!running || !event) return;
+    if (!event) return;
+    if (!running && event.type !== 'post_meeting_forward') return;
 
     if (event.type === 'preparing') {
       setStatus('正在准备任务书…');
@@ -831,11 +832,17 @@
       void refreshHistorySelectAndLoadDefault();
     }
     if (event.type === 'post_meeting_forward' && event.payload) {
-      const { ok, label, error } = event.payload;
+      const { ok, label, error, deduped, agentId, sessionKey } = event.payload;
       if (ok) {
-        setStatus(`会议已结束 · 已派活至 ${label || 'Agent'}`);
+        const suffix = deduped ? '（此前已派活）' : '';
+        setStatus(`会议已结束 · 已派活至 ${label || agentId || 'Agent'}${suffix}`);
       } else {
         setStatus(`会议已结束 · 派活失败：${error || '未知错误'}`);
+      }
+      if (sessionKey) {
+        window.dispatchEvent(new CustomEvent('qizi-meeting-exec-forward', {
+          detail: { ...event.payload },
+        }));
       }
     }
     if (event.type === 'error') {
