@@ -2514,7 +2514,7 @@ async function handleDebugCommand(text) {
     const current = await window.qizi.getDebugMode();
     const mode = current?.mode || '';
     applyLocalDebugMode(mode);
-    setStatus(`Debug 模式：${mode || 'off'}（来源：${current?.source || 'settings'}）`, 'ok');
+    setStatus('', '');
     return true;
   }
 
@@ -2529,7 +2529,7 @@ async function handleDebugCommand(text) {
     return true;
   }
   applyLocalDebugMode(result.mode);
-  setStatus(`Debug 模式已设为：${result.mode || 'off'}（来源：${result.source || 'settings'}）`, 'ok');
+  setStatus('', '');
   return true;
 }
 
