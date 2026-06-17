@@ -173,10 +173,13 @@
   function renderBubbleHtml(text, streaming) {
     const plain = String(text || '').trim();
     if (!plain) return '';
+    const wrap = window.QiziShellText?.wrapInlineEmojisForHtml;
     if (streaming) {
-      return `<pre class="msg-stream-plain">${escapeHtml(plain)}</pre>`;
+      const body = wrap ? wrap(plain, { escape: true }) : escapeHtml(plain);
+      return `<pre class="msg-stream-plain">${body}</pre>`;
     }
-    return parseMarkdown(plain);
+    const mdInput = wrap ? wrap(plain) : plain;
+    return parseMarkdown(mdInput);
   }
 
   function formatRecordDate(iso) {

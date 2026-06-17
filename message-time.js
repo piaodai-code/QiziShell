@@ -52,6 +52,18 @@
     return match ? match[1].trim() : '';
   }
 
+  function stripLeadingEnvelopeTimestamp(text) {
+    return String(text || '')
+      .replace(/^\[[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}[^\]]*\]\s*/m, '')
+      .trim();
+  }
+
+  function stripSenderUntrustedMetadata(text) {
+    return String(text || '')
+      .replace(/^Sender \(untrusted metadata\):\s*```json[\s\S]*?```\s*/m, '')
+      .trim();
+  }
+
   function coerceTimestampMs(value) {
     if (typeof value === 'number' && Number.isFinite(value)) {
       return value < 1e12 ? value * 1000 : value;
@@ -143,6 +155,8 @@
   const api = {
     formatGatewayEnvelopeTime,
     parseLeadingEnvelopeTimestamp,
+    stripLeadingEnvelopeTimestamp,
+    stripSenderUntrustedMetadata,
     extractMessageSentTimeFromRaw,
     resolveMessageOriginalSentTime,
   };
