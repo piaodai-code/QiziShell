@@ -162,7 +162,6 @@ function forwardHistoryFingerprint(msg) {
 
 function dedupeForwardHistoryMessages(list) {
   if (!Array.isArray(list) || list.length === 0) return list;
-  const seen = new Set();
   const out = [];
   for (const msg of list) {
     if (msg?.who !== 'me') {
@@ -174,8 +173,9 @@ function dedupeForwardHistoryMessages(list) {
       out.push(msg);
       continue;
     }
-    if (seen.has(fp)) continue;
-    seen.add(fp);
+    const prev = out.length > 0 ? out[out.length - 1] : null;
+    const prevFp = prev?.who === 'me' ? forwardHistoryFingerprint(prev) : null;
+    if (prevFp && prevFp === fp) continue;
     out.push(msg);
   }
   return out;
@@ -197,6 +197,14 @@ function buildForwardDedupeScope(agentIds, message, dedupeScope) {
 
 function buildForwardIdempotencyKey(scope, agentId) {
   return `qizi-fwd-${scope}-${agentId}`.slice(0, 120);
+}
+
+function isMeetingForwardScope(dedupeScope) {
+  return typeof dedupeScope === 'string' && dedupeScope.startsWith('meeting-fwd:');
+}
+
+function buildManualForwardAttemptKey() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function dedupeAgentEntries(rawAgents) {
@@ -1853,8 +1861,14 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
   if (!payload || typeof payload.runId !== 'string') return;
   if (activeMeetingSessionKey && payload.sessionKey === activeMeetingSessionKey) return;
   if (isMeetingA2ASessionKey(payload.sessionKey)) return;
-  if (!allowWhileBusy && activeRuns.size > 0) return;
-  if (!isPayloadForCurrentSession(payload)) return;
+
+  const sessionKey = String(payload.sessionKey || '').trim();
+  const forCurrentSession = !sessionKey || sessionKey === getSessionKey();
+  // Shell 正在当前 session 发消息时，忽略同 session 的外部流（owned run 优先）
+  if (!allowWhileBusy && activeRuns.size > 0 && forCurrentSession) return;
+
+  const isForwardRun = pendingForwardRuns.has(payload.runId);
+  const passive = isForwardRun || !forCurrentSession;
 
   const gatewayRunId = payload.runId;
   let run = externalSessionRuns.get(gatewayRunId);
@@ -1864,7 +1878,7 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
   }
   run.lastEventAt = Date.now();
 
-  const sessionKey = payload.sessionKey;
+  const broadcastBase = { sessionKey, gatewayRunId, passive };
 
   if (payload.state === 'delta') {
     const next = resolveDeltaText(run.fullText, payload);
@@ -1872,9 +1886,8 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
       if (payload.replace === true) {
         run.fullText = next;
         broadcastToRenderers('openclaw:session-chat', {
+          ...broadcastBase,
           state: 'delta',
-          sessionKey,
-          gatewayRunId,
           delta: next,
           replace: true,
           text: next,
@@ -1884,9 +1897,8 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
         run.fullText = next;
         if (delta) {
           broadcastToRenderers('openclaw:session-chat', {
+            ...broadcastBase,
             state: 'delta',
-            sessionKey,
-            gatewayRunId,
             delta,
             replace: false,
             text: next,
@@ -1903,52 +1915,36 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
       run.fullText = finalText;
     }
     broadcastToRenderers('openclaw:session-chat', {
+      ...broadcastBase,
       state: 'final',
-      sessionKey,
-      gatewayRunId,
       text: run.fullText,
     });
     externalSessionRuns.delete(gatewayRunId);
-    finishForwardRun(gatewayRunId);
+    if (isForwardRun) finishForwardRun(gatewayRunId);
     return;
   }
 
   if (payload.state === 'aborted') {
     broadcastToRenderers('openclaw:session-chat', {
+      ...broadcastBase,
       state: 'aborted',
-      sessionKey,
-      gatewayRunId,
       text: run.fullText,
     });
     externalSessionRuns.delete(gatewayRunId);
-    finishForwardRun(gatewayRunId);
+    if (isForwardRun) finishForwardRun(gatewayRunId);
     return;
   }
 
   if (payload.state === 'error') {
     broadcastToRenderers('openclaw:session-chat', {
+      ...broadcastBase,
       state: 'error',
-      sessionKey,
-      gatewayRunId,
       error: payload.errorMessage || 'chat error',
       text: run.fullText,
     });
     externalSessionRuns.delete(gatewayRunId);
-    finishForwardRun(gatewayRunId);
+    if (isForwardRun) finishForwardRun(gatewayRunId);
   }
-}
-
-function handleForwardGatewayChatEvent(payload) {
-  if (!payload || typeof payload.runId !== 'string') return false;
-  const pending = pendingForwardRuns.get(payload.runId);
-  if (!pending) return false;
-  const payloadKey = String(payload.sessionKey || '').trim();
-  if (payloadKey && pending.sessionKey && payloadKey !== pending.sessionKey) return false;
-  if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
-    finishForwardRun(payload.runId);
-  }
-  // 会议派活/手动转发：不在 Shell 里模拟外部流式会话，避免 busy 卡死导致后续消息只排队不发
-  return true;
 }
 
 function broadcastMeetingEvent(event) {
@@ -2294,7 +2290,6 @@ function handleGatewayChatEvent(payload) {
     sessionKey: payload.sessionKey || null,
     activeRunIds: [...activeRuns.keys()],
   });
-  if (handleForwardGatewayChatEvent(payload)) return;
   handleExternalSessionChatEvent(payload);
 }
 
@@ -3100,18 +3095,24 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
     return { ok: false, error: '转发内容为空' };
   }
 
+  const meetingForward = isMeetingForwardScope(dedupeScope);
   const scope = buildForwardDedupeScope(ids, trimmed, dedupeScope);
-  pruneRecentForwardScopes();
-  loadForwardSentRegistry();
-  const recentTs = recentForwardScopes.get(scope);
-  if (recentTs && Date.now() - recentTs < FORWARD_DEDUP_MS) {
-    return { ok: true, deduped: true, results: [] };
+  const inFlightKey = meetingForward ? scope : buildManualForwardAttemptKey();
+
+  if (meetingForward) {
+    pruneRecentForwardScopes();
+    loadForwardSentRegistry();
+    const recentTs = recentForwardScopes.get(scope);
+    if (recentTs && Date.now() - recentTs < FORWARD_DEDUP_MS) {
+      return { ok: true, deduped: true, results: [] };
+    }
+    if (ids.every((agentId) => isForwardAlreadySent(agentId, scope) || isForwardBodyAlreadySent(agentId, trimmed))) {
+      return { ok: true, deduped: true, results: [] };
+    }
   }
-  if (ids.every((agentId) => isForwardAlreadySent(agentId, scope) || isForwardBodyAlreadySent(agentId, trimmed))) {
-    return { ok: true, deduped: true, results: [] };
-  }
-  if (forwardInFlight.has(scope)) {
-    return forwardInFlight.get(scope);
+
+  if (forwardInFlight.has(inFlightKey)) {
+    return forwardInFlight.get(inFlightKey);
   }
 
   const work = (async () => {
@@ -3135,8 +3136,10 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
       const results = [];
       for (const agent of targets) {
         const sessionKey = pinnedSessionKeyForAgent(agent.id, mainKey);
-        const idempotencyKey = buildForwardIdempotencyKey(scope, agent.id);
-        if (isForwardAlreadySent(agent.id, scope) || isForwardBodyAlreadySent(agent.id, trimmed)) {
+        const idempotencyKey = meetingForward
+          ? buildForwardIdempotencyKey(scope, agent.id)
+          : `qizi-fwd-${inFlightKey}-${agent.id}`.slice(0, 120);
+        if (meetingForward && (isForwardAlreadySent(agent.id, scope) || isForwardBodyAlreadySent(agent.id, trimmed))) {
           results.push({
             agentId: agent.id,
             sessionKey,
@@ -3154,7 +3157,15 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
             idempotencyKey,
           });
           const gatewayRunId = (ack && ack.runId) || idempotencyKey;
-          markForwardSent(agent.id, scope, trimmed);
+          debugEvent('session', 'forward_sent', {
+            agentId: agent.id,
+            sessionKey,
+            runId: gatewayRunId,
+            idempotencyKey,
+          });
+          if (meetingForward) {
+            markForwardSent(agent.id, scope, trimmed);
+          }
           watchForwardSession(sessionKey, agent.id, gatewayRunId);
           results.push({
             agentId: agent.id,
@@ -3181,7 +3192,7 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
         };
       }
       pruneForwardWatchState();
-      if (failed.length === 0) {
+      if (meetingForward && failed.length === 0) {
         recentForwardScopes.set(scope, Date.now());
       }
       const newSends = results.filter((entry) => entry.ok && !entry.deduped);
@@ -3202,11 +3213,11 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
     } catch (err) {
       return { ok: false, error: formatGatewayError(err) };
     } finally {
-      forwardInFlight.delete(scope);
+      forwardInFlight.delete(inFlightKey);
     }
   })();
 
-  forwardInFlight.set(scope, work);
+  forwardInFlight.set(inFlightKey, work);
   return work;
 }
 

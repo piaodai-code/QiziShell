@@ -255,6 +255,9 @@ const MESSAGE_RETENTION_TAIL_WITHOUT_MS = 300;
 // 本地写完就存；Gateway history 合并仍关闭，避免干扰流式
 const ENABLE_LOCAL_MESSAGE_SAVE = true;
 const ENABLE_GATEWAY_HISTORY_SYNC = false;
+const PASSIVE_SESSION_REFRESH_MS = 350;
+const FORWARD_HISTORY_RETRY_MS = 400;
+const FORWARD_HISTORY_MAX_RETRIES = 5;
 
 let currentSessionKey = DEFAULT_SESSION_KEY;
 let currentAgentId = 'main';
@@ -262,6 +265,9 @@ let currentAgentId = 'main';
 let chatScopeEpoch = 0;
 /** @type {Map<string, object>} */
 let agentCatalog = new Map();
+
+/** @type {Map<string, ReturnType<typeof setTimeout>>} */
+const passiveSessionRefreshTimers = new Map();
 
 let saveTimer = null;
 let streamRenderTimer = null;
@@ -1676,10 +1682,18 @@ async function submitForward() {
     const failed = Array.isArray(result.results)
       ? result.results.filter((entry) => !entry.ok)
       : [];
+    const sent = Array.isArray(result.results)
+      ? result.results.filter((entry) => entry.ok && !entry.deduped)
+      : [];
+    const deduped = Array.isArray(result.results)
+      ? result.results.filter((entry) => entry.deduped)
+      : [];
     if (failed.length > 0) {
       setStatus(`部分转发失败（${failed.length}）`, 'error');
-    } else if (result.deduped) {
+    } else if (sent.length === 0 && deduped.length > 0) {
       setStatus('已转发（重复请求已忽略）', 'ok');
+    } else if (deduped.length > 0) {
+      setStatus(`已转发 ${sent.length} 个，${deduped.length} 个重复已跳过`, 'ok');
     } else {
       setStatus('已转发', 'ok');
     }
@@ -1875,14 +1889,19 @@ function assistantTextsMatch(a, b) {
 /*
  * 消息同步架构
  * ─────────────────────────────────────────────────────────────
- * 本地发送（owned run）：
- *   chat.send 前先 registerActiveRun，避免 Gateway 早到的 delta 丢失
- *   进行中：仅 IPC openclaw:delta → applyStreamingDelta，禁止 history merge
- *   结束：openclaw:done → finishAssistant → flushSaveMessages（本地归档）
- *   历史窗口：只读 localStorage，近两个月，不参与流式
+ * 1. Shell 发送（owned run）
+ *    chat.send 前 registerActiveRun；流式只走 IPC delta；busy 仅在此路径置位
  *
- * 外部 Webchat / 断线续传：session-chat 或 pollExternalStreamHistory
- * 30 天保留：pruneMessagesByRetention / serializeMessagesForStorage，不参与实时流式
+ * 2. Gateway 被动活动（转发 / Webchat / 其他端）
+ *    统一走 openclaw:session-chat；passive 不占 busy
+ *    转发与非当前 session：只 refreshSessionFromGateway（顺序以 Gateway 为准）
+ *    当前 session 的 Webchat：可流式 delta，结束时 refresh
+ *
+ * 3. 切换 Agent
+ *    读该 session 本地存档（由 2 持续更新）
+ *
+ * 转发 = 对目标 session 的 chat.send，成功后 refreshSessionFromGateway 补上 user 条；
+ * agent 回复由 2 的 session-chat 流式写入。
  */
 
 function getAssistantMessageBeforeTarget(target) {
@@ -1983,18 +2002,23 @@ function isAssistantReplyComplete(msg) {
   return msg?.who === 'them' && Boolean(String(msg.text || '').trim()) && !msg.streaming;
 }
 
-function findExternalStreamingTarget(gatewayRunId) {
+function findPassiveStreamingTarget(list, gatewayRunId) {
+  const items = Array.isArray(list) ? list : messages;
   if (gatewayRunId) {
-    const byGateway = messages.find(
+    const byGateway = items.find(
       (m) => m.who === 'them' && m.external && m.streaming && m.gatewayRunId === gatewayRunId,
     );
     if (byGateway) return byGateway;
   }
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
+  for (let i = items.length - 1; i >= 0; i -= 1) {
+    const msg = items[i];
     if (msg.who === 'them' && msg.external && msg.streaming) return msg;
   }
   return null;
+}
+
+function findExternalStreamingTarget(gatewayRunId) {
+  return findPassiveStreamingTarget(messages, gatewayRunId);
 }
 
 function stripForwardMetadataEnvelope(text) {
@@ -2056,9 +2080,6 @@ function forwardUserMessageFingerprint(input, { bodyOnly = false } = {}) {
 
 function historyForwardFingerprintsMatch(a, b) {
   if (!a || !b || a.who !== 'me' || b.who !== 'me') return false;
-  const afBody = forwardUserMessageFingerprint(a, { bodyOnly: true });
-  const bfBody = forwardUserMessageFingerprint(b, { bodyOnly: true });
-  if (afBody && bfBody && afBody === bfBody) return true;
   const af = forwardUserMessageFingerprint(a);
   const bf = forwardUserMessageFingerprint(b);
   return Boolean(af && bf && af === bf);
@@ -2066,7 +2087,6 @@ function historyForwardFingerprintsMatch(a, b) {
 
 function dedupeForwardUserMessages(list) {
   if (!Array.isArray(list) || list.length === 0) return list;
-  const seenFull = new Set();
   const out = [];
   for (const msg of list) {
     if (msg?.who !== 'me') {
@@ -2075,8 +2095,11 @@ function dedupeForwardUserMessages(list) {
     }
     const fullFp = forwardUserMessageFingerprint(msg);
     if (fullFp) {
-      if (seenFull.has(fullFp)) continue;
-      seenFull.add(fullFp);
+      const prev = out.length > 0 ? out[out.length - 1] : null;
+      // 仅去掉相邻重复（merge 双写）；隔了 assistant 的相同内容转发应保留
+      if (prev?.who === 'me' && forwardUserMessageFingerprint(prev) === fullFp) {
+        continue;
+      }
       out.push(msg);
       continue;
     }
@@ -2958,27 +2981,95 @@ function readStoredMessagesForSession(sessionKey) {
   }
 }
 
-async function pullGatewaySessionToLocal(sessionKey) {
+function stripInboundExternalMessages(list) {
+  if (!Array.isArray(list)) return [];
+  return list.filter((m) => !m?.external);
+}
+
+/** 被动同步（转发/Webchat）：Gateway 历史为唯一顺序权威，只补本地附件 */
+function mergePassiveSessionFromGateway(localMessages, serverMessages) {
+  const local = stripInboundExternalMessages(localMessages);
+  const server = dedupeForwardUserMessages(
+    (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
+  );
+  if (!server.length) return finalizeHistoryMessages(local);
+  return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
+}
+
+function schedulePassiveSessionRefresh(sessionKey, { immediate = false } = {}) {
+  const key = String(sessionKey || '').trim();
+  if (!key) return;
+  const prev = passiveSessionRefreshTimers.get(key);
+  if (prev) clearTimeout(prev);
+  if (immediate) {
+    passiveSessionRefreshTimers.delete(key);
+    void refreshSessionFromGateway(key);
+    return;
+  }
+  passiveSessionRefreshTimers.set(key, setTimeout(() => {
+    passiveSessionRefreshTimers.delete(key);
+    void refreshSessionFromGateway(key);
+  }, PASSIVE_SESSION_REFRESH_MS));
+}
+
+async function refreshSessionFromGateway(sessionKey, options = {}) {
   if (!sessionKey || !window.qizi?.loadHistoryForSession) return false;
+  const waitForChange = options.waitForChange === true;
+  const maxRetries = Number.isFinite(options.retries) ? options.retries : 0;
+  let baselineSig = null;
+  if (waitForChange) {
+    baselineSig = historySignature(readStoredMessagesForSession(sessionKey));
+  }
   try {
-    const result = await window.qizi.loadHistoryForSession({ sessionKey });
-    if (!result?.ok || !Array.isArray(result.messages) || result.messages.length === 0) {
-      return false;
+    let result = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      result = await window.qizi.loadHistoryForSession({ sessionKey });
+      if (!result?.ok || !Array.isArray(result.messages)) {
+        return false;
+      }
+      const sig = historySignature(result.messages);
+      const changed = baselineSig == null || sig !== baselineSig;
+      if (!waitForChange) {
+        if (result.messages.length > 0 || attempt >= maxRetries) break;
+      } else if (changed || attempt >= maxRetries) {
+        break;
+      }
+      await new Promise((resolve) => {
+        setTimeout(resolve, FORWARD_HISTORY_RETRY_MS);
+      });
     }
     const local = readStoredMessagesForSession(sessionKey);
-    const merged = mergeGatewayHistory(local, result.messages);
-    persistMessagesForSession(sessionKey, merged);
-    if (sessionKey === currentSessionKey) {
-      messages = merged;
-      syncCurrentRunIdFromMessages();
-      resetOutboundChatState({ clearQueue: true });
-      flushSaveMessages();
-      render();
-    }
+    const merged = mergePassiveSessionFromGateway(local, result.messages);
+    commitSessionMessages(sessionKey, merged);
     return true;
   } catch (err) {
-    console.warn('[qizi] 同步执行 Agent 会话失败', err);
+    console.warn('[qizi] 同步 session 历史失败', sessionKey, err);
     return false;
+  }
+}
+
+function commitSessionMessages(sessionKey, nextMessages) {
+  const finalized = finalizeHistoryMessages(nextMessages);
+  persistMessagesForSession(sessionKey, finalized);
+  if (sessionKey === currentSessionKey) {
+    messages = finalized;
+    syncCurrentRunIdFromMessages();
+    flushSaveMessages();
+    render();
+  }
+}
+
+async function refreshForwardTargetSessions(result) {
+  const sessionKeys = [...new Set(
+    (Array.isArray(result?.results) ? result.results : [])
+      .filter((entry) => entry?.ok && entry.sessionKey && !entry.deduped)
+      .map((entry) => entry.sessionKey),
+  )];
+  for (const sessionKey of sessionKeys) {
+    await refreshSessionFromGateway(sessionKey, {
+      retries: FORWARD_HISTORY_MAX_RETRIES,
+      waitForChange: true,
+    });
   }
 }
 
@@ -2997,8 +3088,10 @@ async function openExecAgentAfterMeetingForward(detail) {
   }
 
   const targetKey = sessionKey || currentSessionKey;
-  // 派活已由 Gateway chat.send 写入；只拉历史，勿再本地伪造一条 user 转发（会干扰合并与发送状态）
-  await pullGatewaySessionToLocal(targetKey);
+  await refreshSessionFromGateway(targetKey, {
+    retries: FORWARD_HISTORY_MAX_RETRIES,
+    waitForChange: true,
+  });
   resetOutboundChatState({ clearQueue: true });
   render();
   setStatus(`会议派活已送达 ${label}，请在该会话继续执行`, 'ok');
@@ -3093,63 +3186,72 @@ function startSessionWatch() {
   }, SESSION_WATCH_MS);
 }
 
-async function handleExternalSessionChat(payload) {
+async function applyGatewaySessionChat(payload) {
   if (!payload || isLocalOwnedActiveRun()) return;
   if (window.MeetingView?.isVisible?.()) return;
-  if (payload.sessionKey && payload.sessionKey !== currentSessionKey) return;
+
+  const sessionKey = String(payload.sessionKey || currentSessionKey).trim() || currentSessionKey;
+  const isViewing = sessionKey === currentSessionKey;
+
+  // 转发 / 非当前 session：只以 Gateway 历史为准，避免先插入助手气泡再 merge 导致顺序颠倒
+  if (payload.passive) {
+    const terminal = payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error';
+    schedulePassiveSessionRefresh(sessionKey, { immediate: terminal });
+    if (isViewing && terminal && !busy) setStatus('已连接', 'ok');
+    return;
+  }
 
   const gatewayRunId = payload.gatewayRunId || null;
+  let list = isViewing ? messages : [...readStoredMessagesForSession(sessionKey)];
 
   if (payload.state === 'delta') {
-    let target = findExternalStreamingTarget(gatewayRunId);
+    let target = findPassiveStreamingTarget(list, gatewayRunId);
     if (!target) {
-      currentRunId += 1;
+      const runId = isViewing ? (++currentRunId) : `gw-${String(gatewayRunId || Date.now())}`;
       target = {
         who: 'them',
         text: payload.text || payload.delta || '',
         time: now(),
         streaming: true,
-        runId: currentRunId,
+        runId,
         external: true,
         gatewayRunId,
       };
-      messages.push(target);
-      startExternalStreamHistoryPoll(target.runId);
+      list = [...list, target];
     } else {
-      if (payload.text && payload.text.length >= (target.text || '').length) {
-        target.text = payload.text;
+      const updated = { ...target };
+      if (payload.text && payload.text.length >= (updated.text || '').length) {
+        updated.text = payload.text;
       } else if (payload.delta) {
-        applyStreamingDelta(payload.delta, target.runId, payload.replace === true);
+        const incoming = String(payload.delta || '');
+        if (incoming) {
+          updated.text = payload.replace === true
+            ? incoming
+            : `${updated.text || ''}${incoming}`;
+        }
       }
-      target.streaming = true;
-      target.external = true;
-      if (gatewayRunId) target.gatewayRunId = gatewayRunId;
+      updated.streaming = true;
+      updated.external = true;
+      if (gatewayRunId) updated.gatewayRunId = gatewayRunId;
+      list = list.map((m) => (m === target ? updated : m));
+      target = updated;
     }
-    externalSessionRunId = gatewayRunId;
-    activeRunId = target.runId ?? activeRunId;
-    setBusy(true);
-    scheduleStreamingUpdate(target.runId);
-    setStatus('Webchat 回复中…', 'pending');
+    commitSessionMessages(sessionKey, list);
+    if (isViewing) {
+      scheduleStreamingUpdate(target.runId);
+      setStatus('Webchat 回复中…', 'pending');
+    }
     return;
   }
 
   if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
-    const target = findExternalStreamingTarget(gatewayRunId);
-    if (target) {
-      if (payload.text && payload.text.length >= (target.text || '').length) {
-        target.text = payload.text;
-      }
-      target.streaming = false;
-    }
-    externalSessionRunId = null;
-    stopStreamHistoryPoll();
-    await syncHistoryFromGateway();
-    clearStaleStreamingState({ force: true });
-    resetOutboundChatState({ clearQueue: false });
-    render();
-    flushSaveMessages();
-    setStatus('已连接', 'ok');
+    schedulePassiveSessionRefresh(sessionKey, { immediate: true });
+    if (isViewing && !busy) setStatus('已连接', 'ok');
   }
+}
+
+async function handleExternalSessionChat(payload) {
+  return applyGatewaySessionChat(payload);
 }
 
 function isMessageInCurrentChatScope(message) {
@@ -4612,7 +4714,7 @@ if (window.qizi.onGatewayStatus) {
 
 if (window.qizi.onSessionChat) {
   window.qizi.onSessionChat((payload) => {
-    handleExternalSessionChat(payload);
+    void applyGatewaySessionChat(payload);
   });
 }
 
@@ -4632,7 +4734,19 @@ if (window.qizi.onSideResult) {
   });
 }
 
-// 转发回复由 main → session-chat 事件驱动，不再额外全量 sync
+if (window.qizi.onForwardSent) {
+  window.qizi.onForwardSent((payload) => {
+    void refreshForwardTargetSessions({
+      results: (payload?.targets || []).map((target) => ({
+        ok: true,
+        sessionKey: target.sessionKey,
+        deduped: false,
+      })),
+    });
+  });
+}
+
+// Gateway 被动活动统一走 onSessionChat → applyGatewaySessionChat
 
 // 探活 + 事件监听：主进程会推 done/error, 正常走那两个路径收尾
 // 不再加 30s 兜底——LLM thinking 长时会被误判"已发完的消息末尾追加 [错误]"
