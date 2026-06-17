@@ -693,6 +693,8 @@ function loadShellSettings() {
 
 function saveShellSettings(next) {
   const current = loadShellSettings();
+  const hasDebugMode = Object.prototype.hasOwnProperty.call(next || {}, 'debugMode');
+  const nextDebugMode = hasDebugMode ? next.debugMode : current.debugMode;
   const merged = {
     wsUrl: typeof next.wsUrl === 'string' ? next.wsUrl.trim().replace(/\/$/, '') : current.wsUrl,
     token: typeof next.token === 'string' && next.token.trim()
@@ -700,7 +702,7 @@ function saveShellSettings(next) {
       : current.token,
     launchAtLogin: next.launchAtLogin == null ? current.launchAtLogin === true : next.launchAtLogin === true,
     showMainOnLaunch: next.showMainOnLaunch == null ? current.showMainOnLaunch !== false : next.showMainOnLaunch !== false,
-    debugMode: normalizeDebugMode(next.debugMode || current.debugMode),
+    debugMode: normalizeDebugMode(nextDebugMode),
   };
   if (!merged.wsUrl) delete merged.wsUrl;
   if (!merged.token) delete merged.token;
