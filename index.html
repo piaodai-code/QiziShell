@@ -159,6 +159,10 @@
         <span class="meeting-composer-toggle-icon" aria-hidden="true">▴</span>
       </button>
       <div class="meeting-composer-dock" id="meeting-composer-dock" hidden>
+        <div class="composer-quote meeting-composer-quote" id="meeting-composer-quote" hidden>
+          <button type="button" class="composer-quote-remove" id="meeting-composer-quote-remove" title="移除引用" aria-label="移除引用">×</button>
+          <span class="composer-quote-text" id="meeting-composer-quote-text"></span>
+        </div>
         <div class="composer-input-wrap meeting-composer-input-wrap">
           <textarea id="meeting-owner-input" placeholder="私信主持，仅主持可见…" rows="1"></textarea>
           <button type="button" class="composer-send-btn" id="meeting-owner-send-btn" title="发送" aria-label="发送" disabled>
@@ -401,6 +405,14 @@
       <div class="meeting-end-confirm-actions">
         <button type="button" class="meeting-end-confirm-btn meeting-end-confirm-btn-secondary" id="meeting-end-confirm-no">否</button>
         <button type="button" class="meeting-end-confirm-btn meeting-end-confirm-btn-primary" id="meeting-end-confirm-yes">是</button>
+      </div>
+    </div>
+  </div>
+  <div class="meeting-end-confirm-modal" id="meeting-quote-saved-modal" hidden role="dialog" aria-modal="true" aria-labelledby="meeting-quote-saved-title">
+    <div class="meeting-end-confirm-panel">
+      <p class="meeting-end-confirm-text" id="meeting-quote-saved-title">已引用，退出会议后可在私聊中发送</p>
+      <div class="meeting-end-confirm-actions">
+        <button type="button" class="meeting-end-confirm-btn meeting-end-confirm-btn-primary" id="meeting-quote-saved-ok">知道了</button>
       </div>
     </div>
   </div>

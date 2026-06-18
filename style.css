@@ -2345,6 +2345,9 @@ body.drag-over .composer-pending {
   border-top: 1px solid #eee;
   background: var(--bg);
 }
+.meeting-composer-dock .composer-quote {
+  padding: 8px 16px 0;
+}
 .meeting-composer-dock[hidden] { display: none !important; }
 .meeting-composer-input-wrap textarea {
   width: 100%;

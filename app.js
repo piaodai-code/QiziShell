@@ -21,6 +21,11 @@ const composerPendingEl = document.getElementById('composer-pending');
 const composerQuoteEl = document.getElementById('composer-quote');
 const composerQuoteTextEl = document.getElementById('composer-quote-text');
 const composerQuoteRemoveEl = document.getElementById('composer-quote-remove');
+const meetingComposerQuoteEl = document.getElementById('meeting-composer-quote');
+const meetingComposerQuoteTextEl = document.getElementById('meeting-composer-quote-text');
+const meetingComposerQuoteRemoveEl = document.getElementById('meeting-composer-quote-remove');
+const meetingQuoteSavedModal = document.getElementById('meeting-quote-saved-modal');
+const meetingQuoteSavedOkBtn = document.getElementById('meeting-quote-saved-ok');
 const msgContextMenuEl = document.getElementById('msg-context-menu');
 const composerContextMenuEl = document.getElementById('composer-context-menu');
 const modelBadge = document.getElementById('model-badge');
@@ -231,6 +236,8 @@ const MAX_PENDING_ATTACHMENTS = 10;
 let userAborted = false;
 /** @type {{ who: 'me'|'them', authorLabel: string, text: string, time?: string } | null} */
 let pendingQuote = null;
+/** @type {{ who: 'me'|'them', authorLabel: string, text: string, time?: string, sentAtMs?: number, sentTime?: string } | null} */
+let meetingOwnerQuote = null;
 let contextMenuTargetIndex = -1;
 let composerContextMenuTarget = null;
 let contextMenuSource = 'chat';
@@ -1059,6 +1066,33 @@ function toggleQuoteCard(card, btn) {
   }
 }
 
+function renderMeetingComposerQuote() {
+  if (!meetingComposerQuoteEl || !meetingComposerQuoteTextEl) return;
+  if (!meetingOwnerQuote?.text) {
+    meetingComposerQuoteEl.hidden = true;
+    meetingComposerQuoteTextEl.textContent = '';
+    window.MeetingView?.syncOwnerSendBtn?.();
+    return;
+  }
+  const preview = getQuotePreviewLine(meetingOwnerQuote.text);
+  meetingComposerQuoteTextEl.textContent = `${meetingOwnerQuote.authorLabel}：${preview}`;
+  meetingComposerQuoteEl.hidden = false;
+  window.MeetingView?.syncOwnerSendBtn?.();
+}
+
+function clearMeetingOwnerQuote() {
+  meetingOwnerQuote = null;
+  renderMeetingComposerQuote();
+}
+
+function showMeetingQuoteSavedModal() {
+  if (meetingQuoteSavedModal) meetingQuoteSavedModal.hidden = false;
+}
+
+function hideMeetingQuoteSavedModal() {
+  if (meetingQuoteSavedModal) meetingQuoteSavedModal.hidden = true;
+}
+
 function renderComposerQuote() {
   if (!composerQuoteEl || !composerQuoteTextEl) return;
   if (!pendingQuote?.text) {
@@ -1085,7 +1119,7 @@ function setPendingQuoteFromMessage(msg) {
     setStatus('该消息没有可引用的文字', 'error');
     return false;
   }
-  pendingQuote = {
+  const quote = {
     who: msg.who,
     authorLabel: getMessageAuthorLabel(msg),
     text,
@@ -1093,10 +1127,19 @@ function setPendingQuoteFromMessage(msg) {
     sentAtMs: msg.sentAtMs,
     sentTime: msg.sentTime,
   };
+  const inMeeting = window.MeetingView?.isVisible?.();
+  const liveMeeting = inMeeting && window.MeetingView?.isLiveViewing?.();
+  if (liveMeeting) {
+    meetingOwnerQuote = quote;
+    renderMeetingComposerQuote();
+    window.MeetingView?.prepareComposerForQuote?.();
+    return true;
+  }
+  pendingQuote = quote;
   renderComposerQuote();
-  if (window.MeetingView?.isVisible?.()) {
-    window.MeetingView.leaveView();
-    setStatus('已引用，可在 Agent 私聊中回复', 'ok');
+  if (inMeeting) {
+    showMeetingQuoteSavedModal();
+    return true;
   }
   inputEl?.focus();
   return true;
@@ -2795,6 +2838,7 @@ function formatAgentLabel(agent) {
 
 function updateAgentTitleLabel(agent) {
   if (!titlebarAgentAvatar) return;
+  if (titlebarAgentBtn?.classList.contains('titlebar-agent-btn--meeting-view')) return;
   const info = agent || getCurrentAgentInfo();
   titlebarAgentAvatar.innerHTML = buildAgentAvatarInner(info, 'titlebar');
   if (titlebarAgentBtn) {
@@ -4868,6 +4912,38 @@ if (composerQuoteRemoveEl) {
   });
 }
 
+if (meetingComposerQuoteRemoveEl) {
+  meetingComposerQuoteRemoveEl.addEventListener('click', () => {
+    clearMeetingOwnerQuote();
+    document.getElementById('meeting-owner-input')?.focus();
+  });
+}
+
+if (meetingQuoteSavedOkBtn) {
+  meetingQuoteSavedOkBtn.addEventListener('click', () => { hideMeetingQuoteSavedModal(); });
+}
+
+if (meetingQuoteSavedModal) {
+  meetingQuoteSavedModal.addEventListener('click', (e) => {
+    if (e.target === meetingQuoteSavedModal) hideMeetingQuoteSavedModal();
+  });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && meetingQuoteSavedModal && !meetingQuoteSavedModal.hidden) {
+    hideMeetingQuoteSavedModal();
+  }
+});
+
+window.QiziShellComposer = {
+  hasMeetingOwnerQuote: () => Boolean(meetingOwnerQuote?.text),
+  clearMeetingOwnerQuote,
+  buildMeetingOwnerOutbound: (userText) => {
+    if (!meetingOwnerQuote?.text) return String(userText || '').trim();
+    return formatQuoteForAgent(meetingOwnerQuote, userText).trim();
+  },
+};
+
 if (btwSideCloseBtn) {
   btwSideCloseBtn.addEventListener('click', () => {
     dismissBtwSideCard();
@@ -6426,8 +6502,6 @@ if (messagesEl) {
   });
 }
 
-let meetingTitlebarBackup = null;
-
 function buildMeetingTitlebarAvatarHtml() {
   const src = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
   return `<span class="agent-avatar agent-avatar-titlebar agent-avatar-meeting" role="img" aria-label="会议"><img src="${src}" alt="会议"></span>`;
@@ -6435,29 +6509,15 @@ function buildMeetingTitlebarAvatarHtml() {
 
 function applyMeetingTitlebar() {
   if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
-  if (!meetingTitlebarBackup) {
-    meetingTitlebarBackup = {
-      avatarHtml: titlebarAgentAvatar.innerHTML,
-      title: titlebarAgentBtn.title,
-      ariaLabel: titlebarAgentBtn.getAttribute('aria-label'),
-    };
-  }
   titlebarAgentAvatar.innerHTML = buildMeetingTitlebarAvatarHtml();
   titlebarAgentBtn.title = '会议 · 切换 Agent';
   titlebarAgentBtn.setAttribute('aria-label', '会议 · 切换 Agent');
   titlebarAgentBtn.classList.add('titlebar-agent-btn--meeting-view');
 }
 
-function restoreMeetingTitlebar(clearBackup = false) {
+function restoreMeetingTitlebar() {
   if (!titlebarAgentAvatar || !titlebarAgentBtn) return;
   titlebarAgentBtn.classList.remove('titlebar-agent-btn--meeting-view');
-  if (meetingTitlebarBackup) {
-    titlebarAgentAvatar.innerHTML = meetingTitlebarBackup.avatarHtml;
-    titlebarAgentBtn.title = meetingTitlebarBackup.title;
-    titlebarAgentBtn.setAttribute('aria-label', meetingTitlebarBackup.ariaLabel);
-    if (clearBackup) meetingTitlebarBackup = null;
-    return;
-  }
   updateAgentTitleLabel(getCurrentAgentInfo());
 }
 
@@ -6480,14 +6540,14 @@ window.addEventListener('qizi-meeting-view-shown', (event) => {
 });
 
 window.addEventListener('qizi-meeting-view-hidden', () => {
-  restoreMeetingTitlebar(false);
+  restoreMeetingTitlebar();
   render();
 });
 
 window.addEventListener('qizi-meeting-exited', () => {
   if (multiSelectMode) exitMultiSelectMode();
   contextMenuSource = 'chat';
-  restoreMeetingTitlebar(true);
+  restoreMeetingTitlebar();
   render();
 });
 

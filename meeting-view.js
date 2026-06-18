@@ -49,7 +49,9 @@
 
   function syncOwnerSendBtn() {
     if (!ownerSendBtn || !ownerInputEl) return;
-    ownerSendBtn.disabled = !ownerInputEl.value.trim() || !running || !viewingLive;
+    const text = ownerInputEl.value.trim();
+    const hasQuote = Boolean(window.QiziShellComposer?.hasMeetingOwnerQuote?.());
+    ownerSendBtn.disabled = (!text && !hasQuote) || !running || !viewingLive;
   }
 
   function setComposerExpanded(expanded) {
@@ -76,8 +78,18 @@
     if (!showToggle) {
       setComposerExpanded(false);
       if (ownerInputEl) ownerInputEl.value = '';
+      window.QiziShellComposer?.clearMeetingOwnerQuote?.();
       syncOwnerSendBtn();
     }
+  }
+
+  function prepareComposerForQuote() {
+    if (!running || !viewingLive) return;
+    setComposerExpanded(true);
+  }
+
+  function isLiveViewing() {
+    return running && viewingLive;
   }
 
   function toggleComposerExpanded() {
@@ -85,13 +97,19 @@
   }
 
   async function sendOwnerNote() {
-    const text = ownerInputEl?.value?.trim();
-    if (!text || !running || !viewingLive) return;
+    const text = ownerInputEl?.value?.trim() || '';
+    const hasQuote = Boolean(window.QiziShellComposer?.hasMeetingOwnerQuote?.());
+    if ((!text && !hasQuote) || !running || !viewingLive) return;
+    const outbound = hasQuote
+      ? (window.QiziShellComposer?.buildMeetingOwnerOutbound?.(text) || text)
+      : text;
+    if (!outbound.trim()) return;
     if (ownerSendBtn) ownerSendBtn.disabled = true;
     try {
-      const result = await window.qizi?.sendMeetingOwnerNote?.(text);
+      const result = await window.qizi?.sendMeetingOwnerNote?.(outbound);
       if (result?.ok) {
         ownerInputEl.value = '';
+        window.QiziShellComposer?.clearMeetingOwnerQuote?.();
         syncOwnerSendBtn();
       } else if (result?.error) {
         setStatus(result.error);
@@ -947,6 +965,9 @@
     handleEvent,
     isRunning: () => running,
     isVisible: () => hubVisible,
+    isLiveViewing,
+    prepareComposerForQuote,
+    syncOwnerSendBtn,
     isHubVisible: () => hubVisible,
     isActive: () => hubVisible,
     getConfig: () => (meetingConfig ? { ...meetingConfig } : null),
