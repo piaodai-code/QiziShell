@@ -72,7 +72,6 @@ async function runUpdateCheck() {
     if (result.updateAvailable) {
       setStatus(`是否升级到最新版本（${result.latestVersion}）`, 'available');
       if (installBtnEl) installBtnEl.hidden = false;
-      if (recheckBtnEl) recheckBtnEl.hidden = false;
       if (result.releaseNotes) showNotes(result.releaseNotes);
       return;
     }
@@ -108,10 +107,11 @@ async function startInstall() {
   } catch (err) {
     installing = false;
     if (installBtnEl) {
+      installBtnEl.hidden = false;
       installBtnEl.disabled = false;
       installBtnEl.textContent = '升级';
     }
-    if (recheckBtnEl) recheckBtnEl.hidden = false;
+    if (recheckBtnEl) recheckBtnEl.hidden = true;
     setStatus(err?.message || '升级失败', 'error');
   }
 }
