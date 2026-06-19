@@ -893,6 +893,37 @@ function getAuthorizedHistoryWindow(event) {
   return historyWindow;
 }
 
+async function readLocalMessagesFromMainWindow(sessionKey) {
+  const key = String(sessionKey || '').trim();
+  if (!key || !mainWindow || mainWindow.isDestroyed()) return [];
+  const safeKey = JSON.stringify(key);
+  try {
+    const messages = await mainWindow.webContents.executeJavaScript(`(() => {
+      if (typeof window.qiziExportHistoryArchive === 'function') {
+        return window.qiziExportHistoryArchive(${safeKey});
+      }
+      const STORAGE_PREFIX = 'qizi-shell-messages:';
+      const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
+      const sessionKey = ${safeKey};
+      const storageKey = STORAGE_PREFIX + sessionKey;
+      let raw = localStorage.getItem(storageKey);
+      if (!raw && sessionKey.endsWith(':main')) {
+        raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+      }
+      if (!raw) return [];
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    })()`, true);
+    return Array.isArray(messages) ? messages : [];
+  } catch {
+    return [];
+  }
+}
+
 function closeHistoryWindow() {
   if (historyWindow && !historyWindow.isDestroyed()) {
     historyWindow.close();
@@ -3823,6 +3854,12 @@ ipcMain.handle('openclaw:history:open', (event, context) => {
 ipcMain.handle('openclaw:history:context', (event) => {
   if (!getAuthorizedHistoryWindow(event)) return null;
   return historyWindowContext;
+});
+
+ipcMain.handle('openclaw:history:read-local', async (event, payload) => {
+  if (!getAuthorizedHistoryWindow(event)) return forbiddenSenderResult();
+  const messages = await readLocalMessagesFromMainWindow(payload?.sessionKey);
+  return { ok: true, messages };
 });
 
 ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, priorAssistantText }) => {

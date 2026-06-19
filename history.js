@@ -1,8 +1,3 @@
-const MessageTimeApi = window.MessageTime || {};
-const STORAGE_PREFIX = 'qizi-shell-messages:';
-const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
-const DEFAULT_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
-
 const messagesEl = document.getElementById('messages');
 const historySearchInput = document.getElementById('history-search-input');
 const historySearchCount = document.getElementById('history-search-count');
@@ -12,38 +7,17 @@ const historySearchClear = document.getElementById('history-search-clear');
 
 let currentSearchMarks = [];
 let currentSearchIndex = -1;
+let renderGeneration = 0;
 
 function isStreamingPlaceholderText(text) {
   const trimmed = String(text || '').trim();
   return !trimmed || trimmed === '…';
 }
 
-function backfillMessageSentAtMs(msg) {
-  if (!msg) return msg;
-  if (typeof msg.sentAtMs === 'number' && Number.isFinite(msg.sentAtMs)) return msg;
-  if (typeof MessageTimeApi?.extractMessageSentTimeFromRaw === 'function') {
-    const sent = MessageTimeApi.extractMessageSentTimeFromRaw({
-      sentTime: msg.sentTime,
-      sentAtMs: msg.sentAtMs,
-      time: msg.time,
-      text: msg.text,
-    });
-    if (sent.sentAtMs != null) {
-      return {
-        ...msg,
-        sentAtMs: sent.sentAtMs,
-        sentTime: msg.sentTime || sent.time || msg.sentTime,
-      };
-    }
-  }
-  return msg;
-}
-
-function pruneByRetention(list, retentionMs) {
-  if (!Array.isArray(list) || list.length === 0) return [];
-  const cutoff = Date.now() - retentionMs;
+function prepareMessagesForDisplay(list) {
+  if (!Array.isArray(list)) return [];
   return list
-    .map((m) => backfillMessageSentAtMs({ ...m, streaming: false }))
+    .map((m) => ({ ...m, streaming: false }))
     .filter((m) => {
       if (m.who === 'them' && isStreamingPlaceholderText(m.text)) return false;
       if (m.who === 'me' && !String(m.text || '').trim()
@@ -51,26 +25,23 @@ function pruneByRetention(list, retentionMs) {
         && !(Array.isArray(m.files) && m.files.length)) {
         return false;
       }
-      const ms = m.sentAtMs;
-      if (typeof ms === 'number' && Number.isFinite(ms)) return ms >= cutoff;
       return true;
     });
 }
 
-function loadLocalMessages(sessionKey) {
+async function loadSavedMessages(sessionKey) {
   if (!sessionKey) return [];
-  const storageKey = `${STORAGE_PREFIX}${sessionKey}`;
-  let raw = localStorage.getItem(storageKey);
-  if (!raw && sessionKey.endsWith(':main')) {
-    raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+  if (window.qiziHistory?.loadLocalMessages) {
+    try {
+      const result = await window.qiziHistory.loadLocalMessages({ sessionKey });
+      if (result?.ok && Array.isArray(result.messages)) {
+        return result.messages;
+      }
+    } catch {
+      // fall through
+    }
   }
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
+  return [];
 }
 
 function renderHeader(context) {
@@ -78,17 +49,39 @@ function renderHeader(context) {
   document.title = `${window.MessageView.formatAgentLabel(agent)} · 历史消息`;
 }
 
-function renderHistory(context) {
-  const retentionMs = Number(context?.retentionMs) || DEFAULT_RETENTION_MS;
-  const sessionKey = context?.sessionKey || '';
-  const raw = loadLocalMessages(sessionKey);
-  const messages = pruneByRetention(raw, retentionMs);
+function renderHistoryMessages(context, messages) {
   renderHeader(context);
   window.MessageView.renderMessageList(messagesEl, messages, {
     agent: context?.agent,
     showAvatars: false,
   });
   applySearch(historySearchInput?.value || '');
+}
+
+async function renderHistory(context) {
+  const generation = ++renderGeneration;
+  const sessionKey = context?.sessionKey || '';
+  if (!sessionKey) {
+    if (messagesEl) {
+      messagesEl.innerHTML = '<div class="msg-hint">无法读取会话信息</div>';
+    }
+    return;
+  }
+
+  if (messagesEl) {
+    messagesEl.innerHTML = '<div class="msg-hint">加载中…</div>';
+  }
+
+  const saved = await loadSavedMessages(sessionKey);
+  if (generation !== renderGeneration) return;
+
+  const messages = prepareMessagesForDisplay(saved);
+  if (!messages.length && messagesEl) {
+    messagesEl.innerHTML = '<div class="msg-hint">暂无历史消息</div>';
+    applySearch('');
+    return;
+  }
+  renderHistoryMessages(context, messages);
 }
 
 function escapeRegExp(input) {
@@ -234,13 +227,7 @@ function bindSearchEvents() {
 
 async function boot(initialContext) {
   const context = initialContext || await window.qiziHistory.getContext();
-  if (!context?.sessionKey) {
-    if (messagesEl) {
-      messagesEl.innerHTML = '<div class="msg-hint">无法读取会话信息</div>';
-    }
-    return;
-  }
-  renderHistory(context);
+  await renderHistory(context);
 }
 
 window.MessageView.bindQuoteToggles(messagesEl);
@@ -249,6 +236,6 @@ void boot();
 
 if (window.qiziHistory.onRefresh) {
   window.qiziHistory.onRefresh((context) => {
-    if (context?.sessionKey) renderHistory(context);
+    if (context?.sessionKey) void renderHistory(context);
   });
 }

@@ -134,7 +134,11 @@
         : '';
     const envelopeTime = parseLeadingEnvelopeTimestamp(text);
     if (envelopeTime) {
-      return { time: envelopeTime, sentAtMs: null };
+      const sentAtMs = coerceTimestampMs(envelopeTime);
+      return {
+        time: envelopeTime,
+        sentAtMs,
+      };
     }
 
     return { time: '', sentAtMs: null };

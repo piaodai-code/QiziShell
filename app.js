@@ -254,12 +254,10 @@ const BATCH_FORWARD_HARD_MAX_BYTES = 2 * 1024 * 1024;
 const STORAGE_PREFIX = 'qizi-shell-messages:';
 const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
 const DEFAULT_SESSION_KEY = 'agent:main:main';
-const SAVE_DEBOUNCE_MS = 800;
 const STREAM_RENDER_MIN_MS = 48;
 /** 本地归档保留时长（历史窗口与本地存储） */
 const MESSAGE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
 const MESSAGE_RETENTION_TAIL_WITHOUT_MS = 300;
-// 本地写完就存；Gateway history 合并仍关闭，避免干扰流式
 const ENABLE_LOCAL_MESSAGE_SAVE = true;
 const ENABLE_GATEWAY_HISTORY_SYNC = false;
 const PASSIVE_SESSION_REFRESH_MS = 350;
@@ -276,7 +274,6 @@ let agentCatalog = new Map();
 /** @type {Map<string, ReturnType<typeof setTimeout>>} */
 const passiveSessionRefreshTimers = new Map();
 
-let saveTimer = null;
 let streamRenderTimer = null;
 let streamRenderRunId = null;
 let streamPaintRaf = null;
@@ -2176,10 +2173,11 @@ function backfillMessageSentAtMs(msg) {
   if (!msg) return msg;
   if (typeof msg.sentAtMs === 'number' && Number.isFinite(msg.sentAtMs)) return msg;
   if (typeof MessageTimeApi.extractMessageSentTimeFromRaw === 'function') {
+    const displayTime = String(msg.time || '').trim();
     const sent = MessageTimeApi.extractMessageSentTimeFromRaw({
       sentTime: msg.sentTime,
       sentAtMs: msg.sentAtMs,
-      time: msg.time,
+      time: /^\d{1,2}:\d{2}$/.test(displayTime) ? undefined : displayTime,
       text: msg.text,
     });
     if (sent.sentAtMs != null) {
@@ -2205,10 +2203,33 @@ function pruneMessagesByRetention(list) {
   });
 }
 
-function serializeMessagesForStorage(list) {
-  return finalizeHistoryMessages(
-    pruneMessagesByRetention(list).map((m) => ({ ...m, streaming: false })),
-  ).map((m) => ({
+function readRawStoredMessagesForSession(sessionKey) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return [];
+  try {
+    const storageKey = messagesStorageKey(sessionKey);
+    let raw = localStorage.getItem(storageKey);
+    if (!raw && sessionKey === DEFAULT_SESSION_KEY) {
+      raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    }
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }));
+  } catch {
+    return [];
+  }
+}
+
+function archiveRecordFromMessage(msg) {
+  if (!msg || msg.streaming || msg.queued) return null;
+  const m = backfillMessageSentAtMs(normalizeUserMessageRecord({ ...msg, streaming: false }));
+  if (m.who === 'them' && isStreamingPlaceholderText(m.text)) return null;
+  if (m.who === 'me' && !String(m.text || '').trim()
+    && !(Array.isArray(m.images) && m.images.length)
+    && !(Array.isArray(m.files) && m.files.length)) {
+    return null;
+  }
+  return {
     who: m.who,
     text: m.text,
     quote: m.quote || undefined,
@@ -2222,7 +2243,44 @@ function serializeMessagesForStorage(list) {
     time: m.time,
     runId: m.runId,
     streaming: false,
-  }));
+  };
+}
+
+function writeMessageArchive(sessionKey, archive) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return false;
+  const key = String(sessionKey || '').trim();
+  if (!key) return false;
+  const pruned = pruneMessagesByRetention((Array.isArray(archive) ? archive : []).filter(Boolean));
+  const payload = finalizeHistoryMessages(pruned);
+  return writeMessagesToStorageKey(key, payload);
+}
+
+function appendCompletedMessagesToArchive(sessionKey, candidates) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
+  const key = String(sessionKey || '').trim();
+  if (!key || !Array.isArray(candidates) || candidates.length === 0) return;
+  const archive = readRawStoredMessagesForSession(key);
+  let changed = false;
+  for (const raw of candidates) {
+    const record = archiveRecordFromMessage(raw);
+    if (!record) continue;
+    if (!isKnownInHistory(record, archive)) {
+      archive.push(record);
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  if (!writeMessageArchive(key, archive)) {
+    console.warn('[qizi] localStorage 空间不足，部分历史未能保存');
+  }
+}
+
+function appendCompletedMessageToArchive(sessionKey, msg) {
+  appendCompletedMessagesToArchive(sessionKey, [msg]);
+}
+
+function exportHistoryArchiveForSession(sessionKey) {
+  return finalizeHistoryMessages(readRawStoredMessagesForSession(sessionKey));
 }
 
 function syncCurrentRunIdFromMessages() {
@@ -2250,13 +2308,12 @@ function pruneAllStoredMessageSessions() {
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) continue;
       const normalized = parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }));
-      const payload = serializeMessagesForStorage(normalized);
+      const sessionKey = key === LEGACY_STORAGE_KEY
+        ? DEFAULT_SESSION_KEY
+        : key.slice(STORAGE_PREFIX.length);
+      writeMessageArchive(sessionKey, normalized);
       if (key === LEGACY_STORAGE_KEY) {
-        const migratedKey = messagesStorageKey(DEFAULT_SESSION_KEY);
-        localStorage.setItem(migratedKey, JSON.stringify(payload));
         localStorage.removeItem(LEGACY_STORAGE_KEY);
-      } else {
-        localStorage.setItem(key, JSON.stringify(payload));
       }
     }
   } catch (err) {
@@ -2777,7 +2834,6 @@ async function handleStopCommand() {
   }
   clearStaleStreamingState({ force: true });
   userAborted = false;
-  flushSaveMessages();
   render();
 }
 
@@ -2787,7 +2843,6 @@ function applyLoadedSessionKey(result) {
   const prevSessionKey = currentSessionKey;
   debugEvent('session', 'apply_loaded_session_key', { from: prevSessionKey, to: result.sessionKey });
   chatScopeEpoch += 1;
-  flushSaveMessagesToSession(prevSessionKey);
   messages = [];
   currentSessionKey = result.sessionKey;
   currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
@@ -2863,6 +2918,8 @@ function openMessageHistoryWindow() {
     retentionMs: MESSAGE_RETENTION_MS,
   });
 }
+
+window.qiziExportHistoryArchive = exportHistoryArchiveForSession;
 
 function applyAgentCatalog(agents) {
   agentCatalog = new Map();
@@ -2952,46 +3009,6 @@ function writeMessagesToStorage(items) {
   return writeMessagesToStorageKey(currentSessionKey, items);
 }
 
-function persistMessagesForSession(sessionKey, sourceMessages) {
-  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
-  const payload = serializeMessagesForStorage(sourceMessages);
-  if (!writeMessagesToStorageKey(sessionKey, payload)) {
-    console.warn('[qizi] localStorage 空间不足，部分历史未能保存');
-  }
-}
-
-function saveMessages(force) {
-  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
-  const captureKey = currentSessionKey;
-  if (!force && saveTimer) return;
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
-  const write = () => {
-    saveTimer = null;
-    persistMessagesForSession(captureKey, messages);
-  };
-  if (force) {
-    write();
-  } else {
-    saveTimer = setTimeout(write, SAVE_DEBOUNCE_MS);
-  }
-}
-
-function flushSaveMessagesToSession(sessionKey) {
-  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
-  if (saveTimer) {
-    clearTimeout(saveTimer);
-    saveTimer = null;
-  }
-  persistMessagesForSession(sessionKey, messages);
-}
-
-function flushSaveMessages() {
-  flushSaveMessagesToSession(currentSessionKey);
-}
-
 function loadMessages() {
   if (!ENABLE_LOCAL_MESSAGE_SAVE) {
     messages = [];
@@ -3002,27 +3019,7 @@ function loadMessages() {
 
 function readStoredMessagesForSession(sessionKey) {
   if (!ENABLE_LOCAL_MESSAGE_SAVE) return [];
-  try {
-    const storageKey = messagesStorageKey(sessionKey);
-    let raw = localStorage.getItem(storageKey);
-    if (!raw && sessionKey === DEFAULT_SESSION_KEY) {
-      raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-      if (raw) {
-        localStorage.setItem(storageKey, raw);
-        localStorage.removeItem(LEGACY_STORAGE_KEY);
-      }
-    }
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return finalizeHistoryMessages(
-      pruneMessagesByRetention(
-        parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
-      ),
-    );
-  } catch {
-    return [];
-  }
+  return exportHistoryArchiveForSession(sessionKey);
 }
 
 function stripInboundExternalMessages(list) {
@@ -3030,14 +3027,14 @@ function stripInboundExternalMessages(list) {
   return list.filter((m) => !m?.external);
 }
 
-/** 被动同步（转发/Webchat）：Gateway 历史为唯一顺序权威，只补本地附件 */
+/** 被动同步（转发/Webchat）：以本地归档为底，只追加/刷新 Gateway 内容 */
 function mergePassiveSessionFromGateway(localMessages, serverMessages) {
   const local = stripInboundExternalMessages(localMessages);
   const server = dedupeForwardUserMessages(
     (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
   );
   if (!server.length) return finalizeHistoryMessages(local);
-  return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
+  return finalizeHistoryMessages(mergeGatewayHistory(local, server));
 }
 
 function schedulePassiveSessionRefresh(sessionKey, { immediate = false } = {}) {
@@ -3082,7 +3079,7 @@ async function refreshSessionFromGateway(sessionKey, options = {}) {
         setTimeout(resolve, FORWARD_HISTORY_RETRY_MS);
       });
     }
-    const local = readStoredMessagesForSession(sessionKey);
+    const local = readRawStoredMessagesForSession(sessionKey);
     const merged = mergePassiveSessionFromGateway(local, result.messages);
     commitSessionMessages(sessionKey, merged);
     return true;
@@ -3094,11 +3091,11 @@ async function refreshSessionFromGateway(sessionKey, options = {}) {
 
 function commitSessionMessages(sessionKey, nextMessages) {
   const finalized = finalizeHistoryMessages(nextMessages);
-  persistMessagesForSession(sessionKey, finalized);
+  const completed = finalized.filter((m) => !m.streaming && !m.queued);
+  appendCompletedMessagesToArchive(sessionKey, completed);
   if (sessionKey === currentSessionKey) {
     messages = finalized;
     syncCurrentRunIdFromMessages();
-    flushSaveMessages();
     render();
   }
 }
@@ -3201,7 +3198,6 @@ async function tickSessionWatch() {
         await syncHistoryFromGateway();
         clearStaleStreamingState({ force: true });
         render();
-        flushSaveMessages();
       } else {
         const history = await window.qizi.loadHistory();
         if (!history?.ok) return;
@@ -3508,7 +3504,6 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     lastSyncedHistorySignature = nextSignature;
     messages = nextMessages;
 
-    flushSaveMessages();
     render();
     refreshSessionInfo();
   } catch (err) {
@@ -3710,7 +3705,7 @@ function finishAssistant({ error, runId, text } = {}) {
       externalSessionRunId = null;
     }
   }
-  flushSaveMessages();
+  appendCompletedMessageToArchive(target.sessionKey || currentSessionKey, target);
   render();
   refreshSessionInfo();
 }
@@ -4041,7 +4036,6 @@ async function switchToAgent(agentId) {
     fromSessionKey: prevSessionKey,
   });
   chatScopeEpoch += 1;
-  flushSaveMessagesToSession(prevSessionKey);
   messages = [];
   pendingQueue = [];
   pendingImages = [];
@@ -4082,7 +4076,6 @@ async function switchToAgent(agentId) {
     loadMessages();
     messages = finalizeHistoryMessages(messages);
     syncCurrentRunIdFromMessages();
-    flushSaveMessages();
     render();
 
     if (ENABLE_GATEWAY_HISTORY_SYNC) {
@@ -4264,7 +4257,6 @@ async function checkConnection() {
       });
       setStatus('已连接', 'ok');
       messages = finalizeHistoryMessages(messages);
-      flushSaveMessages();
       lastSyncedHistorySignature = '';
       lastSessionSyncAt = 0;
       await refreshCurrentModelBadge();
@@ -4333,7 +4325,6 @@ async function abortRun() {
   }
   setBusy(false);
   activeRunId = null;
-  flushSaveMessages();
   render();
   try {
     await window.qizi.abortChat();
@@ -4601,7 +4592,7 @@ async function send() {
   rememberSentInput(text);
 
   // 立刻把 user 消息 push + 渲染（不卡 UI，方案 A3）
-  messages.push({
+  const userMsg = {
     who: 'me',
     text,
     quote: quoteSnapshot,
@@ -4612,7 +4603,9 @@ async function send() {
     sentAtMs,
     sessionKey: currentSessionKey,
     chatEpoch: chatScopeEpoch,
-  });
+  };
+  messages.push(userMsg);
+  appendCompletedMessageToArchive(currentSessionKey, userMsg);
   inputEl.value = '';
   resetInputHeight();
   clearPendingQuote();
@@ -4636,7 +4629,6 @@ async function send() {
     chatEpoch: chatScopeEpoch,
   };
   messages.push(assistantMsg);
-  flushSaveMessages();
 
   if (busy) {
     pendingQueue.push(assistantMsg);
@@ -4703,7 +4695,6 @@ function processQueue() {
   next.queuedAt = null;
   next.streaming = true;
   next.text = '…';
-  saveMessages();
   setBusy(true);
   activeRunId = next.runId;
   render();
@@ -5437,7 +5428,6 @@ inputEl.addEventListener('paste', async (e) => {
     loadMessages();
     messages = finalizeHistoryMessages(messages);
     syncCurrentRunIdFromMessages();
-    flushSaveMessages();
     render();
     await refreshAgentTitleFromGateway();
   } catch {
@@ -5448,7 +5438,10 @@ inputEl.addEventListener('paste', async (e) => {
 })();
 
 window.addEventListener('beforeunload', () => {
-  flushSaveMessages();
+  appendCompletedMessagesToArchive(
+    currentSessionKey,
+    messages.filter((m) => !m.streaming && !m.queued),
+  );
 });
 
 window.addEventListener('focus', () => {
