@@ -392,6 +392,10 @@ let gatewayConfigKey = null;
 const activeRuns = new Map();
 /** @type {Map<string, number>} gatewayRunId -> clientRunId */
 const gatewayRunIndex = new Map();
+/** Shell 自有 run 结束后，Gateway 仍可能延迟推送同 runId 的 chat 事件；忽略以免 refresh 历史覆盖本地 */
+/** @type {Map<string, { sessionKey: string, finishedAt: number }>} */
+const suppressedOwnedGatewayRuns = new Map();
+const SUPPRESS_OWNED_GATEWAY_RUN_MS = 3 * 60 * 1000;
 const STREAM_TIMEOUT_MS = 15 * 60 * 1000;
 const BTW_TIMEOUT_MS = 2 * 60 * 1000;
 /** @type {Map<string, { sender: Electron.WebContents, question: string, startedAt: number, timeout?: NodeJS.Timeout }>} */
@@ -1759,6 +1763,38 @@ function findOwnedRunForChatPayload(payload) {
   return null;
 }
 
+function rememberFinishedOwnedGatewayRun(gatewayRunId, sessionKey) {
+  const id = gatewayRunId == null ? '' : String(gatewayRunId).trim();
+  if (!id) return;
+  suppressedOwnedGatewayRuns.set(id, {
+    sessionKey: String(sessionKey || getSessionKey()).trim(),
+    finishedAt: Date.now(),
+  });
+}
+
+function shouldSuppressLateOwnedGatewayEvent(payload) {
+  const gatewayRunId = payload?.runId == null ? '' : String(payload.runId).trim();
+  if (!gatewayRunId) return false;
+  const entry = suppressedOwnedGatewayRuns.get(gatewayRunId);
+  if (!entry) return false;
+  if (Date.now() - entry.finishedAt > SUPPRESS_OWNED_GATEWAY_RUN_MS) {
+    suppressedOwnedGatewayRuns.delete(gatewayRunId);
+    return false;
+  }
+  const sessionKey = String(payload?.sessionKey || '').trim() || getSessionKey();
+  if (entry.sessionKey && sessionKey && entry.sessionKey !== sessionKey) return false;
+  return true;
+}
+
+function pruneSuppressedOwnedGatewayRuns() {
+  const now = Date.now();
+  for (const [id, entry] of suppressedOwnedGatewayRuns.entries()) {
+    if (now - entry.finishedAt > SUPPRESS_OWNED_GATEWAY_RUN_MS) {
+      suppressedOwnedGatewayRuns.delete(id);
+    }
+  }
+}
+
 function registerActiveRun(clientRunId, gatewayRunId, run) {
   activeRuns.set(clientRunId, run);
   gatewayRunIndex.set(gatewayRunId, clientRunId);
@@ -1866,6 +1902,9 @@ function advanceOwnedStream(run, rawNext) {
 function finishClientRun(clientRunId, outcome) {
   const run = activeRuns.get(clientRunId);
   if (!run) return;
+  if (run.gatewayRunId) {
+    rememberFinishedOwnedGatewayRun(run.gatewayRunId, getSessionKey());
+  }
   unregisterActiveRun(clientRunId);
   const fullText = run.fullText;
   if (outcome.aborted) {
@@ -2315,6 +2354,15 @@ function handleGatewayChatEvent(payload) {
     handleOwnedGatewayChatEvent(payload, matched);
     return;
   }
+  if (shouldSuppressLateOwnedGatewayEvent(payload)) {
+    debugEvent('stream', 'suppress_late_owned_run_event', {
+      runId: String(payload.runId || ''),
+      state: payload.state || null,
+      sessionKey: payload.sessionKey || null,
+    });
+    return;
+  }
+  pruneSuppressedOwnedGatewayRuns();
   debugEvent('stream', 'unmatched_chat_event', {
     runId: String(payload.runId || ''),
     state: payload.state || null,
