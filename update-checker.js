@@ -91,6 +91,17 @@ function pickDmgAsset(release, versionLabel) {
   ) || null;
 }
 
+/** ship.sh 自动写入的安装说明，不适合在应用内更新窗展示 */
+function sanitizeReleaseNotes(raw) {
+  const text = String(raw || '').trim();
+  if (!text) return '';
+  if (text.includes('Apple Silicon (arm64) macOS 安装包')
+    && text.includes('拖入「应用程序」')) {
+    return '';
+  }
+  return text;
+}
+
 function pickLatestRelease(releases) {
   if (!Array.isArray(releases) || releases.length === 0) {
     throw new Error('未找到 Release');
@@ -122,7 +133,7 @@ async function checkForUpdate(currentVersion) {
     latestVersion,
     updateAvailable,
     releaseName: release?.name || tagName,
-    releaseNotes: typeof release?.body === 'string' ? release.body.trim() : '',
+    releaseNotes: sanitizeReleaseNotes(release?.body),
     downloadUrl: asset.browser_download_url,
     assetName: asset.name,
     htmlUrl: release?.html_url || `https://github.com/${GITHUB_REPO}/releases/tag/${tagName}`,
