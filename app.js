@@ -260,6 +260,7 @@ function ensureChatTimeline() {
       }
       if (userAborted && !error && !aborted) return;
       purgeStreamingAssistantForRun(runId);
+      syncMemoryToArchive();
       lastOwnedRunFinishedAt = Date.now();
       if (pendingModelUpdate && !error) {
         pendingModelUpdate = false;
@@ -276,6 +277,11 @@ function ensureChatTimeline() {
         setTimeout(processQueue, QUEUE_INTER_MS);
       }
       debugEvent('stream', 'timeline_run_done', { runId, error: error || null });
+      setTimeout(() => {
+        if (!busy && !isLocalOwnedActiveRun()) {
+          void syncHistoryFromGateway();
+        }
+      }, 400);
     },
     onToolRunning: () => setStatus('工具运行中…', 'pending'),
   });
@@ -345,7 +351,8 @@ const STREAM_RENDER_MIN_MS = 48;
 const MESSAGE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
 const MESSAGE_RETENTION_TAIL_WITHOUT_MS = 300;
 const ENABLE_LOCAL_MESSAGE_SAVE = true;
-const ENABLE_GATEWAY_HISTORY_SYNC = false;
+/** 与 webchat 一致：主界面以 Gateway chat.history 为准 */
+const ENABLE_GATEWAY_HISTORY_SYNC = true;
 const PASSIVE_SESSION_REFRESH_MS = 350;
 const FORWARD_HISTORY_RETRY_MS = 400;
 const FORWARD_HISTORY_MAX_RETRIES = 5;
@@ -1091,10 +1098,22 @@ function userMessageTextsMatch(aText, bText) {
   return Boolean(at && bt && at === bt);
 }
 
-function userMessagesEquivalent(a, b) {
+/** 同一条 user 消息（双写/归档重复），不是「用户又发了一次相同内容」 */
+function userMessagesSameEvent(a, b) {
   if (!a || !b || a.who !== 'me' || b.who !== 'me') return false;
   if (historyForwardFingerprintsMatch(a, b)) return true;
-  return userMessageTextsMatch(a.text, b.text);
+  if (!userMessageTextsMatch(a.text, b.text)) return false;
+  const aMs = a.sentAtMs;
+  const bMs = b.sentAtMs;
+  if (aMs != null && bMs != null) {
+    if (aMs === bMs) return true;
+    return Math.abs(aMs - bMs) < 2000;
+  }
+  return false;
+}
+
+function userMessagesEquivalent(a, b) {
+  return userMessagesSameEvent(a, b);
 }
 
 function findLocalUserMessageForServer(server, localList) {
@@ -2035,14 +2054,16 @@ function assistantTextsMatch(a, b) {
  *
  * 2. Gateway 被动活动（转发 / Webchat / 其他端）
  *    统一走 openclaw:session-chat；passive 不占 busy
- *    转发与非当前 session：只 refreshSessionFromGateway（顺序以 Gateway 为准）
- *    当前 session 的 Webchat：可流式 delta，结束时 refresh
+ *    refreshSessionFromGateway：以 Gateway chat.history 为准（同 webchat）
  *
- * 3. 切换 Agent
- *    读该 session 本地存档（由 2 持续更新）
+ * 3. 切换 Agent / 重连 / session.changed
+ *    syncHistoryFromGateway 拉 chat.history 刷新主界面
  *
- * 转发 = 对目标 session 的 chat.send，成功后 refreshSessionFromGateway 补上 user 条；
- * agent 回复由 2 的 session-chat 流式写入。
+ * 4. localStorage
+ *    仅 overlay 图片/文件附件；不作为消息列表主数据源
+ *
+ * 转发 = 对目标 session 的 chat.send，成功后 refreshSessionFromGateway；
+ * agent 回复由 session-chat 流式写入，结束后 sync 落盘。
  */
 
 function getAssistantMessageBeforeTarget(target) {
@@ -2426,7 +2447,7 @@ function pruneAllStoredMessageSessions() {
 function historyMessagesMatch(a, b) {
   if (!a || !b || a.who !== b.who) return false;
   if (historyForwardFingerprintsMatch(a, b)) return true;
-  if (a.who === 'me' && b.who === 'me' && userMessageTextsMatch(a.text, b.text)) return true;
+  if (a.who === 'me' && b.who === 'me') return userMessagesSameEvent(a, b);
   const at = String(a.text || '').trim();
   const bt = String(b.text || '').trim();
   if (at && bt && at === bt) return true;
@@ -2474,7 +2495,10 @@ function refreshLocalFromServerPrefix(local, server) {
 
 function stripHeadOverlappingMerged(head, merged) {
   if (!head.length || !merged.length) return head;
-  return head.filter((m) => !isKnownInHistory(m, merged));
+  return head.filter((m) => {
+    if (m?.who === 'me') return true;
+    return !isKnownInHistory(m, merged);
+  });
 }
 
 function findSuffixPrefixOverlap(local, server) {
@@ -2620,14 +2644,22 @@ function mergeGatewayHistory(localMessages, serverMessages) {
   return finalizeHistoryMessages([...local, ...appended]);
 }
 
-function rebuildMessagesFromGateway(serverMessages, localMessages) {
+/** 以 Gateway 历史为底，overlay 本地附件 / 元数据（webchat 同源） */
+function buildDisplayHistoryFromGateway(serverMessages, localMessages) {
   const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => (
     m.streaming ? { ...m } : { ...m, streaming: false }
   ));
   const server = dedupeForwardUserMessages(
     (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
   );
-  return mergeGatewayHistory(local, server);
+  if (!server.length) {
+    return finalizeHistoryMessages(stripInboundExternalMessages(local));
+  }
+  return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
+}
+
+function rebuildMessagesFromGateway(serverMessages, localMessages) {
+  return buildDisplayHistoryFromGateway(serverMessages, localMessages);
 }
 
 function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages) {
@@ -3095,17 +3127,28 @@ function setStatus(text, kind) {
 
 function writeMessagesToStorageKey(sessionKey, items) {
   const storageKey = messagesStorageKey(sessionKey);
-  let slice = items;
+  let slice = Array.isArray(items) ? items : [];
   while (slice.length > 0) {
     try {
       localStorage.setItem(storageKey, JSON.stringify(slice));
       return true;
     } catch {
+      const pruned = pruneMessagesByRetention(slice);
+      if (pruned.length < slice.length) {
+        slice = pruned;
+        continue;
+      }
       if (slice.length <= 4) return false;
       slice = slice.slice(Math.ceil(slice.length / 4));
     }
   }
   return false;
+}
+
+function syncMemoryToArchive(sessionKey = currentSessionKey) {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
+  const completed = messages.filter((m) => !m.streaming && !m.queued && m.kind !== 'tool');
+  appendCompletedMessagesToArchive(sessionKey, completed);
 }
 
 function writeMessagesToStorage(items) {
@@ -3130,14 +3173,10 @@ function stripInboundExternalMessages(list) {
   return list.filter((m) => !m?.external);
 }
 
-/** 被动同步（转发/Webchat）：以本地归档为底，只追加/刷新 Gateway 内容 */
+/** 被动同步（转发/Webchat）：与 webchat 一致，以 Gateway 历史为准 */
 function mergePassiveSessionFromGateway(localMessages, serverMessages) {
   const local = stripInboundExternalMessages(localMessages);
-  const server = dedupeForwardUserMessages(
-    (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
-  );
-  if (!server.length) return finalizeHistoryMessages(local);
-  return finalizeHistoryMessages(mergeGatewayHistory(local, server));
+  return buildDisplayHistoryFromGateway(serverMessages, local);
 }
 
 function schedulePassiveSessionRefresh(sessionKey, { immediate = false } = {}) {
@@ -3610,12 +3649,7 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     if (result.messages.length === 0 && messages.length > 0 && options.allowEmptyServer !== true) return;
 
     const priorInflight = messages.filter((m) => m.streaming);
-    let nextMessages;
-    if (options.rebuildFromServer === true) {
-      nextMessages = rebuildMessagesFromGateway(result.messages, messages);
-    } else {
-      nextMessages = mergeGatewayHistory(messages, result.messages);
-    }
+    const nextMessages = buildDisplayHistoryFromGateway(result.messages, messages);
     if (priorInflight.length > 0) {
       nextMessages = reattachInFlightStreaming(nextMessages, priorInflight);
     }
@@ -4296,7 +4330,7 @@ async function checkConnection() {
         sessionKey: result.sessionKey || currentSessionKey,
       });
       setStatus('已连接', 'ok');
-      messages = finalizeHistoryMessages(messages);
+      syncMemoryToArchive();
       lastSyncedHistorySignature = '';
       lastSessionSyncAt = 0;
       await refreshCurrentModelBadge();
