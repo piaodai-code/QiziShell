@@ -1289,6 +1289,14 @@ function sendStreamErrorToRenderer(run, clientRunId, error) {
   }
 }
 
+function sendChatSegmentToRenderer(run, clientRunId, text) {
+  const payload = { runId: clientRunId, text };
+  sendToMainRenderer('openclaw:chat-segment', payload);
+  if (run?.sender) {
+    safeSendTo(run.sender, 'openclaw:chat-segment', payload);
+  }
+}
+
 function broadcastToRenderers(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     safeSendTo(mainWindow.webContents, channel, payload);
@@ -1306,6 +1314,15 @@ function parseImageMarkersFromText(text) {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
   return { text: plainText, images };
+}
+
+function isVisibleAssistantTextBlock(block) {
+  if (!block || typeof block !== 'object') return true;
+  if (block.type !== 'text') return false;
+  const phase = block.textSignature?.phase ?? block.phase;
+  if (!phase) return true;
+  const p = String(phase).toLowerCase();
+  return p !== 'commentary' && p !== 'thinking' && p !== 'reasoning';
 }
 
 function extractMessageParts(message) {
@@ -1327,7 +1344,7 @@ function extractMessageParts(message) {
         continue;
       }
       if (block?.type === 'text' && typeof block.text === 'string') {
-        textParts.push(block.text);
+        if (isVisibleAssistantTextBlock(block)) textParts.push(block.text);
         continue;
       }
       if (block?.type === 'image' && block.source?.data) {
@@ -1866,19 +1883,32 @@ async function recoverActiveRunsAfterReconnect() {
   }
 }
 
-function stripPriorAssistantPrefix(run, text) {
-  const priorRaw = String(run.priorAssistantText || '');
-  const prior = priorRaw.trim();
+function stripOneTextPrefix(text, priorRaw) {
+  if (!priorRaw) return text;
   let next = String(text || '');
-  if (!prior) return next;
+  const prior = priorRaw.trim();
+  if (!next) return next;
   if (next.trim() === prior) return '';
-  if (priorRaw && next.startsWith(priorRaw) && next.length > priorRaw.length) {
+  if (next.startsWith(priorRaw) && next.length > priorRaw.length) {
     return next.slice(priorRaw.length);
   }
   if (next.startsWith(prior) && next.length > prior.length) {
     return next.slice(prior.length);
   }
   return next;
+}
+
+function stripPriorAssistantPrefix(run, text) {
+  let next = String(text || '');
+  next = stripOneTextPrefix(next, String(run.priorAssistantText || ''));
+  next = stripOneTextPrefix(next, String(run.committedInRunText || ''));
+  return next;
+}
+
+function recordCommittedSegment(run, segmentText) {
+  const part = String(segmentText || '');
+  if (!part) return;
+  run.committedInRunText = `${run.committedInRunText || ''}${part}`;
 }
 
 function advanceOwnedStream(run, rawNext) {
@@ -1892,11 +1922,16 @@ function advanceOwnedStream(run, rawNext) {
   }
 
   if (next === current) return null;
-  if (!next.startsWith(current)) return null;
 
-  const delta = next.slice(current.length);
-  if (!delta) return null;
-  return { fullText: next, delta };
+  if (next.startsWith(current)) {
+    const delta = next.slice(current.length);
+    if (!delta) return null;
+    return { fullText: next, delta };
+  }
+
+  // 工具卡已 commit 上一段过程消息，Gateway 发来新段（strip 后不再延续 current）
+  recordCommittedSegment(run, current);
+  return { fullText: next, delta: next };
 }
 
 function finishClientRun(clientRunId, outcome) {
@@ -1906,7 +1941,11 @@ function finishClientRun(clientRunId, outcome) {
     rememberFinishedOwnedGatewayRun(run.gatewayRunId, getSessionKey());
   }
   unregisterActiveRun(clientRunId);
-  const fullText = run.fullText;
+  const fullText = String(
+    (typeof outcome?.text === 'string' ? outcome.text : '')
+    || run.fullText
+    || '',
+  );
   if (outcome.aborted) {
     sendStreamDoneToRenderer(run, clientRunId, { aborted: true, text: fullText });
   } else if (outcome.error) {
@@ -1927,6 +1966,67 @@ function isPayloadForCurrentSession(payload) {
   return !key || key === getSessionKey();
 }
 
+function markOwnedRunToolActivity(gatewayRunId) {
+  const id = gatewayRunId == null ? '' : String(gatewayRunId).trim();
+  if (!id) return;
+  const matched = findClientRunByGatewayRunId(id);
+  if (matched?.run) matched.run.sawToolActivity = true;
+}
+
+function isToolAgentEventPayload(payload) {
+  return Boolean(payload && payload.stream === 'tool');
+}
+
+function handleGatewayToolEvent(payload) {
+  if (!isToolAgentEventPayload(payload)) return;
+  const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
+  if (sessionKey && sessionKey !== getSessionKey()) return;
+  if (activeMeetingSessionKey && sessionKey === activeMeetingSessionKey) return;
+  if (isMeetingA2ASessionKey(sessionKey)) return;
+  if (payload.runId) markOwnedRunToolActivity(String(payload.runId));
+  broadcastToRenderers('openclaw:tool-event', payload);
+}
+
+function handleGatewayAgentLifecycleEvent(payload) {
+  if (!payload || payload.stream !== 'lifecycle') return;
+  const phase = payload.data?.phase;
+  if (phase !== 'end' && phase !== 'error') return;
+  const gatewayRunId = payload.runId == null ? '' : String(payload.runId);
+  if (!gatewayRunId) return;
+  const matched = findClientRunByGatewayRunId(gatewayRunId);
+  if (!matched) return;
+  const { clientRunId, run } = matched;
+  if (phase === 'error') {
+    const err = payload.data?.message || payload.data?.error || payload.data?.reason || 'agent error';
+    finishClientRun(clientRunId, { error: String(err) });
+    return;
+  }
+  const remaining = String(run.fullText || '').trim();
+  let doneText = remaining;
+  if (remaining) {
+    if (run.sawToolActivity) {
+      sendChatSegmentToRenderer(run, clientRunId, run.fullText);
+      recordCommittedSegment(run, run.fullText);
+      run.fullText = '';
+      doneText = '';
+    } else {
+      sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
+    }
+  }
+  finishClientRun(clientRunId, { ok: true, text: doneText });
+}
+
+function handleGatewayAgentEvent(payload) {
+  if (!payload || typeof payload !== 'object') return;
+  if (payload.stream === 'tool') {
+    handleGatewayToolEvent(payload);
+    return;
+  }
+  if (payload.stream === 'lifecycle') {
+    handleGatewayAgentLifecycleEvent(payload);
+  }
+}
+
 function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}) {
   if (!payload || typeof payload.runId !== 'string') return;
   if (activeMeetingSessionKey && payload.sessionKey === activeMeetingSessionKey) return;
@@ -1934,10 +2034,10 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
 
   const sessionKey = String(payload.sessionKey || '').trim();
   const forCurrentSession = !sessionKey || sessionKey === getSessionKey();
+  const isForwardRun = pendingForwardRuns.has(payload.runId);
   // Shell 正在当前 session 发消息时，忽略同 session 的外部流（owned run 优先）
   if (!allowWhileBusy && activeRuns.size > 0 && forCurrentSession) return;
 
-  const isForwardRun = pendingForwardRuns.has(payload.runId);
   const passive = isForwardRun || !forCurrentSession;
 
   const gatewayRunId = payload.runId;
@@ -2396,12 +2496,26 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   if (payload.state === 'final') {
     let finalText = extractMessageText(payload.message);
     if (finalText && !looksLikeLeakedToolPayloadText(finalText)) {
-      finalText = stripPriorAssistantPrefix(run, finalText) || finalText;
-      if (finalText.length >= run.fullText.length) {
-        run.fullText = finalText;
+      const stripped = stripPriorAssistantPrefix(run, finalText);
+      if (stripped) {
+        finalText = stripped;
+        if (finalText.length >= run.fullText.length) {
+          run.fullText = finalText;
+          sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
+        }
       }
     }
-    finishClientRun(clientRunId, { ok: true });
+    const visible = String(run.fullText || '').trim();
+    if (run.sawToolActivity) {
+      if (visible) {
+        sendChatSegmentToRenderer(run, clientRunId, run.fullText);
+        recordCommittedSegment(run, run.fullText);
+        run.fullText = '';
+      }
+      return;
+    }
+    if (!visible) return;
+    finishClientRun(clientRunId, { ok: true, text: run.fullText });
     return;
   }
 
@@ -2542,6 +2656,10 @@ function attachGatewayHandlers(client) {
     }
     if (frame.event === 'sessions.changed') {
       handleSessionsChangedEvent(frame.payload);
+      return;
+    }
+    if (frame.event === 'agent' || frame.event === 'session.tool') {
+      handleGatewayAgentEvent(frame.payload);
     }
   });
   client.on('connected', () => {
@@ -3314,6 +3432,8 @@ async function streamChat(event, { message, attachments, runId, priorAssistantTe
       sender: event.sender,
       fullText: '',
       priorAssistantText,
+      committedInRunText: '',
+      sawToolActivity: false,
       startedAt: Date.now(),
       lastEventAt: Date.now(),
       stableHistoryPolls: 0,

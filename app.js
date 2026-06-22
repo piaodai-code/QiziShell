@@ -208,6 +208,92 @@ function debugEvent(channel, event, payload) {
 }
 
 let messages = [];
+let nextMessageId = 1;
+
+function allocMessageId() {
+  nextMessageId += 1;
+  return `m-${nextMessageId}`;
+}
+
+function isToolTimelineMessage(msg) {
+  return window.ChatTimeline?.isToolMsg?.(msg) || msg?.kind === 'tool';
+}
+
+function resetChatTimeline() {
+  chatTimeline?.reset?.();
+}
+
+/** @type {ReturnType<typeof window.ChatTimeline.create> | null} */
+let chatTimeline = null;
+
+function purgeStreamingAssistantForRun(runId) {
+  if (runId == null) return;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.who !== 'them' || isToolTimelineMessage(m) || !m.streaming) continue;
+    if (!runIdsMatch(m.runId, runId)) continue;
+    messages.splice(i, 1);
+  }
+}
+
+function ensureChatTimeline() {
+  if (chatTimeline) return chatTimeline;
+  chatTimeline = window.ChatTimeline.create({
+    getMessages: () => messages,
+    getScope: () => ({ sessionKey: currentSessionKey, chatEpoch: chatScopeEpoch }),
+    allocId: allocMessageId,
+    now,
+    formatEnvelopeTime: formatGatewayEnvelopeTime,
+    isPlaceholderText: isStreamingPlaceholderText,
+    onArchive: (msg) => appendCompletedMessageToArchive(currentSessionKey, msg),
+    onRender: () => render(),
+    onRenderStream: (runId) => scheduleStreamingUpdate(runId),
+    getActiveRunId: () => activeRunId,
+    onRunDone: ({ runId, error, aborted }) => {
+      if (streamRenderTimer) {
+        clearTimeout(streamRenderTimer);
+        streamRenderTimer = null;
+      }
+      if (streamPaintRaf != null) {
+        cancelAnimationFrame(streamPaintRaf);
+        streamPaintRaf = null;
+      }
+      if (userAborted && !error && !aborted) return;
+      purgeStreamingAssistantForRun(runId);
+      lastOwnedRunFinishedAt = Date.now();
+      if (pendingModelUpdate && !error) {
+        pendingModelUpdate = false;
+        const lastThem = [...messages].reverse().find((m) => m.who === 'them' && !isToolTimelineMessage(m));
+        if (lastThem?.text) updateModelBadge(lastThem.text);
+      }
+      setBusy(false);
+      activeRunId = null;
+      stopStreamHistoryPoll();
+      externalSessionRunId = null;
+      refreshSessionInfo();
+      setStatus('已连接', 'ok');
+      if (!userAborted && pendingQueue.length > 0) {
+        setTimeout(processQueue, QUEUE_INTER_MS);
+      }
+      debugEvent('stream', 'timeline_run_done', { runId, error: error || null });
+    },
+    onToolRunning: () => setStatus('工具运行中…', 'pending'),
+  });
+  return chatTimeline;
+}
+
+function applyGatewayToolEvent(payload) {
+  if (!payload || payload.stream !== 'tool') return;
+  const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
+  if (sessionKey && sessionKey !== currentSessionKey) return;
+  if (window.MeetingView?.isVisible?.()) return;
+  ensureChatTimeline().enqueueTool({ payload, runId: activeRunId });
+}
+
+function applyChatSegment(payload) {
+  if (!payload) return;
+  ensureChatTimeline().enqueueSegment({ runId: payload.runId, text: payload.text });
+}
 let busy = false;
 let connected = false;
 // 待发送的图片（dataUrl 列表）
@@ -509,9 +595,12 @@ function runIdsMatch(a, b) {
 
 function findStreamingMessageByRunId(runId) {
   if (runId == null) return null;
-  return messages.find(
-    (m) => m.who === 'them' && m.streaming && runIdsMatch(m.runId, runId),
-  ) || null;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i];
+    if (m.who !== 'them' || !m.streaming || isToolTimelineMessage(m)) continue;
+    if (runIdsMatch(m.runId, runId)) return m;
+  }
+  return null;
 }
 
 function normalizeStreamingFlags() {
@@ -667,8 +756,20 @@ function render(options = {}) {
     const m = messages[i];
     try {
       const row = document.createElement('div');
-      row.className = 'msg ' + m.who;
+      row.className = 'msg ' + m.who + (isToolTimelineMessage(m) ? ' msg-tool' : '');
+      if (m.id) row.dataset.msgId = String(m.id);
       if (m.runId != null) row.dataset.runId = String(m.runId);
+      if (isToolTimelineMessage(m)) {
+        row.innerHTML = `
+          ${renderMessageAvatarHtml(m.who)}
+          <div class="msg-content">
+            ${window.ToolStream?.renderToolCardHtml?.(m) || ''}
+            <div class="msg-meta">${m.time || ''}${m.streaming ? ' · 运行中…' : ''}</div>
+          </div>
+        `;
+        messagesEl.appendChild(row);
+        continue;
+      }
       row.innerHTML = `
         ${renderMessageAvatarHtml(m.who)}
         <div class="msg-content">
@@ -2222,6 +2323,7 @@ function readRawStoredMessagesForSession(sessionKey) {
 
 function archiveRecordFromMessage(msg) {
   if (!msg || msg.streaming || msg.queued) return null;
+  if (msg.kind === 'tool') return null;
   const m = backfillMessageSentAtMs(normalizeUserMessageRecord({ ...msg, streaming: false }));
   if (m.who === 'them' && isStreamingPlaceholderText(m.text)) return null;
   if (m.who === 'me' && !String(m.text || '').trim()
@@ -2843,6 +2945,7 @@ function applyLoadedSessionKey(result) {
   const prevSessionKey = currentSessionKey;
   debugEvent('session', 'apply_loaded_session_key', { from: prevSessionKey, to: result.sessionKey });
   chatScopeEpoch += 1;
+  resetChatTimeline();
   messages = [];
   currentSessionKey = result.sessionKey;
   currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
@@ -3081,6 +3184,14 @@ async function refreshSessionFromGateway(sessionKey, options = {}) {
     }
     const local = readRawStoredMessagesForSession(sessionKey);
     const merged = mergePassiveSessionFromGateway(local, result.messages);
+    const replaceLive = options.replaceLiveView === true;
+    if (sessionKey === currentSessionKey && !replaceLive) {
+      appendCompletedMessagesToArchive(
+        sessionKey,
+        merged.filter((m) => !m.streaming && !m.queued),
+      );
+      return true;
+    }
     commitSessionMessages(sessionKey, merged);
     return true;
   } catch (err) {
@@ -3110,6 +3221,7 @@ async function refreshForwardTargetSessions(result) {
     await refreshSessionFromGateway(sessionKey, {
       retries: FORWARD_HISTORY_MAX_RETRIES,
       waitForChange: true,
+      replaceLiveView: sessionKey === currentSessionKey,
     });
   }
 }
@@ -3132,6 +3244,7 @@ async function openExecAgentAfterMeetingForward(detail) {
   await refreshSessionFromGateway(targetKey, {
     retries: FORWARD_HISTORY_MAX_RETRIES,
     waitForChange: true,
+    replaceLiveView: true,
   });
   resetOutboundChatState({ clearQueue: true });
   render();
@@ -3140,18 +3253,27 @@ async function openExecAgentAfterMeetingForward(detail) {
 
 function updateStreamingBubble(runId) {
   if (!messagesEl || runId == null) return;
-  const m = findStreamingMessageByRunId(runId)
-    || findAssistantStreamTarget(runId)
-    || messages.find((msg) => msg.who === 'them' && msg.streaming && runIdsMatch(msg.runId, runId));
+  const m = findAssistantStreamTarget(runId)
+    || findStreamingMessageByRunId(runId);
   if (!m) {
     render();
     return;
   }
   const msgIndex = messages.indexOf(m);
-  let row = messagesEl.querySelector(`[data-run-id="${m.runId}"]`);
+  if (msgIndex < 0) {
+    render();
+    return;
+  }
+  const msgId = m.id != null ? String(m.id) : '';
+  let row = msgId
+    ? messagesEl.querySelector(`[data-msg-id="${CSS.escape(msgId)}"]`)
+    : null;
+  // 同一 runId 在本轮会有多条助手消息（过程段 + 最终段），绝不能用 data-run-id（会命中发送时的占位行）
   if (!row) {
     render();
-    row = messagesEl.querySelector(`[data-run-id="${m.runId}"]`);
+    row = msgId
+      ? messagesEl.querySelector(`[data-msg-id="${CSS.escape(msgId)}"]`)
+      : null;
     if (!row) return;
   }
   const bubble = row.querySelector('.msg-bubble');
@@ -3226,6 +3348,44 @@ function startSessionWatch() {
   }, SESSION_WATCH_MS);
 }
 
+let lastOwnedRunFinishedAt = 0;
+
+function applyCurrentSessionContinuation(payload) {
+  if (payload.state === 'delta') {
+    // owned run 刚结束时的同 session 迟到续流（webchat 不展示），避免 phantom 气泡
+    if (!busy && Date.now() - lastOwnedRunFinishedAt < 15000) return;
+    if (!busy) {
+      setBusy(true);
+      if (payload.runId != null) activeRunId = payload.runId;
+      else if (activeRunId == null) {
+        currentRunId += 1;
+        activeRunId = currentRunId;
+      }
+    }
+    ensureChatTimeline().enqueueDelta({
+      runId: activeRunId,
+      delta: payload.delta,
+      replace: payload.replace === true,
+      fullText: payload.text,
+      external: true,
+      gatewayRunId: payload.gatewayRunId || null,
+    });
+    setStatus('回复中…', 'pending');
+    return;
+  }
+
+  if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
+    const runId = activeRunId;
+    ensureChatTimeline().enqueueDone({
+      runId,
+      text: payload.text,
+      error: payload.state === 'error' ? (payload.error || 'chat error') : null,
+      aborted: payload.state === 'aborted',
+    });
+    if (!busy) setStatus('已连接', 'ok');
+  }
+}
+
 async function applyGatewaySessionChat(payload) {
   if (!payload || isLocalOwnedActiveRun()) return;
   if (window.MeetingView?.isVisible?.()) return;
@@ -3233,11 +3393,17 @@ async function applyGatewaySessionChat(payload) {
   const sessionKey = String(payload.sessionKey || currentSessionKey).trim() || currentSessionKey;
   const isViewing = sessionKey === currentSessionKey;
 
-  // 转发 / 非当前 session：只以 Gateway 历史为准，避免先插入助手气泡再 merge 导致顺序颠倒
   if (payload.passive) {
     const terminal = payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error';
-    schedulePassiveSessionRefresh(sessionKey, { immediate: terminal });
+    if (!isViewing) {
+      schedulePassiveSessionRefresh(sessionKey, { immediate: terminal });
+    }
     if (isViewing && terminal && !busy) setStatus('已连接', 'ok');
+    return;
+  }
+
+  if (isViewing) {
+    applyCurrentSessionContinuation(payload);
     return;
   }
 
@@ -3286,7 +3452,7 @@ async function applyGatewaySessionChat(payload) {
 
   if (payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error') {
     schedulePassiveSessionRefresh(sessionKey, { immediate: true });
-    if (isViewing && !busy) setStatus('已连接', 'ok');
+    setStatus('已连接', 'ok');
   }
 }
 
@@ -3304,7 +3470,7 @@ function isMessageInCurrentChatScope(message) {
 function findScopedAssistantByRunId(runId, { requireStreaming = false } = {}) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const candidate = messages[i];
-    if (candidate.who !== 'them') continue;
+    if (candidate.who !== 'them' || isToolTimelineMessage(candidate)) continue;
     if (!runIdsMatch(candidate.runId, runId)) continue;
     if (requireStreaming && !candidate.streaming) continue;
     if (!isMessageInCurrentChatScope(candidate)) continue;
@@ -3314,20 +3480,7 @@ function findScopedAssistantByRunId(runId, { requireStreaming = false } = {}) {
 }
 
 function findAssistantStreamTarget(runId) {
-  if (runId != null) {
-    return findScopedAssistantByRunId(runId) || null;
-  }
-  if (activeRunId != null) {
-    const active = findScopedAssistantByRunId(activeRunId, { requireStreaming: true });
-    if (active) return active;
-  }
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const candidate = messages[i];
-    if (candidate.who === 'them' && candidate.streaming && isMessageInCurrentChatScope(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
+  return ensureChatTimeline().findStreaming(runId ?? activeRunId);
 }
 
 function paintStreamingBubble(runId) {
@@ -3353,44 +3506,12 @@ function isPriorAssistantReplay(target, incomingText) {
 }
 
 function applyStreamingDelta(delta, runId, replace) {
-  const target = findAssistantStreamTarget(runId);
-  if (!target) {
-    debugEvent('stream', 'delta_target_missing', {
-      runId,
-      replace: replace === true,
-      deltaLength: String(delta || '').length,
-      activeRunId,
-      busy,
-      tail: messages.slice(-4).map((m) => ({
-        who: m.who,
-        runId: m.runId,
-        streaming: m.streaming === true,
-        sessionKey: m.sessionKey,
-      })),
-    });
-    return;
-  }
-
-  const incoming = String(delta || '');
-  if (!incoming) return;
-
-  let nextText;
-  if (replace || isStreamingPlaceholderText(target.text)) {
-    nextText = stripPriorAssistantReplay(target, incoming);
-  } else {
-    nextText = stripPriorAssistantReplay(
-      target,
-      `${streamingTextForMerge(target.text)}${incoming}`,
-    );
-  }
-  if (!nextText) return;
-  if (isPriorAssistantReplay(target, nextText)) return;
-
-  target.text = nextText;
-  target.streaming = true;
-  target.queued = false;
-  target.lastDeltaAt = Date.now();
-  paintStreamingBubble(runId ?? target.runId);
+  if (userAborted) return;
+  ensureChatTimeline().enqueueDelta({
+    runId: runId ?? activeRunId,
+    delta,
+    replace: replace === true,
+  });
 }
 
 function userMessageHasPayload(m) {
@@ -3619,95 +3740,13 @@ async function resumeInterruptedSession(options = {}) {
   }
 }
 
-function finishAssistant({ error, runId, text } = {}) {
-  if (streamRenderTimer) {
-    clearTimeout(streamRenderTimer);
-    streamRenderTimer = null;
-  }
-  if (streamPaintRaf != null) {
-    cancelAnimationFrame(streamPaintRaf);
-    streamPaintRaf = null;
-  }
-  if (userAborted && !error) return;
-  let target = null;
-  if (runId != null) {
-    target = findAssistantStreamTarget(runId);
-  }
-  if (!target) {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const candidate = messages[i];
-      if (candidate.who === 'them' && candidate.streaming && isMessageInCurrentChatScope(candidate)) {
-        target = candidate;
-        break;
-      }
-    }
-  }
-  if (!target) {
-    setBusy(false);
-    activeRunId = null;
-    return;
-  }
-  if (!isMessageInCurrentChatScope(target)) {
-    setBusy(false);
-    activeRunId = null;
-    return;
-  }
-
-  const streamed = streamingTextForMerge(target.text);
-  let incomingText = typeof text === 'string' ? text : '';
-  if (incomingText && isPriorAssistantReplay(target, incomingText)) {
-    incomingText = '';
-  }
-  if (incomingText && streamed && !isStreamingPlaceholderText(streamed)) {
-    if (incomingText.trim() === streamed.trim()) {
-      incomingText = '';
-    } else if (incomingText.length < streamed.length) {
-      incomingText = '';
-    }
-  }
-  const hasIncomingText = incomingText.length > 0;
-  const placeholder = isStreamingPlaceholderText(target.text);
-  const canGrowText = hasIncomingText && incomingText.length > (target.text || '').length;
-
-  if (!target.streaming && !error && !canGrowText && !placeholder) {
-    if (runId == null || runIdsMatch(runId, activeRunId)) {
-      setBusy(false);
-      activeRunId = null;
-    }
-    return;
-  }
-
-  if (canGrowText || (hasIncomingText && placeholder)) {
-    target.text = incomingText;
-  }
-  target.streaming = false;
-  target.queued = false;
-  if (!target.sentAtMs) {
-    const completedAtMs = Date.now();
-    target.sentAtMs = completedAtMs;
-    if (!target.sentTime) target.sentTime = formatGatewayEnvelopeTime(completedAtMs);
-  }
-  // 如果有错误，追加错误信息（不覆盖已输出内容）
-  if (error && !String(error).includes('连接断开') && !String(error).includes('Gateway')) {
-    target.text = target.text ? `${target.text}\n\n[错误] ${error}` : `[错误] ${error}`;
-  }
-  // /model 回复时解析模型名更新标签
-  if (pendingModelUpdate) {
-    pendingModelUpdate = false;
-    updateModelBadge(target.text);
-  }
-
-  if (runId == null || runIdsMatch(runId, activeRunId)) {
-    setBusy(false);
-    activeRunId = null;
-    stopStreamHistoryPoll();
-    if (target.external) {
-      externalSessionRunId = null;
-    }
-  }
-  appendCompletedMessageToArchive(target.sessionKey || currentSessionKey, target);
-  render();
-  refreshSessionInfo();
+function finishAssistant({ error, runId, text, aborted } = {}) {
+  ensureChatTimeline().enqueueDone({
+    runId: runId ?? activeRunId,
+    text,
+    error,
+    aborted,
+  });
 }
 
 function formatAgentCurrentModel(agent) {
@@ -4036,6 +4075,7 @@ async function switchToAgent(agentId) {
     fromSessionKey: prevSessionKey,
   });
   chatScopeEpoch += 1;
+  resetChatTimeline();
   messages = [];
   pendingQueue = [];
   pendingImages = [];
@@ -4593,6 +4633,7 @@ async function send() {
 
   // 立刻把 user 消息 push + 渲染（不卡 UI，方案 A3）
   const userMsg = {
+    id: allocMessageId(),
     who: 'me',
     text,
     quote: quoteSnapshot,
@@ -4616,6 +4657,7 @@ async function send() {
   // 给 user 消息留个对应的 assistant 占位（启孜回复的）
   // 如果当前没在跑 stream → 立刻开始流式；否则入队排队
   const assistantMsg = {
+    id: allocMessageId(),
     who: 'them',
     text: busy ? '' : '…',
     time: now(),
@@ -4656,8 +4698,9 @@ async function runStream(assistantMsg) {
       priorAssistantText: '',
     }, myRunId);
     if (result?.ok === true) {
-      // IPC openclaw:done 丢失时，使用 invoke 返回值兜底收尾
-      finishAssistant({ runId: myRunId, text: result.text || '' });
+      if (!ensureChatTimeline().isRunFinished(myRunId)) {
+        finishAssistant({ runId: myRunId, text: result.text || '' });
+      }
     } else if (result?.ok === false && result?.error && !result?.aborted) {
       finishAssistant({ error: result.error, runId: myRunId });
     }
@@ -4667,14 +4710,8 @@ async function runStream(assistantMsg) {
     if (userAborted) {
       setBusy(false);
       activeRunId = null;
-      return;
     }
-    if (pendingQueue.length > 0) {
-      setTimeout(processQueue, QUEUE_INTER_MS);
-    } else if (!messages.some((m) => m.who === 'them' && m.streaming)) {
-      setBusy(false);
-      activeRunId = null;
-    }
+    // busy / activeRunId 由 timeline.onRunDone 或 abort 收尾；避免工具段之间误清 busy
   }
 }
 
@@ -4750,6 +4787,18 @@ if (window.qizi.onGatewayStatus) {
 if (window.qizi.onSessionChat) {
   window.qizi.onSessionChat((payload) => {
     void applyGatewaySessionChat(payload);
+  });
+}
+
+if (window.qizi.onToolEvent) {
+  window.qizi.onToolEvent((payload) => {
+    applyGatewayToolEvent(payload);
+  });
+}
+
+if (window.qizi.onChatSegment) {
+  window.qizi.onChatSegment((payload) => {
+    applyChatSegment(payload);
   });
 }
 
@@ -4830,6 +4879,7 @@ if (messagesEl) {
     const msgIndex = rows.indexOf(row);
     if (msgIndex < 0 || msgIndex >= messages.length) return;
     const msg = messages[msgIndex];
+    if (isToolTimelineMessage(msg)) return;
     if (msg.streaming) {
       setStatus('生成中的消息暂不可操作', 'error');
       return;
