@@ -807,7 +807,8 @@ body.meeting-mode .composer {
   white-space: nowrap;
 }
 
-.btw-side-dock {
+.btw-side-dock,
+.queue-side-dock {
   position: fixed;
   left: 12px;
   right: 12px;
@@ -816,6 +817,7 @@ body.meeting-mode .composer {
   pointer-events: none;
   animation: btw-side-in 0.14s ease-out;
 }
+.queue-side-dock { z-index: 10000; }
 .btw-side-dock[hidden] { display: none !important; }
 @keyframes btw-side-in {
   from { opacity: 0; transform: translateY(6px); }

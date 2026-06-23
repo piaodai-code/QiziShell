@@ -102,6 +102,8 @@ const btwSideDockEl = document.getElementById('btw-side-dock');
 const btwSideQuestionEl = document.getElementById('btw-side-question');
 const btwSideAnswerEl = document.getElementById('btw-side-answer');
 const btwSideCloseBtn = document.getElementById('btw-side-close');
+const queueSideDockEl = document.getElementById('queue-side-dock');
+const queueSideMessageEl = document.getElementById('queue-side-message');
 
 let activeSettingsTab = 'gateway';
 
@@ -273,7 +275,7 @@ function ensureChatTimeline() {
       externalSessionRunId = null;
       refreshSessionInfo();
       setStatus('已连接', 'ok');
-      if (!userAborted && pendingQueue.length > 0) {
+      if (!userAborted && pendingOutbound) {
         setTimeout(processQueue, QUEUE_INTER_MS);
       }
       debugEvent('stream', 'timeline_run_done', { runId, error: error || null });
@@ -310,8 +312,8 @@ let pendingFiles = [];
 let currentRunId = 0;
 // 主进程推过来的 runId（用于校验事件归属，避免旧 stream 的 delta 污染新 stream）
 let activeRunId = null;
-// 排队队列：每项是 assistant 占位消息对象，busy 时新消息进队，旧 stream 跑完才处理
-let pendingQueue = [];
+/** Agent 忙时待发送的一条消息（不进主列表，避免 Gateway sync 抹掉） */
+let pendingOutbound = null;
 // 队列里两条 stream 之间的间隔（避免把后端冲垮）
 const QUEUE_INTER_MS = 100;
 // 支持的图片 mime 类型（HEIC 会在发送时自动转为 JPEG）
@@ -2051,6 +2053,7 @@ function assistantTextsMatch(a, b) {
  * ─────────────────────────────────────────────────────────────
  * 1. Shell 发送（owned run）
  *    chat.send 前 registerActiveRun；流式只走 IPC delta；busy 仅在此路径置位
+ *    Agent 忙时新消息进排队卡片（不进主列表），当前 run 结束后才 chat.send
  *
  * 2. Gateway 被动活动（转发 / Webchat / 其他端）
  *    统一走 openclaw:session-chat；passive 不占 busy
@@ -2737,11 +2740,7 @@ function resetOutboundChatState({ clearQueue = true } = {}) {
   stopStreamHistoryPoll();
   externalSessionRunId = null;
   if (clearQueue) {
-    for (const queued of pendingQueue) {
-      const idx = messages.indexOf(queued);
-      if (idx >= 0) messages.splice(idx, 1);
-    }
-    pendingQueue = [];
+    clearPendingOutbound();
   }
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const m = messages[i];
@@ -2832,10 +2831,42 @@ function setBtwAuxDim(active) {
 }
 
 function positionBtwSideDock() {
-  if (!btwSideDockEl) return;
   const composer = document.getElementById('composer');
   const height = composer ? composer.getBoundingClientRect().height : 120;
-  btwSideDockEl.style.setProperty('--btw-dock-bottom', `${Math.ceil(height) + 8}px`);
+  const bottom = `${Math.ceil(height) + 8}px`;
+  if (btwSideDockEl) btwSideDockEl.style.setProperty('--btw-dock-bottom', bottom);
+  if (queueSideDockEl) queueSideDockEl.style.setProperty('--btw-dock-bottom', bottom);
+}
+
+function formatQueueSidePreview(userMsg) {
+  if (!userMsg) return '';
+  const parts = [];
+  const text = String(userMsg.text || '').trim();
+  if (text) parts.push(text);
+  const imageCount = Array.isArray(userMsg.images) ? userMsg.images.length : 0;
+  const fileCount = Array.isArray(userMsg.files) ? userMsg.files.length : 0;
+  if (imageCount > 0) parts.push(imageCount === 1 ? '（图片）' : `（${imageCount} 张图片）`);
+  if (fileCount > 0) parts.push(fileCount === 1 ? '（附件）' : `（${fileCount} 个附件）`);
+  if (userMsg.quote?.text) parts.unshift(`引用：${String(userMsg.quote.text).trim()}`);
+  return parts.join('\n') || '（空消息）';
+}
+
+function dismissQueueSideCard() {
+  if (!queueSideDockEl || queueSideDockEl.hidden) return;
+  queueSideDockEl.hidden = true;
+  if (queueSideMessageEl) queueSideMessageEl.textContent = '';
+}
+
+function showQueueSideCard(userMsg) {
+  if (!queueSideDockEl || !queueSideMessageEl) return;
+  queueSideMessageEl.textContent = formatQueueSidePreview(userMsg);
+  positionBtwSideDock();
+  queueSideDockEl.hidden = false;
+}
+
+function clearPendingOutbound() {
+  pendingOutbound = null;
+  dismissQueueSideCard();
 }
 
 function unbindBtwDismissKeys() {
@@ -4085,10 +4116,10 @@ async function switchToAgent(agentId) {
   hideAgentPopup();
   setStatus('切换 Agent…', 'pending');
   dismissBtwSideCard();
+  clearPendingOutbound();
 
   if (busy) {
     userAborted = true;
-    pendingQueue = [];
     try {
       await window.qizi.abortChat();
     } catch {
@@ -4111,7 +4142,7 @@ async function switchToAgent(agentId) {
   chatScopeEpoch += 1;
   resetChatTimeline();
   messages = [];
-  pendingQueue = [];
+  clearPendingOutbound();
   pendingImages = [];
   pendingFiles = [];
   activeRunId = null;
@@ -4385,12 +4416,7 @@ async function abortRun() {
   userAborted = true;
   stopStreamHistoryPoll();
   const staleRunId = activeRunId;
-  // 清空队列里的所有 pending 消息，把它们从 messages 里也删掉
-  for (const m of pendingQueue) {
-    const idx = messages.indexOf(m);
-    if (idx >= 0) messages.splice(idx, 1);
-  }
-  pendingQueue = [];
+  clearPendingOutbound();
   const target = staleRunId != null
     ? messages.find((m) => m.who === 'them' && Number(m.runId) === Number(staleRunId))
     : null;
@@ -4623,6 +4649,10 @@ async function send() {
     await sendBtw(text);
     return;
   }
+  if (busy && pendingOutbound) {
+    setStatus('已有消息排队，请稍候…', 'pending');
+    return;
+  }
   if (text && text.trimStart().toLowerCase().startsWith('/debug')) {
     await handleDebugCommand(text);
     return;
@@ -4665,7 +4695,6 @@ async function send() {
 
   rememberSentInput(text);
 
-  // 立刻把 user 消息 push + 渲染（不卡 UI，方案 A3）
   const userMsg = {
     id: allocMessageId(),
     who: 'me',
@@ -4679,42 +4708,43 @@ async function send() {
     sessionKey: currentSessionKey,
     chatEpoch: chatScopeEpoch,
   };
-  messages.push(userMsg);
-  appendCompletedMessageToArchive(currentSessionKey, userMsg);
-  inputEl.value = '';
-  resetInputHeight();
-  clearPendingQuote();
-  hideCommandPopup();
-  updateComposerSendBtn();
-  setStatus('', ''); // 清掉 “截屏完成，可发送” 之类的提示（发完了就没用了）
 
-  // 给 user 消息留个对应的 assistant 占位（启孜回复的）
-  // 如果当前没在跑 stream → 立刻开始流式；否则入队排队
   const assistantMsg = {
     id: allocMessageId(),
     who: 'them',
-    text: busy ? '' : '…',
+    text: '…',
     time: now(),
-    streaming: !busy,
-    queued: busy,
-    queuedAt: busy ? Date.now() : null,
+    streaming: true,
+    queued: false,
+    queuedAt: null,
     runId: myRunId,
     streamingStartedAt: Date.now(),
     lastDeltaAt: Date.now(),
     sessionKey: currentSessionKey,
     chatEpoch: chatScopeEpoch,
   };
-  messages.push(assistantMsg);
+
+  inputEl.value = '';
+  resetInputHeight();
+  clearPendingQuote();
+  hideCommandPopup();
+  updateComposerSendBtn();
+  setStatus('', '');
 
   if (busy) {
-    pendingQueue.push(assistantMsg);
+    pendingOutbound = { user: userMsg, assistant: assistantMsg, runId: myRunId };
+    showQueueSideCard(userMsg);
     render();
-  } else {
-    setBusy(true);
-    activeRunId = myRunId;
-    render();
-    runStream(assistantMsg);
+    return;
   }
+
+  messages.push(userMsg);
+  appendCompletedMessageToArchive(currentSessionKey, userMsg);
+  messages.push(assistantMsg);
+  setBusy(true);
+  activeRunId = myRunId;
+  render();
+  runStream(assistantMsg);
 }
 
 // 跑一条 assistant 消息的 stream，跑完自动处理队列下一条
@@ -4749,27 +4779,32 @@ async function runStream(assistantMsg) {
   }
 }
 
-// 队列处理器：从队列里取下一条，标记 streaming 状态，跑 stream
+// 当前 run 结束后，把排队消息放进主列表并 chat.send
 function processQueue() {
   if (userAborted) {
     setBusy(false);
     activeRunId = null;
     return;
   }
-  if (pendingQueue.length === 0) {
+  if (!pendingOutbound) {
     setBusy(false);
     activeRunId = null;
     return;
   }
-  const next = pendingQueue.shift();
-  next.queued = false;
-  next.queuedAt = null;
-  next.streaming = true;
-  next.text = '…';
+  const { user, assistant, runId } = pendingOutbound;
+  pendingOutbound = null;
+  dismissQueueSideCard();
+  messages.push(user);
+  appendCompletedMessageToArchive(currentSessionKey, user);
+  messages.push(assistant);
+  assistant.streaming = true;
+  assistant.queued = false;
+  assistant.queuedAt = null;
+  assistant.text = '…';
   setBusy(true);
-  activeRunId = next.runId;
+  activeRunId = runId;
   render();
-  runStream(next);
+  runStream(assistant);
 }
 
 window.qizi.onChatDelta((delta, runId, replace) => {
@@ -5417,11 +5452,13 @@ if (emojiBtn) {
     inputEl.style.maxHeight = '';
     positionEmojiPicker();
     if (btwSideDockEl && !btwSideDockEl.hidden) positionBtwSideDock();
+    if (queueSideDockEl && !queueSideDockEl.hidden) positionBtwSideDock();
   }
   function onUp() {
     document.removeEventListener('mousemove', onDrag);
     document.removeEventListener('mouseup', onUp);
     if (btwSideDockEl && !btwSideDockEl.hidden) positionBtwSideDock();
+    if (queueSideDockEl && !queueSideDockEl.hidden) positionBtwSideDock();
   }
 })();
 
@@ -5635,6 +5672,7 @@ window.addEventListener('resize', () => {
   if (forwardModal && !forwardModal.hidden) updateForwardPreviewEllipsis();
   positionEmojiPicker();
   if (btwSideDockEl && !btwSideDockEl.hidden) positionBtwSideDock();
+  if (queueSideDockEl && !queueSideDockEl.hidden) positionBtwSideDock();
 });
 
 /* ---------------- 设置 ---------------- */
