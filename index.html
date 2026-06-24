@@ -357,7 +357,13 @@
         <p class="meeting-hint">界面为群聊气泡；后台在隔离 A2A session 中通信，不写入你与 Agent 的 main 私聊。</p>
         <label class="meeting-field">
           <span class="meeting-label">议题</span>
-          <input type="text" class="meeting-input" id="meeting-topic" placeholder="例如：QiziShell 下一版功能取舍">
+          <div class="meeting-topic-row">
+            <input type="text" class="meeting-input meeting-topic-input" id="meeting-topic" placeholder="例如：QiziShell 下一版功能取舍" autocomplete="off">
+            <button type="button" class="meeting-preset-picker-btn" id="meeting-preset-picker-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="已保存的会议" title="已保存的会议">
+              <span class="meeting-preset-picker-caret" aria-hidden="true">▾</span>
+            </button>
+            <div class="meeting-preset-menu" id="meeting-preset-menu" hidden role="listbox" aria-label="已保存的会议"></div>
+          </div>
         </label>
         <label class="meeting-field">
           <span class="meeting-label">讨论底稿</span>
@@ -393,9 +399,16 @@
           </div>
         </div>
         <div class="meeting-actions">
-          <button type="button" class="meeting-secondary-btn" id="meeting-cancel-btn">取消</button>
-          <button type="button" class="meeting-primary-btn" id="meeting-start-btn">开始会议</button>
+          <div class="meeting-actions-left">
+            <button type="button" class="meeting-secondary-btn" id="meeting-save-preset-btn">保存会议</button>
+            <button type="button" class="meeting-secondary-btn meeting-delete-preset-btn" id="meeting-delete-preset-btn">删除</button>
+          </div>
+          <div class="meeting-actions-right">
+            <button type="button" class="meeting-secondary-btn" id="meeting-cancel-btn">取消</button>
+            <button type="button" class="meeting-primary-btn" id="meeting-start-btn">开始会议</button>
+          </div>
         </div>
+        <div class="meeting-toast" id="meeting-toast" hidden role="status" aria-live="polite"></div>
       </div>
     </div>
   </div>
@@ -448,6 +461,7 @@
   <script src="chat-timeline.js"></script>
   <script src="app.js"></script>
   <script src="meeting-view.js"></script>
+  <script src="meeting-preset-store.js"></script>
   <script src="meeting-ui.js"></script>
 </body>
 </html>

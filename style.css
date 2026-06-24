@@ -2502,9 +2502,121 @@ body.drag-over .composer-pending {
 body.meeting-mode .msg-hint { color: var(--meta-text); }
 .meeting-actions {
   display: flex;
-  justify-content: flex-end;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: 12px;
+}
+.meeting-actions-left,
+.meeting-actions-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.meeting-delete-preset-btn {
+  color: #b71c1c;
+}
+.meeting-delete-preset-btn:hover {
+  background: #ffebee;
+}
+.meeting-topic-row {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+.meeting-topic-input {
+  flex: 1;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.meeting-preset-picker-btn {
+  flex: 0 0 auto;
+  width: 36px;
+  border: 1px solid var(--border);
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  background: #f7f7f7;
+  color: #555;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+.meeting-preset-picker-btn:hover,
+.meeting-preset-picker-btn[aria-expanded="true"] {
+  background: #eef4ff;
+  color: #1565c0;
+}
+.meeting-preset-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 2;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  padding: 4px 0;
+}
+.meeting-preset-menu[hidden] { display: none !important; }
+.meeting-preset-menu-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--meta-text);
+}
+.meeting-preset-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 12px;
+  cursor: pointer;
+  font: inherit;
+}
+.meeting-preset-option:hover,
+.meeting-preset-option:focus-visible {
+  background: #f5f8ff;
+  outline: none;
+}
+.meeting-preset-option-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.meeting-preset-option-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--meta-text);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+.meeting-toast {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+}
+.meeting-toast[hidden] { display: none !important; }
+.meeting-toast.is-ok {
+  background: #e8f4fd;
+  color: #1565c0;
+}
+.meeting-toast.is-error {
+  background: #ffebee;
+  color: #b71c1c;
 }
 .meeting-primary-btn,
 .meeting-secondary-btn {
@@ -2515,9 +2627,18 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
   cursor: pointer;
   padding: 8px 14px;
 }
-.meeting-primary-btn { background: #2e7d32; color: #fff; }
-.meeting-primary-btn:hover { background: #256628; }
+.meeting-primary-btn { background: #1976d2; color: #fff; }
+.meeting-primary-btn:hover { background: #1565c0; }
+.meeting-primary-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 .meeting-secondary-btn { background: #f2f2f2; color: var(--text); }
+.meeting-secondary-btn:hover { background: #e8e8e8; }
+.meeting-secondary-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
 .meeting-end-confirm-modal {
   position: fixed;
   inset: 0;

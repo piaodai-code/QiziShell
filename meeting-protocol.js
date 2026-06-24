@@ -16,6 +16,20 @@ const MEETING_MODERATOR_MAX_CHARS = MEETING_MODERATOR_HARD_CHARS;
 const MEETING_PARTICIPANT_MAX_CHARS = MEETING_PARTICIPANT_HARD_CHARS;
 const MEETING_TRANSCRIPT_MSG_CHARS = 500;
 const MEETING_TRANSCRIPT_TOTAL_CHARS = 14000;
+/** 主持在真正结束会议时写入；系统只认此口令停止 relay（勿在任务书/讨论正文中使用） */
+const MEETING_ADJOURN_KEYWORD = 'meeting adjourned';
+
+function hasMeetingAdjournedMarker(text) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  if (!/\bmeeting\s+adjourned\b[.!！?？…\s]*$/i.test(t)) return false;
+  const beforeFinal = t.replace(/\s*meeting\s+adjourned\s*[.!！?？…\s]*$/i, '').trim();
+  return !/\bmeeting\s+adjourned\b/i.test(beforeFinal);
+}
+
+function meetingAdjournInstruction() {
+  return `末行写 \`${MEETING_ADJOURN_KEYWORD}\`（全小写，仅该条发言最后一行/句，此前不得出现；QiziShell 据此结束会议）`;
+}
 
 function normalizeRoundCount(value) {
   const n = Number(value);
@@ -35,7 +49,7 @@ function moderatorSummaryRules({ final = false } = {}) {
       '    **结论** …（1–3 条编号，写「决定了什么」）',
       '    **分歧/风险** …（无则写「无」；各一句）',
       '    **派活** …（执行人与事项）',
-      '    **会议结束**',
+      `    \`${MEETING_ADJOURN_KEYWORD}\`（**必须为本条发言最后一行/最后一句**）`,
     ]
     : [
       '  - **输出格式**（按顺序，不要散文、不要铺垫）：',
@@ -443,7 +457,7 @@ function buildModeratorContinuePrompt({
   const rounds = normalizeRoundCount(roundCount);
   const roundWord = roundCountLabel(rounds);
   const summaryHint = speechKind === 'final_summary'
-    ? '- 所有人已各轮发言完毕：请按 **最终总结格式（仅结论+派活）** 收尾，写「会议结束」，**不要 @ 任何人**；'
+    ? `- 全员已发言：作 **最终总结**，${meetingAdjournInstruction()}；**勿 @ 任何人**。`
     : (speechKind === 'round_summary'
       ? '- 本轮所有人已发言完毕：请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；'
       : '- 若本轮按名单尚未派完，请 @ **下一位** 议事 Agent（**必须**用 agentId，如 @nai_pang；@墨宝 无效）；');
@@ -460,7 +474,7 @@ function buildModeratorContinuePrompt({
     speechKind === 'dispatch'
       ? '- 若本轮所有人已各发言一次，请作 **当轮总结（仅结论，见格式块）**，然后 @ 名单第一位开始下一轮反馈；'
       : '',
-    `- 共 ${rounds} 轮（${roundWord}轮制）；**${rounds} 轮全部结束后**作最终总结并写「会议结束」，**不要 @ 任何人**；`,
+    `- 共 ${rounds} 轮；结束后最终总结，${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
     '一次只 @ 一位 Agent。',
     dispatchHint ? `\n${dispatchHint}` : '',
     remaining.length
@@ -492,7 +506,7 @@ function buildModeratorIdleWatchdogPrompt({
   const rounds = normalizeRoundCount(roundCount);
   const idleMin = Math.max(1, Math.round(idleMs / 60_000));
   const actionHint = speechKind === 'final_summary'
-    ? '请按 **最终总结格式（仅结论+派活）** 收尾并写「会议结束」，**不要 @ 任何人**。'
+    ? `作 **最终总结**，${meetingAdjournInstruction()}；**勿 @ 任何人**。`
     : (speechKind === 'round_summary'
       ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
       : (next
@@ -509,7 +523,7 @@ function buildModeratorIdleWatchdogPrompt({
     strike >= maxStrikes
       ? '若仍无法推进，下一条系统消息将要求你强制最终总结并结束会议。'
       : '',
-    `本次会议共 ${rounds} 轮；全部结束后写「会议结束」且不要 @ 任何人。`,
+    `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
     '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
@@ -540,7 +554,7 @@ function buildModeratorForceFinalSummaryPrompt({
     moderatorSpeechGuidance('final_summary', softChars, hardChars),
     '- 按 **最终总结格式（仅结论+派活）** 输出；',
     '- 总结中**明确写出**上述提前结束原因；',
-    '- 正文末尾写「会议结束」；',
+    `- ${meetingAdjournInstruction()}；`,
     '- **不要 @ 任何人**（含派活描述也不要写 @）。',
     `- 共 ${rounds} 轮制；当前为强制提前结束，不必再等待未发言者。`,
     dispatchHint ? `\n${dispatchHint}` : '',
@@ -569,10 +583,10 @@ function buildModeratorIdlePrompt({
     return [
       '[系统 · QiziShell]',
       '当前处于**最终总结/收尾**阶段。',
-      '若你已发过完整最终总结，请**只**回复「会议结束」四字，**不要**重复总结、**不要** @ 任何人。',
-      '若尚未发最终总结，请按 **最终总结格式（仅结论+派活）** 一次性写完并末尾写「会议结束」，**不要 @ 任何人**。',
+      `若已发过最终总结，**只**回复一行 \`${MEETING_ADJOURN_KEYWORD}\`。`,
+      `若尚未总结，作 **最终总结** 并 ${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
       moderatorSpeechGuidance('final_summary', softChars, hardChars),
-      `本次会议共 ${rounds} 轮；全部结束后写「会议结束」且不要 @ 任何人。`,
+      `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
       '',
       '## 当前群聊记录',
       transcript || '（暂无）',
@@ -590,7 +604,7 @@ function buildModeratorIdlePrompt({
     '你的上一条发言里没有可被 relay 识别的 @（**必须**写 @agentId，例如 @mo_bao）。',
     moderatorSpeechGuidance(speechKind, softChars, hardChars),
     actionHint,
-    `本次会议共 ${rounds} 轮；全部结束后写「会议结束」且不要 @ 任何人。`,
+    `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
     '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
@@ -640,42 +654,13 @@ function isModeratorPostCloseStub(text) {
   return false;
 }
 
-/** 强收尾信号：即便消息里仍有未处理 @，也应停止 relay */
-function isStrongMeetingClosingMessage(text, roundCount = 3) {
-  const t = String(text || '');
-  if (!t.trim()) return false;
-  if (/派活完毕|今日讨论结论|按此结论执行|讨论圆满结束|任务已派发|会议收尾/i.test(t)) {
-    return true;
-  }
-  if (hasExplicitMeetingEndMarker(t)) {
-    return true;
-  }
-  if (isModeratorPostCloseStub(t)) {
-    return true;
-  }
-  if (/\*\*结论\*\*/i.test(t) && /\*\*派活\*\*/i.test(t) && /会议结束/i.test(t)) {
-    return true;
-  }
-  const rounds = normalizeRoundCount(roundCount);
-  if (new RegExp(`第\\s*${rounds}\\s*轮[^。\\n]{0,24}(已全部)?(结束|完成|完毕)(?=[。.!！…\\s]|$)`, 'i').test(t)) {
-    return true;
-  }
-  if (new RegExp(`${rounds}\\s*轮\\s*(全部|已)?(结束|完成|完毕)(?=[。.!！…\\s]|$)`, 'i').test(t)) {
-    return true;
-  }
-  if (/三轮\s*(全部|已)?(结束|完成|完毕)(?=[。.!！…\s]|$)/i.test(t) && rounds >= 3) {
-    return true;
-  }
-  if ((/派活给\s*@|派给\s*@|执行人[：:]\s*@/i.test(t) || /\*\*派活\*\*/i.test(t))
-    && (/最终总结|今日讨论结论/i.test(t) || hasExplicitMeetingEndMarker(t))) {
-    return true;
-  }
-  return false;
+/** 系统只认 MEETING_ADJOURN_KEYWORD 停止 relay */
+function isMeetingClosingMessage(text) {
+  return hasMeetingAdjournedMarker(text);
 }
 
-/** 主持收尾/派活完成 → relay 必须立即停止（不再 @ 触发议事发言） */
-function isMeetingClosingMessage(text, roundCount = 3) {
-  return isStrongMeetingClosingMessage(text, roundCount);
+function isStrongMeetingClosingMessage(text) {
+  return hasMeetingAdjournedMarker(text);
 }
 
 function hasUnprocessedModeratorMentions(messages, roster, processed, moderatorAgentId) {
@@ -715,26 +700,14 @@ function findFirstClosingModeratorIndex(messages, moderatorAgentId, roster, roun
   return -1;
 }
 
-function hasClosingModeratorMessage(messages, moderatorAgentId, roster = [], processed = new Set(), roundCount = 3) {
+function hasClosingModeratorMessage(messages, moderatorAgentId) {
   if (!Array.isArray(messages)) return false;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (msg.speakerLabel === '任务书') continue;
     if (msg.speakerAgentId !== moderatorAgentId) continue;
     if (msg.streaming) continue;
-    const text = msg?.text || '';
-    if (isModeratorPostCloseStub(text)) {
-      return true;
-    }
-    if (!isModeratorClosingMessage(text, roster, moderatorAgentId, roundCount, messages)) {
-      return false;
-    }
-    if (hasUnprocessedModeratorMentions(messages, roster, processed, moderatorAgentId)
-      && !isStrongMeetingClosingMessage(text, roundCount)
-      && !isModeratorPostCloseStub(text)) {
-      return false;
-    }
-    return true;
+    return hasMeetingAdjournedMarker(msg?.text);
   }
   return false;
 }
@@ -835,7 +808,7 @@ function buildModeratorBriefingMessage({
     `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**（仅结论）建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；`,
     '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧、下步/派活），**禁止**复述研讨过程、逐人回顾、发散新问题；格式见系统后续提示中的 **共识/分歧/下轮焦点** 或 **结论/派活** 块；',
     '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的**结论型**轮次总结；',
-    `- 按 **${rounds} 轮** 议程推进（${roundWord}轮制，最多 ${rounds} 轮总结后结束）；每轮：依次 @ 各议事 Agent 各发言一次 → 你作**结论型**当轮总结 → 将总结发给各 Agent 再论；**全部结束后作最终总结并写「会议结束」，不要 @ 任何人**；`,
+    `- **${rounds} 轮制**：每轮 @ 各议事 Agent 各发言一次 → 当轮总结；${rounds} 轮结束后作最终总结，${meetingAdjournInstruction()}；收尾 **勿 @ 任何人**。`,
     '- **派发语法（硬约束）**：只认 @agentId，例如 @mo_bao；**@墨宝 等中文名不会被 relay**；一次只 @ 一人；',
     '- **纠正派发错误时**：正文里**不要**写 @agentId（用纯文字 nai_pang 即可），否则 QiziShell 仍会 relay；',
     '- **禁止**调用 sessions_send / sessions_spawn，**禁止**向任何 Agent 的 main 私聊发消息；只需在发言里 @，QiziShell 会 relay；',
@@ -1046,6 +1019,9 @@ module.exports = {
   buildModeratorIdlePrompt,
   buildModeratorIdleWatchdogPrompt,
   buildModeratorForceFinalSummaryPrompt,
+  MEETING_ADJOURN_KEYWORD,
+  hasMeetingAdjournedMarker,
+  meetingAdjournInstruction,
   isMeetingCompleteText,
   isMeetingClosingMessage,
   isModeratorClosingMessage,
