@@ -2282,6 +2282,17 @@ body.drag-over .composer-pending {
   max-width: 463px;
   min-width: 0;
 }
+.meeting-history-picker.is-disabled .meeting-history-trigger {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.meeting-history-trigger:disabled:hover {
+  background: #e8e8e8;
+}
+.meeting-history-trigger:disabled.open {
+  background: #e8e8e8;
+  color: #555;
+}
 .meeting-history-trigger {
   width: 100%;
   display: flex;
@@ -2366,6 +2377,25 @@ body.drag-over .composer-pending {
   gap: 8px;
   flex-shrink: 0;
   margin-left: auto;
+}
+.meeting-toolbar-actions[hidden] { display: none !important; }
+.meeting-toolbar-multiselect {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.meeting-toolbar-multiselect[hidden] { display: none !important; }
+.meeting-toolbar-multiselect-hint {
+  font-size: 13px;
+  color: var(--meta-text);
+  white-space: nowrap;
+}
+.meeting-toolbar-multiselect-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .meeting-toolbar-btn {
   border: none;

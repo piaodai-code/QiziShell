@@ -150,9 +150,17 @@
           <div class="meeting-history-menu" id="meeting-history-menu" hidden role="listbox"></div>
         </div>
         <span class="meeting-toolbar-status" id="meeting-toolbar-status" hidden></span>
-        <div class="meeting-toolbar-actions">
+        <div class="meeting-toolbar-actions" id="meeting-toolbar-actions">
           <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-primary" id="meeting-new-btn">新建会议</button>
           <button type="button" class="meeting-toolbar-btn meeting-toolbar-btn-muted" id="meeting-leave-hub-btn">结束会议</button>
+        </div>
+        <div class="meeting-toolbar-multiselect" id="meeting-toolbar-multiselect" hidden>
+          <span class="meeting-toolbar-multiselect-hint" id="meeting-multiselect-hint">已选 0 条</span>
+          <div class="meeting-toolbar-multiselect-actions">
+            <button type="button" class="multiselect-btn" id="meeting-multiselect-cancel-btn">取消</button>
+            <button type="button" class="multiselect-btn" id="meeting-multiselect-export-btn" disabled>保存</button>
+            <button type="button" class="multiselect-btn multiselect-btn-primary" id="meeting-multiselect-send-btn" disabled>发送</button>
+          </div>
         </div>
       </div>
       <button type="button" class="meeting-composer-toggle" id="meeting-composer-toggle" hidden aria-expanded="false" aria-label="展开输入区">

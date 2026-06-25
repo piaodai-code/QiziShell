@@ -69,6 +69,12 @@ const multiselectHintEl = document.getElementById('multiselect-hint');
 const multiselectCancelBtn = document.getElementById('multiselect-cancel-btn');
 const multiselectExportBtn = document.getElementById('multiselect-export-btn');
 const multiselectSendBtn = document.getElementById('multiselect-send-btn');
+const meetingToolbarActionsEl = document.getElementById('meeting-toolbar-actions');
+const meetingToolbarMultiselectEl = document.getElementById('meeting-toolbar-multiselect');
+const meetingMultiselectHintEl = document.getElementById('meeting-multiselect-hint');
+const meetingMultiselectCancelBtn = document.getElementById('meeting-multiselect-cancel-btn');
+const meetingMultiselectExportBtn = document.getElementById('meeting-multiselect-export-btn');
+const meetingMultiselectSendBtn = document.getElementById('meeting-multiselect-send-btn');
 const micBtn = document.getElementById('mic-btn');
 const settingsSttHintEl = document.getElementById('settings-stt-hint');
 const settingsSttUnsupportedEl = document.getElementById('settings-stt-unsupported');
@@ -1462,8 +1468,17 @@ function hasMultiSelectSelection() {
   return countMultiSelectSelection() > 0;
 }
 
+function shouldUseMeetingMultiSelectBar() {
+  return multiSelectMode && (contextMenuSource === 'meeting' || window.MeetingView?.isVisible?.());
+}
+
 function setMultiSelectActionEnabled(enabled) {
-  for (const btn of [multiselectExportBtn, multiselectSendBtn]) {
+  for (const btn of [
+    multiselectExportBtn,
+    multiselectSendBtn,
+    meetingMultiselectExportBtn,
+    meetingMultiselectSendBtn,
+  ]) {
     if (!btn) continue;
     btn.disabled = !enabled;
     btn.setAttribute('aria-disabled', enabled ? 'false' : 'true');
@@ -1518,9 +1533,9 @@ function updateMultiSelectBar() {
     );
   }
   const effectiveCount = countMultiSelectSelection();
-  if (multiselectHintEl) {
-    multiselectHintEl.textContent = effectiveCount > 0 ? `已选 ${effectiveCount} 条` : '请选择消息';
-  }
+  const hintText = effectiveCount > 0 ? `已选 ${effectiveCount} 条` : '请选择消息';
+  if (multiselectHintEl) multiselectHintEl.textContent = hintText;
+  if (meetingMultiselectHintEl) meetingMultiselectHintEl.textContent = hintText;
   setMultiSelectActionEnabled(effectiveCount > 0);
 }
 
@@ -1528,17 +1543,23 @@ function setMultiSelectMode(enabled) {
   multiSelectMode = enabled;
   if (!enabled) multiSelectedIndices = new Set();
   const meetingMessagesEl = getMeetingMessagesEl();
+  const meetingMultiSelectUi = shouldUseMeetingMultiSelectBar();
   if (meetingMessagesEl) {
-    meetingMessagesEl.classList.toggle('is-multiselect', enabled && contextMenuSource === 'meeting');
+    meetingMessagesEl.classList.toggle('is-multiselect', enabled && meetingMultiSelectUi);
   }
   if (messagesEl) {
-    messagesEl.classList.toggle('is-multiselect', enabled && contextMenuSource !== 'meeting');
+    messagesEl.classList.toggle('is-multiselect', enabled && !meetingMultiSelectUi);
   }
-  if (composerBodyEl) composerBodyEl.hidden = enabled && contextMenuSource !== 'meeting';
-  if (composerMultiselectEl) composerMultiselectEl.hidden = !enabled;
+  if (composerBodyEl) composerBodyEl.hidden = enabled && !meetingMultiSelectUi;
+  if (composerMultiselectEl) composerMultiselectEl.hidden = !enabled || meetingMultiSelectUi;
+  if (meetingToolbarActionsEl) meetingToolbarActionsEl.hidden = meetingMultiSelectUi;
+  if (meetingToolbarMultiselectEl) meetingToolbarMultiselectEl.hidden = !meetingMultiSelectUi;
+  if (window.MeetingView?.setHistoryPickerEnabled) {
+    window.MeetingView.setHistoryPickerEnabled(!meetingMultiSelectUi);
+  }
   hideMessageContextMenu();
   updateMultiSelectBar();
-  renderActiveMessageView();
+  renderActiveMessageView({ preserveScroll: true });
 }
 
 function updateMultiSelectRowUI(index) {
@@ -1870,18 +1891,10 @@ async function submitForward() {
   }
 }
 
-function getMeetingDraftFromMessage(msg) {
-  if (!msg) return '';
-  if (msg.who === 'me') {
-    return getUserMessageDisplayText(msg).trim();
-  }
-  return String(msg.text || '').trim();
-}
-
 async function openMeetingFromMessage(index) {
-  const msg = messages[index];
+  const msg = getActiveMessages()[index];
   if (!msg) return;
-  const draft = getMeetingDraftFromMessage(msg);
+  const draft = getMessageSelectableText(msg);
   if (!draft) {
     setStatus('该消息没有可用内容', 'error');
     return;
@@ -5636,6 +5649,9 @@ document.addEventListener('keydown', (e) => {
 if (multiselectCancelBtn) {
   multiselectCancelBtn.addEventListener('click', exitMultiSelectMode);
 }
+if (meetingMultiselectCancelBtn) {
+  meetingMultiselectCancelBtn.addEventListener('click', exitMultiSelectMode);
+}
 if (multiselectExportBtn) {
   multiselectExportBtn.addEventListener('click', (e) => {
     if (!hasMultiSelectSelection() || multiselectExportBtn.disabled) {
@@ -5646,9 +5662,29 @@ if (multiselectExportBtn) {
     void exportSelectedMessages();
   });
 }
+if (meetingMultiselectExportBtn) {
+  meetingMultiselectExportBtn.addEventListener('click', (e) => {
+    if (!hasMultiSelectSelection() || meetingMultiselectExportBtn.disabled) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    void exportSelectedMessages();
+  });
+}
 if (multiselectSendBtn) {
   multiselectSendBtn.addEventListener('click', (e) => {
     if (!hasMultiSelectSelection() || multiselectSendBtn.disabled) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    void openForwardModalForSelection();
+  });
+}
+if (meetingMultiselectSendBtn) {
+  meetingMultiselectSendBtn.addEventListener('click', (e) => {
+    if (!hasMultiSelectSelection() || meetingMultiselectSendBtn.disabled) {
       e.preventDefault();
       e.stopPropagation();
       return;
@@ -6674,6 +6710,7 @@ window.QiziShellMsgOps = {
   showContextMenu: (x, y, index, source = 'meeting') => showMessageContextMenu(x, y, index, source),
   hideContextMenu: hideMessageContextMenu,
   isMultiSelectMode: () => multiSelectMode,
+  exitMultiSelectMode,
   toggleMultiSelectIndex,
   renderMessageSelectCheckHtml,
 };

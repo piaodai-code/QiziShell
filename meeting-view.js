@@ -135,7 +135,7 @@
   }
 
   function toggleHistoryMenu(forceOpen) {
-    if (!historyMenuEl || !historyTriggerEl) return;
+    if (!historyMenuEl || !historyTriggerEl || historyTriggerEl.disabled) return;
     const open = typeof forceOpen === 'boolean' ? forceOpen : historyMenuEl.hidden;
     if (!open) {
       closeHistoryMenu();
@@ -146,7 +146,21 @@
     historyTriggerEl.setAttribute('aria-expanded', 'true');
   }
 
+  function setHistoryPickerEnabled(enabled) {
+    if (historyPickerEl) {
+      historyPickerEl.classList.toggle('is-disabled', !enabled);
+    }
+    if (historyTriggerEl) {
+      historyTriggerEl.disabled = !enabled;
+      historyTriggerEl.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+    }
+    if (!enabled) closeHistoryMenu();
+  }
+
   function selectHistoryKey(key) {
+    if (window.QiziShellMsgOps?.isMultiSelectMode?.()) {
+      window.QiziShellMsgOps.exitMultiSelectMode?.();
+    }
     selectedRecordKey = key;
     syncHistoryTriggerLabel();
     if (historyMenuEl) {
@@ -975,5 +989,7 @@
     getAvatarSrc: () => MEETING_AVATAR_SRC,
     render,
     refreshRecordList,
+    setHistoryPickerEnabled,
+    closeHistoryMenu,
   };
 })();
