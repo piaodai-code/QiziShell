@@ -110,6 +110,7 @@ const btwSideAnswerEl = document.getElementById('btw-side-answer');
 const btwSideCloseBtn = document.getElementById('btw-side-close');
 const queueSideDockEl = document.getElementById('queue-side-dock');
 const queueSideMessageEl = document.getElementById('queue-side-message');
+const queueSideCloseBtn = document.getElementById('queue-side-close');
 
 let activeSettingsTab = 'gateway';
 
@@ -2882,6 +2883,12 @@ function clearPendingOutbound() {
   dismissQueueSideCard();
 }
 
+function cancelPendingOutbound() {
+  if (!pendingOutbound) return;
+  clearPendingOutbound();
+  setStatus('已撤回排队消息', 'ok');
+}
+
 function unbindBtwDismissKeys() {
   if (!btwDismissKeyHandler) return;
   document.removeEventListener('keydown', btwDismissKeyHandler, true);
@@ -5070,6 +5077,13 @@ window.QiziShellComposer = {
 if (btwSideCloseBtn) {
   btwSideCloseBtn.addEventListener('click', () => {
     dismissBtwSideCard();
+    inputEl?.focus();
+  });
+}
+
+if (queueSideCloseBtn) {
+  queueSideCloseBtn.addEventListener('click', () => {
+    cancelPendingOutbound();
     inputEl?.focus();
   });
 }
