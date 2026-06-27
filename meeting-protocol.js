@@ -135,6 +135,43 @@ function participantTurnCounts(messages, roster) {
   return counts;
 }
 
+/** 按每人发言次数推断当前轮次派发状态（不受「主持接话」消息重置影响） */
+function resolveRoundDispatchState(messages, roster, roundCount) {
+  const rosterList = roster || [];
+  if (rosterList.length === 0) {
+    return { phase: 'dispatch', activeRound: 1, remaining: [] };
+  }
+  const counts = participantTurnCounts(messages, rosterList);
+  const rounds = normalizeRoundCount(roundCount);
+  const countValues = rosterList.map((entry) => counts.get(entry.agentId) || 0);
+  const minCount = Math.min(...countValues);
+  const allSynced = countValues.every((value) => value === minCount);
+
+  if (allSynced && minCount >= rounds) {
+    return { phase: 'all_rounds_done', activeRound: rounds, remaining: [] };
+  }
+  if (allSynced && minCount > 0) {
+    return {
+      phase: 'round_complete',
+      completedRound: minCount,
+      activeRound: minCount + 1,
+      remaining: [],
+    };
+  }
+
+  const activeRound = minCount + 1;
+  const remaining = rosterList.filter((entry) => (counts.get(entry.agentId) || 0) < activeRound);
+  return { phase: 'dispatch', activeRound, remaining };
+}
+
+function hasParticipantSpokenActiveRound(messages, roster, agentId, roundCount) {
+  if (!agentId || !Array.isArray(roster) || roster.length === 0) return false;
+  const state = resolveRoundDispatchState(messages, roster, roundCount);
+  if (state.phase !== 'dispatch') return false;
+  const counts = participantTurnCounts(messages, roster);
+  return (counts.get(agentId) || 0) >= state.activeRound;
+}
+
 function isFinalSummaryExpected(messages, roster, roundCount) {
   const rounds = normalizeRoundCount(roundCount);
   const counts = participantTurnCounts(messages, roster);
@@ -399,20 +436,48 @@ function hasParticipantReplyAfter(messages, messageIndex, agentId) {
   return false;
 }
 
-function shouldSkipRelayMention(text, agentId, messages, moderatorAgentId, messageIndex = -1) {
+function shouldSkipRelayMention(
+  text,
+  agentId,
+  messages,
+  moderatorAgentId,
+  messageIndex = -1,
+  roster = null,
+  roundCount = 2,
+) {
   if (!agentId || agentId === moderatorAgentId) return true;
   if (messageIndex >= 0 && hasParticipantReplyAfter(messages, messageIndex, agentId)) {
     return true;
   }
   if (isCorrectionMention(text, agentId)) return true;
+  if (Array.isArray(roster) && roster.length > 0
+    && hasParticipantSpokenActiveRound(messages, roster, agentId, roundCount)) {
+    return true;
+  }
   return false;
 }
 
 /** 一条主持发言里可能有多个 @（列名单）；取正文中第一个有效 @（按出现顺序，不是名单排序） */
-function pickRelayMention(text, mentions, messages, roster, moderatorAgentId, messageIndex = -1) {
+function pickRelayMention(
+  text,
+  mentions,
+  messages,
+  roster,
+  moderatorAgentId,
+  messageIndex = -1,
+  roundCount = 2,
+) {
   if (!Array.isArray(mentions) || mentions.length === 0) return null;
   for (const mention of mentions) {
-    if (shouldSkipRelayMention(text, mention.agentId, messages, moderatorAgentId, messageIndex)) {
+    if (shouldSkipRelayMention(
+      text,
+      mention.agentId,
+      messages,
+      moderatorAgentId,
+      messageIndex,
+      roster,
+      roundCount,
+    )) {
       continue;
     }
     return mention;
@@ -453,10 +518,7 @@ function buildModeratorContinuePrompt({
   softChars = MEETING_MODERATOR_SOFT_CHARS,
   hardChars = MEETING_MODERATOR_HARD_CHARS,
 } = {}) {
-  const spokeSince = moderatorAgentId
-    ? participantsSpokenSinceLastModerator(messages, roster, moderatorAgentId)
-    : new Set();
-  const remaining = (roster || []).filter((entry) => !spokeSince.has(entry.agentId));
+  const remaining = resolveRoundDispatchState(messages, roster, roundCount).remaining;
   const dispatchHint = buildModeratorDispatchHint(roster, messages);
   const lastFromTranscript = resolveLastParticipantLabel(roster, messages);
   const lastLabel = lastFromTranscript || lastSpeakerLabel;

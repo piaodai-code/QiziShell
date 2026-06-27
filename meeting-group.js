@@ -697,7 +697,7 @@ function findNextMention(messages, roster, processed, moderatorAgentId, roundCou
     }
 
     const mentions = parseMeetingMentions(text, roster, moderatorAgentId);
-    const mention = pickRelayMention(text, mentions, messages, roster, moderatorAgentId, i);
+    const mention = pickRelayMention(text, mentions, messages, roster, moderatorAgentId, i, roundCount);
     if (!mention) {
       for (const skipped of mentions) {
         processed.add(`${i}:${skipped.agentId}`);

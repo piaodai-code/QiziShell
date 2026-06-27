@@ -131,6 +131,78 @@ runCase('idle 场景：全员轮次已满、末行 adjourn，speechMode 应为 f
   }
 });
 
+function addFullRound(messages, roundLabel) {
+  messages.push(mod(`@nai_pang 第${roundLabel}轮`));
+  messages.push(participant('nai_pang', `奈胖 R${roundLabel}`));
+  messages.push(mod(`@mo_bao 第${roundLabel}轮`));
+  messages.push(participant('mo_bao', `墨宝 R${roundLabel}`));
+}
+
+runCase('第3轮：nai_pang 已发言后主持再 @ 同一人不得 relay', () => {
+  const messages = [];
+  addFullRound(messages, 1);
+  addFullRound(messages, 2);
+  messages.push(mod('@nai_pang 第3轮'));
+  messages.push(participant('nai_pang', '奈胖 R3'));
+  messages.push(mod('@nai_pang 请再补充'));
+  assertEqual(relay(messages, 3), null);
+});
+
+runCase('第3轮：nai_pang 已发言后 @mo_bao 仍应 relay', () => {
+  const messages = [];
+  addFullRound(messages, 1);
+  addFullRound(messages, 2);
+  messages.push(mod('@nai_pang 第3轮'));
+  messages.push(participant('nai_pang', '奈胖 R3'));
+  messages.push(mod('@mo_bao 第3轮'));
+  assertEqual(relay(messages, 3), 'mo_bao');
+});
+
+runCase('nudge 提示：第3轮 nai_pang 已发言后不得标为尚未发言', () => {
+  const { buildModeratorContinuePrompt } = require('../meeting-protocol');
+  const messages = [];
+  addFullRound(messages, 1);
+  addFullRound(messages, 2);
+  messages.push(mod('@nai_pang 第3轮'));
+  messages.push(participant('nai_pang', '奈胖 R3'));
+  messages.push(mod('收到，请继续'));
+  const prompt = buildModeratorContinuePrompt({
+    transcript: '(略)',
+    lastSpeakerLabel: '奈胖',
+    roster,
+    messages,
+    roundCount: 3,
+    moderatorAgentId: MOD,
+  });
+  if (/尚未发言：.*nai_pang/.test(prompt)) {
+    throw new Error('nai_pang should not appear in 尚未发言 after speaking in round 3');
+  }
+  if (!prompt.includes('尚未发言：墨宝 (@mo_bao)')) {
+    throw new Error('mo_bao should be the only remaining speaker in round 3');
+  }
+});
+
+runCase('轮末：全员同步发言后应提示作当轮总结（非全员尚未发言）', () => {
+  const { buildModeratorContinuePrompt } = require('../meeting-protocol');
+  const messages = [];
+  addFullRound(messages, 1);
+  messages.push(mod('收到'));
+  const prompt = buildModeratorContinuePrompt({
+    transcript: '(略)',
+    lastSpeakerLabel: '墨宝',
+    roster,
+    messages,
+    roundCount: 3,
+    moderatorAgentId: MOD,
+  });
+  if (prompt.includes('尚未发言：')) {
+    throw new Error('after round 1 complete, should not list 尚未发言 for everyone');
+  }
+  if (!prompt.includes('所有议事 Agent 已各发言一次')) {
+    throw new Error('should prompt round summary when round segment is complete');
+  }
+});
+
 if (process.exitCode) {
   console.error('\nmeeting-relay-smoke FAILED');
   process.exit(1);
