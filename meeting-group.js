@@ -11,6 +11,7 @@ const {
   buildModeratorIdlePrompt,
   buildModeratorIdleWatchdogPrompt,
   buildModeratorForceFinalSummaryPrompt,
+  hasMeetingAdjournedMarker,
   isMeetingCompleteText,
   isMeetingClosingMessage,
   isModeratorClosingMessage,
@@ -291,6 +292,12 @@ async function startMeetingGroupRelay(config, deps) {
     lastSpeakerLabel,
     extraPromptArgs = {},
   }) {
+    const lastModMsg = [...(visible || [])].reverse().find(
+      (m) => m.who === 'me' && m.speakerAgentId === config.moderatorAgentId && m.speakerLabel !== '任务书' && !m.streaming,
+    );
+    if (lastModMsg?.text && hasMeetingAdjournedMarker(lastModMsg.text)) {
+      return false;
+    }
     onEvent?.({ type: 'moderator_nudge', payload: { reason } });
     inFlightTurn = true;
     try {
@@ -344,6 +351,9 @@ async function startMeetingGroupRelay(config, deps) {
       const mutable = transcript.getMessagesMutable();
       const tail = mutable[mutable.length - 1];
       if (tail?.speakerAgentId === config.moderatorAgentId) {
+        if (hasMeetingAdjournedMarker(tail.text)) {
+          return true;
+        }
         tail.text = trimmedNudge;
         tail.streaming = false;
       } else {
@@ -496,14 +506,30 @@ async function startMeetingGroupRelay(config, deps) {
       if (closingIdx >= 0 && visible.length - 1 > closingIdx) {
         break;
       }
+      const speechMode = resolveModeratorSpeechMode(
+        visible,
+        roster,
+        config.moderatorAgentId,
+        roundCount,
+      );
+      if (speechMode.kind === 'final_summary') {
+        if (nudgedAfterParticipant) {
+          break;
+        }
+        lastNudgedMessageIndex = -1;
+        const ok = await runModeratorNudge({
+          reason: 'final_phase_after_participant',
+          buildPrompt: buildModeratorIdlePrompt,
+          visible,
+          speechMode,
+          lastSpeakerLabel: resolveRosterLabel(roster, last.speakerAgentId),
+        });
+        nudgedAfterParticipant = ok;
+        if (await endLoopIteration({ skipWatchdog: true }) === 'break') break;
+        continue;
+      }
       if (!nudgedAfterParticipant) {
         lastNudgedMessageIndex = -1;
-        const speechMode = resolveModeratorSpeechMode(
-          visible,
-          roster,
-          config.moderatorAgentId,
-          roundCount,
-        );
         const ok = await runModeratorNudge({
           reason: 'after_participant',
           buildPrompt: buildModeratorContinuePrompt,
@@ -639,6 +665,22 @@ function collectSpokenAgentIds(messages) {
 
 function findNextMention(messages, roster, processed, moderatorAgentId, roundCount = 2) {
   if (!Array.isArray(messages)) return null;
+
+  const speechMode = resolveModeratorSpeechMode(messages, roster, moderatorAgentId, roundCount);
+  if (speechMode.kind === 'final_summary') {
+    // 最终总结/派活阶段：@ 仅作指派说明，绝不再 relay 议事 Agent
+    for (let i = 0; i < messages.length; i += 1) {
+      const msg = messages[i];
+      if (msg.streaming) continue;
+      if (msg.speakerLabel === '任务书') continue;
+      if (msg.speakerAgentId !== moderatorAgentId) continue;
+      const text = msg?.text || '';
+      if (!text.trim()) continue;
+      markModeratorMessageMentionsProcessed(i, text, roster, moderatorAgentId, processed);
+    }
+    return null;
+  }
+
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const msg = messages[i];
     if (msg.streaming) continue;
@@ -690,4 +732,5 @@ function validateRelayConfig(config) {
 
 module.exports = {
   startMeetingGroupRelay,
+  findNextMention,
 };

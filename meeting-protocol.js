@@ -22,13 +22,19 @@ const MEETING_ADJOURN_KEYWORD = 'meeting adjourned';
 function hasMeetingAdjournedMarker(text) {
   const t = String(text || '').trim();
   if (!t) return false;
-  if (!/\bmeeting\s+adjourned\b[.!！?？…\s]*$/i.test(t)) return false;
-  const beforeFinal = t.replace(/\s*meeting\s+adjourned\s*[.!！?？…\s]*$/i, '').trim();
-  return !/\bmeeting\s+adjourned\b/i.test(beforeFinal);
+  const lines = t.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (!lines.length) return false;
+  const lastLine = lines[lines.length - 1];
+  if (!/^meeting\s+adjourned[.!！?？…]*$/i.test(lastLine)) return false;
+  // 仅末行单独一行算收尾；正文里解释/引用口令（如「末行写 meeting adjourned」）允许
+  for (let i = 0; i < lines.length - 1; i += 1) {
+    if (/^meeting\s+adjourned[.!！?？]*$/i.test(lines[i])) return false;
+  }
+  return true;
 }
 
 function meetingAdjournInstruction() {
-  return `末行写 \`${MEETING_ADJOURN_KEYWORD}\`（全小写，仅该条发言最后一行/句，此前不得出现；QiziShell 据此结束会议）`;
+  return `末行**单独一行**写 \`${MEETING_ADJOURN_KEYWORD}\`（全小写；正文可解释口令，但不要在前文再单独占一行写同一句）`;
 }
 
 function normalizeRoundCount(value) {
@@ -136,18 +142,18 @@ function isFinalSummaryExpected(messages, roster, roundCount) {
 }
 
 function resolveModeratorSpeechMode(messages, roster, moderatorId, roundCount) {
-  if (!shouldUseModeratorSummaryLimits(messages, roster, moderatorId)) {
-    return {
-      kind: 'dispatch',
-      softChars: MEETING_MODERATOR_SOFT_CHARS,
-      hardChars: MEETING_MODERATOR_HARD_CHARS,
-    };
-  }
   if (isFinalSummaryExpected(messages, roster, roundCount)) {
     return {
       kind: 'final_summary',
       softChars: MEETING_MODERATOR_FINAL_SOFT_CHARS,
       hardChars: 0,
+    };
+  }
+  if (!shouldUseModeratorSummaryLimits(messages, roster, moderatorId)) {
+    return {
+      kind: 'dispatch',
+      softChars: MEETING_MODERATOR_SOFT_CHARS,
+      hardChars: MEETING_MODERATOR_HARD_CHARS,
     };
   }
   return {
@@ -583,6 +589,7 @@ function buildModeratorIdlePrompt({
     return [
       '[系统 · QiziShell]',
       '当前处于**最终总结/收尾**阶段。',
+      '**本阶段不再向议事 Agent relay**；派活仅写在总结正文里（写纯文字 agentId 即可，**勿写 @**）。',
       `若已发过最终总结，**只**回复一行 \`${MEETING_ADJOURN_KEYWORD}\`。`,
       `若尚未总结，作 **最终总结** 并 ${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
       moderatorSpeechGuidance('final_summary', softChars, hardChars),
@@ -1029,6 +1036,7 @@ module.exports = {
   findFirstClosingModeratorIndex,
   hasUnprocessedModeratorMentions,
   hasClosingModeratorMessage,
+  isFinalSummaryExpected,
   buildModeratorBriefingMessage,
   extractJsonFromText,
   validateDeliberantOutput,

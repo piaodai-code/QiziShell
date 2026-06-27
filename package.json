@@ -1,13 +1,14 @@
 {
   "name": "qizi-shell",
-  "version": "0.1.9-6",
+  "version": "0.1.9-7",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "restart": "bash scripts/restart-dev.sh",
     "build": "electron-builder --mac --publish never",
     "ship": "bash scripts/ship.sh",
-    "release": "bash scripts/release-mac.sh"
+    "release": "bash scripts/release-mac.sh",
+    "test:meeting-relay": "node scripts/meeting-relay-smoke.js"
   },
   "build": {
     "appId": "com.qizi.shell",
