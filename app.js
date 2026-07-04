@@ -1770,7 +1770,12 @@ async function openForwardModalWithSnapshot(snapshot, previewLabel, options = {}
   scheduleForwardPreviewEllipsisCheck();
 
   if (forwardAgentsListEl) {
-    forwardAgentsListEl.innerHTML = '<div class="forward-agents-loading">加载 Agent…</div>';
+    const cachedAgents = getAgentCatalogList();
+    if (cachedAgents.length) {
+      renderForwardAgentList(cachedAgents);
+    } else {
+      forwardAgentsListEl.innerHTML = '<div class="forward-agents-loading">加载 Agent…</div>';
+    }
   }
 
   if (!connected) {
@@ -1780,7 +1785,7 @@ async function openForwardModalWithSnapshot(snapshot, previewLabel, options = {}
   try {
     const result = await window.qizi.listAgents();
     if (!result?.ok) {
-      if (forwardAgentsListEl) {
+      if (forwardAgentsListEl && !getAgentCatalogList().length) {
         forwardAgentsListEl.innerHTML = `<div class="forward-agents-error">${escapeHtml(result?.error || '加载失败')}</div>`;
       }
       return;
@@ -3115,6 +3120,23 @@ function applyAgentCatalog(agents) {
   }
 }
 
+function getAgentCatalogList() {
+  return [...agentCatalog.values()];
+}
+
+function handleAgentsCatalogUpdated(result) {
+  if (!result?.ok || !Array.isArray(result.agents)) return;
+  applyAgentCatalog(result.agents);
+  const activeAgent = result.agents.find((entry) => entry.id === currentAgentId);
+  if (activeAgent) updateAgentTitleLabel(activeAgent);
+  if (agentPopup && !agentPopup.hidden) {
+    renderAgentPopup(result.agents);
+  }
+  if (forwardModal && !forwardModal.hidden && forwardAgentsListEl) {
+    renderForwardAgentList(result.agents);
+  }
+}
+
 function getCurrentAgentInfo() {
   return agentCatalog.get(currentAgentId) || { id: currentAgentId, label: formatAgentLabel({ id: currentAgentId }) };
 }
@@ -4098,7 +4120,12 @@ async function showAgentPopup() {
   agentPopup.hidden = false;
   titlebarAgentBtn.classList.add('open');
   titlebarAgentBtn.setAttribute('aria-expanded', 'true');
-  agentPopup.innerHTML = '<div class="agent-popup-loading">加载 Agent…</div>';
+  const cachedAgents = getAgentCatalogList();
+  if (cachedAgents.length) {
+    renderAgentPopup(cachedAgents);
+  } else {
+    agentPopup.innerHTML = '<div class="agent-popup-loading">加载 Agent…</div>';
+  }
 
   if (!connected) {
     await checkConnection();
@@ -4111,7 +4138,9 @@ async function showAgentPopup() {
   try {
     const result = await window.qizi.listAgents();
     if (!result?.ok) {
-      agentPopup.innerHTML = `<div class="agent-popup-error">${escapeHtml(result?.error || '加载失败')}</div>`;
+      if (!cachedAgents.length) {
+        agentPopup.innerHTML = `<div class="agent-popup-error">${escapeHtml(result?.error || '加载失败')}</div>`;
+      }
       return;
     }
     const agents = Array.isArray(result.agents) ? result.agents : [];
@@ -4842,6 +4871,12 @@ window.qizi.onChatDone((runId, payload) => {
     if (!busy) void syncHistoryFromGateway();
   }, 0);
 });
+
+if (window.qizi.onAgentsUpdated) {
+  window.qizi.onAgentsUpdated((payload) => {
+    handleAgentsCatalogUpdated(payload);
+  });
+}
 
 if (window.qizi.onGatewayStatus) {
   window.qizi.onGatewayStatus((payload) => {

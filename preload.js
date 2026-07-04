@@ -62,6 +62,11 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:session-changed', handler);
     return () => ipcRenderer.removeListener('openclaw:session-changed', handler);
   },
+  onAgentsUpdated: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:agents-updated', handler);
+    return () => ipcRenderer.removeListener('openclaw:agents-updated', handler);
+  },
   abortChat: () => ipcRenderer.invoke('openclaw:abort'),
   getSessionKey: () => ipcRenderer.invoke('openclaw:getSessionKey'),
   listAgents: () => ipcRenderer.invoke('openclaw:agents:list'),

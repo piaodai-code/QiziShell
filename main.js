@@ -599,6 +599,171 @@ function sanitizeSessionKeyForShell(sessionKey, mainKey = SHELL_SESSION_MAIN_KEY
 
 /** @type {Map<string, string>} */
 const agentAvatarCache = new Map();
+/** @type {Map<string, { label?: string, emoji?: string|null, avatarStatus?: string }>} */
+const agentIdentityCache = new Map();
+const AGENT_LIST_FRESH_MS = 3 * 60 * 1000;
+const AGENT_LIST_STALE_MS = 7 * 24 * 60 * 60 * 1000;
+let agentListCache = { gatewayKey: null, at: 0, data: null };
+let agentListRefreshPromise = null;
+
+function getAgentListGatewayKey() {
+  const { wsUrl, token } = loadOpenClawConfig();
+  return `${wsUrl || ''}\0${Boolean(token)}`;
+}
+
+function getAgentCatalogCachePath() {
+  return path.join(app.getPath('userData'), 'agent-catalog-cache.json');
+}
+
+function hydrateIdentityCachesFromAgents(agents) {
+  for (const agent of agents || []) {
+    if (!agent?.id) continue;
+    agentIdentityCache.set(agent.id, {
+      label: agent.label,
+      emoji: agent.emoji || null,
+      avatarStatus: agent.avatarStatus || 'none',
+    });
+    if (agent.avatarDataUrl) agentAvatarCache.set(agent.id, agent.avatarDataUrl);
+  }
+}
+
+function loadAgentListCacheFromDisk() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(getAgentCatalogCachePath(), 'utf8'));
+    const key = getAgentListGatewayKey();
+    if (!raw?.data?.ok || raw.gatewayKey !== key) return;
+    agentListCache = { gatewayKey: key, at: raw.at || 0, data: raw.data };
+    hydrateIdentityCachesFromAgents(raw.data.agents);
+  } catch {
+    // ignore missing or corrupt cache
+  }
+}
+
+function persistAgentListCacheToDisk() {
+  if (!agentListCache.data?.ok || !agentListCache.gatewayKey) return;
+  try {
+    const data = {
+      ...agentListCache.data,
+      agents: (agentListCache.data.agents || []).map((agent) => {
+        const { avatarDataUrl, ...rest } = agent;
+        return rest;
+      }),
+    };
+    const filePath = getAgentCatalogCachePath();
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(filePath, JSON.stringify({
+      gatewayKey: agentListCache.gatewayKey,
+      at: agentListCache.at,
+      data,
+    }), { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // non-fatal
+  }
+}
+
+function clearAgentListCache() {
+  agentListCache = { gatewayKey: null, at: 0, data: null };
+  agentListRefreshPromise = null;
+}
+
+function storeAgentListResult(data) {
+  agentListCache = { gatewayKey: getAgentListGatewayKey(), at: Date.now(), data };
+  hydrateIdentityCachesFromAgents(data.agents);
+  persistAgentListCacheToDisk();
+}
+
+function broadcastAgentsUpdated(payload) {
+  broadcastToRenderers('openclaw:agents-updated', payload);
+}
+
+function applyCachedIdentityToEntry(entry) {
+  const cached = agentIdentityCache.get(entry.id);
+  if (typeof cached?.label === 'string' && cached.label.trim()) {
+    entry.label = cached.label.trim();
+  }
+  if (cached?.emoji) entry.emoji = cached.emoji;
+  if (cached?.avatarStatus) entry.avatarStatus = cached.avatarStatus;
+  const avatar = agentAvatarCache.get(entry.id);
+  if (avatar) entry.avatarDataUrl = avatar;
+  return entry;
+}
+
+function buildAgentEntryFast(agent, meta) {
+  const entry = normalizeAgentEntry(agent, meta);
+  applyCurrentModelToEntry(entry, meta.sessionModels?.get(entry.id), meta.defaults);
+  applyCachedIdentityToEntry(entry);
+  return entry;
+}
+
+async function fetchAgentListDefaults(client, defaultId, mainKey) {
+  try {
+    const defaultsResult = await client.request('chat.history', {
+      sessionKey: buildAgentSessionKey(defaultId, mainKey),
+      limit: 1,
+    });
+    return {
+      modelProvider: defaultsResult?.sessionInfo?.modelProvider ?? defaultsResult?.defaults?.modelProvider ?? null,
+      model: defaultsResult?.defaults?.model ?? null,
+    };
+  } catch {
+    return { modelProvider: null, model: null };
+  }
+}
+
+async function fetchAgentListCore(client) {
+  const result = await client.request('agents.list', {});
+  const defaultId = result?.defaultId || 'main';
+  const mainKey = result?.mainKey || 'main';
+  const rawAgents = dedupeAgentEntries(Array.isArray(result?.agents) ? result.agents : []);
+  return { rawAgents, defaultId, mainKey };
+}
+
+async function buildAgentListResult(client, rawAgents, defaultId, mainKey, { enrichFull = false } = {}) {
+  const sessionModels = await fetchAgentMainSessionModels(client, mainKey);
+  const defaults = enrichFull
+    ? await fetchAgentListDefaults(client, defaultId, mainKey)
+    : { modelProvider: null, model: null };
+  const meta = { defaultId, sessionModels, defaults };
+  const agents = enrichFull
+    ? await Promise.all(rawAgents.map((agent) => enrichAgentEntry(client, agent, meta)))
+    : rawAgents.map((agent) => buildAgentEntryFast(agent, meta));
+  return {
+    ok: true,
+    agents,
+    defaultId,
+    mainKey,
+    currentSessionKey: getSessionKey(),
+    enriched: enrichFull,
+  };
+}
+
+function prefetchAgentList() {
+  void refreshAgentListInBackground();
+}
+
+async function refreshAgentListInBackground() {
+  if (agentListRefreshPromise) return agentListRefreshPromise;
+  agentListRefreshPromise = (async () => {
+    try {
+      const client = ensureGateway();
+      await client.waitForConnect();
+      const { rawAgents, defaultId, mainKey } = await fetchAgentListCore(client);
+      const fast = await buildAgentListResult(client, rawAgents, defaultId, mainKey, { enrichFull: false });
+      storeAgentListResult(fast);
+      broadcastAgentsUpdated(fast);
+      const full = await buildAgentListResult(client, rawAgents, defaultId, mainKey, { enrichFull: true });
+      storeAgentListResult(full);
+      broadcastAgentsUpdated(full);
+      return full;
+    } catch (err) {
+      console.warn('[qizi] agent list refresh failed:', err.message);
+      return null;
+    } finally {
+      agentListRefreshPromise = null;
+    }
+  })();
+  return agentListRefreshPromise;
+}
 
 function gatewayHttpBase(wsUrl) {
   return String(wsUrl || '')
@@ -672,7 +837,7 @@ async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
 }
 
 async function enrichAgentEntry(client, agent, meta = {}) {
-  const entry = normalizeAgentEntry(agent, meta);
+  const entry = buildAgentEntryFast(agent, meta);
   try {
     const identity = await client.request('agent.identity.get', { agentId: entry.id });
     if (typeof identity?.name === 'string' && identity.name.trim()) {
@@ -680,15 +845,19 @@ async function enrichAgentEntry(client, agent, meta = {}) {
     }
     entry.emoji = identity?.emoji || null;
     entry.avatarStatus = identity?.avatarStatus || 'none';
+    agentIdentityCache.set(entry.id, {
+      label: entry.label,
+      emoji: entry.emoji,
+      avatarStatus: entry.avatarStatus,
+    });
     entry.avatarDataUrl = await fetchAgentAvatarDataUrl(
       entry.id,
       identity?.avatar,
       identity?.avatarStatus,
     );
   } catch {
-    // keep base entry without avatar
+    // keep fast entry without fresh identity
   }
-  applyCurrentModelToEntry(entry, meta.sessionModels?.get(entry.id), meta.defaults);
   return entry;
 }
 
@@ -2664,6 +2833,7 @@ function attachGatewayHandlers(client) {
   });
   client.on('connected', () => {
     void ensureGatewaySessionSubscription(client);
+    prefetchAgentList();
     broadcastToRenderers('openclaw:gateway-status', {
       connected: true,
       reconnected: activeRuns.size > 0,
@@ -2699,6 +2869,7 @@ function ensureGateway() {
       failAllActiveRuns('Gateway 配置已变更');
       gateway.stop();
     }
+    clearAgentListCache();
     gateway = new GatewayWsClient({
       url: config.wsUrl,
       token: config.token,
@@ -2965,33 +3136,41 @@ async function listModels() {
   }
 }
 
-async function listAgents() {
+async function listAgents(options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
+  const key = getAgentListGatewayKey();
+  const cacheValid = agentListCache.gatewayKey === key;
+  const cached = cacheValid ? agentListCache.data : null;
+  const age = cacheValid ? Date.now() - agentListCache.at : Infinity;
+
+  if (!forceRefresh && cached?.ok) {
+    if (age < AGENT_LIST_FRESH_MS) {
+      if (!cached.enriched) void refreshAgentListInBackground();
+      return cached;
+    }
+    if (age < AGENT_LIST_STALE_MS) {
+      void refreshAgentListInBackground();
+      return cached;
+    }
+  }
+
   try {
     const client = ensureGateway();
     await client.waitForConnect();
-    const result = await client.request('agents.list', {});
-    const defaultId = result?.defaultId || 'main';
-    const mainKey = result?.mainKey || 'main';
-    const rawAgents = dedupeAgentEntries(Array.isArray(result?.agents) ? result.agents : []);
-    const [sessionModels, defaultsResult] = await Promise.all([
-      fetchAgentMainSessionModels(client, mainKey),
-      client.request('chat.history', { sessionKey: buildAgentSessionKey(defaultId, mainKey), limit: 1 }).catch(() => null),
-    ]);
-    const defaults = {
-      modelProvider: defaultsResult?.sessionInfo?.modelProvider ?? defaultsResult?.defaults?.modelProvider ?? null,
-      model: defaultsResult?.defaults?.model ?? null,
-    };
-    const agents = await Promise.all(
-      rawAgents.map((agent) => enrichAgentEntry(client, agent, { defaultId, sessionModels, defaults })),
-    );
-    return {
-      ok: true,
-      agents,
-      defaultId,
-      mainKey,
-      currentSessionKey: getSessionKey(),
-    };
+    const { rawAgents, defaultId, mainKey } = await fetchAgentListCore(client);
+    const fast = await buildAgentListResult(client, rawAgents, defaultId, mainKey, { enrichFull: false });
+    storeAgentListResult(fast);
+    void buildAgentListResult(client, rawAgents, defaultId, mainKey, { enrichFull: true })
+      .then((full) => {
+        storeAgentListResult(full);
+        broadcastAgentsUpdated(full);
+      })
+      .catch((err) => {
+        console.warn('[qizi] agent list enrich failed:', err.message);
+      });
+    return fast;
   } catch (err) {
+    if (cached?.ok) return cached;
     return { ok: false, error: formatGatewayError(err), agents: [] };
   }
 }
@@ -4073,6 +4252,7 @@ ipcMain.handle('openclaw:btw:send', async (event, { message, images, files }) =>
 app.whenReady().then(() => {
   initRuntimeDebugMode();
   initSttManager(app);
+  loadAgentListCacheFromDisk();
   createWindow();
   createTray();
   const shellSettings = loadShellSettings();
