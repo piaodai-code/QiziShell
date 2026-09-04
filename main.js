@@ -688,9 +688,58 @@ function applyCachedIdentityToEntry(entry) {
   return entry;
 }
 
+function pickAvatarCandidate(...values) {
+  for (const value of values) {
+    const raw = String(value || '').trim();
+    if (raw) return raw;
+  }
+  return '';
+}
+
+function isDataUrl(value) {
+  return String(value || '').trim().startsWith('data:');
+}
+
+function isHttpUrl(value) {
+  return /^https?:\/\//i.test(String(value || '').trim());
+}
+
+function resolveInlineAvatarValue(avatarValue) {
+  const raw = String(avatarValue || '').trim();
+  if (!raw) return null;
+  if (isDataUrl(raw) || isHttpUrl(raw)) return raw;
+  return null;
+}
+
+function buildGatewayAvatarUrl(avatarPath) {
+  const raw = String(avatarPath || '').trim();
+  if (!raw) return null;
+  if (isDataUrl(raw) || isHttpUrl(raw)) return raw;
+  const { wsUrl } = loadOpenClawConfig();
+  if (!wsUrl) return null;
+  const base = gatewayHttpBase(wsUrl);
+  return raw.startsWith('/') ? `${base}${raw}` : `${base}/${raw}`;
+}
+
+function applyListIdentityToEntry(entry, agent) {
+  const identity = agent?.identity;
+  if (!identity || typeof identity !== 'object') return;
+  if (typeof identity.name === 'string' && identity.name.trim()) {
+    entry.label = identity.name.trim();
+  }
+  if (identity.emoji) entry.emoji = identity.emoji;
+  if (identity.avatarStatus) entry.avatarStatus = identity.avatarStatus;
+  const inline = resolveInlineAvatarValue(pickAvatarCandidate(identity.avatarUrl, identity.avatar));
+  if (inline) {
+    entry.avatarDataUrl = inline;
+    agentAvatarCache.set(entry.id, inline);
+  }
+}
+
 function buildAgentEntryFast(agent, meta) {
   const entry = normalizeAgentEntry(agent, meta);
   applyCurrentModelToEntry(entry, meta.sessionModels?.get(entry.id), meta.defaults);
+  applyListIdentityToEntry(entry, agent);
   applyCachedIdentityToEntry(entry);
   return entry;
 }
@@ -814,15 +863,26 @@ function fetchGatewayResource(url, { headers = {}, timeoutMs = 15000 } = {}) {
   });
 }
 
-async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
-  if (!avatarPath || avatarStatus === 'none') return null;
+async function resolveAgentAvatarDataUrl(agentId, avatarValue, avatarStatus) {
+  const raw = String(avatarValue || '').trim();
+  if (!raw) return null;
+
   const cached = agentAvatarCache.get(agentId);
   if (cached) return cached;
 
-  const { wsUrl, token } = loadOpenClawConfig();
-  if (!wsUrl || !token) return null;
+  const inline = resolveInlineAvatarValue(raw);
+  if (inline) {
+    agentAvatarCache.set(agentId, inline);
+    return inline;
+  }
 
-  const url = `${gatewayHttpBase(wsUrl)}${avatarPath.startsWith('/') ? avatarPath : `/${avatarPath}`}`;
+  if (avatarStatus === 'none') return null;
+
+  const { token } = loadOpenClawConfig();
+  if (!token) return null;
+
+  const url = buildGatewayAvatarUrl(raw);
+  if (!url || isDataUrl(url)) return url;
   try {
     const resp = await fetchGatewayResource(url, {
       headers: { Authorization: `Bearer ${token}` },
@@ -836,6 +896,11 @@ async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
   }
 }
 
+/** @deprecated alias */
+async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
+  return resolveAgentAvatarDataUrl(agentId, avatarPath, avatarStatus);
+}
+
 async function enrichAgentEntry(client, agent, meta = {}) {
   const entry = buildAgentEntryFast(agent, meta);
   try {
@@ -844,17 +909,17 @@ async function enrichAgentEntry(client, agent, meta = {}) {
       entry.label = identity.name.trim();
     }
     entry.emoji = identity?.emoji || null;
-    entry.avatarStatus = identity?.avatarStatus || 'none';
+    entry.avatarStatus = identity?.avatarStatus || entry.avatarStatus || 'none';
     agentIdentityCache.set(entry.id, {
       label: entry.label,
       emoji: entry.emoji,
       avatarStatus: entry.avatarStatus,
     });
-    entry.avatarDataUrl = await fetchAgentAvatarDataUrl(
+    entry.avatarDataUrl = await resolveAgentAvatarDataUrl(
       entry.id,
-      identity?.avatar,
+      pickAvatarCandidate(identity?.avatarUrl, identity?.avatar),
       identity?.avatarStatus,
-    );
+    ) || entry.avatarDataUrl;
   } catch {
     // keep fast entry without fresh identity
   }
