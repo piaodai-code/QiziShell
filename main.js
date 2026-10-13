@@ -814,6 +814,84 @@ async function refreshAgentListInBackground() {
   return agentListRefreshPromise;
 }
 
+const MODEL_LIST_FRESH_MS = 3 * 60 * 1000;
+const MODEL_LIST_STALE_MS = 24 * 60 * 60 * 1000;
+let modelListCache = { cacheKey: null, at: 0, data: null };
+let modelListRefreshPromise = null;
+
+function getModelListCacheKey() {
+  return `${getAgentListGatewayKey()}\0${parseAgentIdFromSessionKey(getSessionKey())}`;
+}
+
+function normalizeModelCatalogEntries(models) {
+  return (Array.isArray(models) ? models : []).map((entry) => {
+    const provider = typeof entry?.provider === 'string' ? entry.provider.trim() : '';
+    const id = typeof entry?.id === 'string' ? entry.id.trim() : '';
+    const alias = typeof entry?.alias === 'string' ? entry.alias.trim() : '';
+    let qualified = typeof entry?.qualified === 'string' ? entry.qualified.trim() : '';
+    if (!qualified && provider && id) qualified = `${provider}/${id}`;
+    if (!qualified && alias.includes('/')) qualified = alias;
+    if (!qualified && alias) qualified = alias;
+    return qualified ? { ...entry, qualified } : { ...entry };
+  });
+}
+
+function storeModelListResult(data) {
+  modelListCache = { cacheKey: getModelListCacheKey(), at: Date.now(), data };
+}
+
+function broadcastModelsUpdated(payload) {
+  broadcastToRenderers('openclaw:models-updated', payload);
+}
+
+async function requestModelCatalog(client, agentId, { preparedOnly = false, view = 'configured', timeoutMs } = {}) {
+  const params = { agentId, view };
+  if (preparedOnly) params.preparedOnly = true;
+  const opts = typeof timeoutMs === 'number' ? { timeoutMs } : {};
+  const result = await client.request('models.list', params, opts);
+  return normalizeModelCatalogEntries(result?.models);
+}
+
+async function loadModelCatalogForAgent(client, agentId) {
+  const attempts = [
+    { preparedOnly: true, view: 'configured', timeoutMs: 45_000 },
+    { preparedOnly: true, view: 'default', timeoutMs: 45_000 },
+    { preparedOnly: false, view: 'configured', timeoutMs: 120_000 },
+    { preparedOnly: false, view: 'default', timeoutMs: 120_000 },
+  ];
+  for (const attempt of attempts) {
+    const models = await requestModelCatalog(client, agentId, attempt);
+    if (models.length > 0) return models;
+  }
+  return [];
+}
+
+async function refreshModelListInBackground() {
+  if (modelListRefreshPromise) return modelListRefreshPromise;
+  modelListRefreshPromise = (async () => {
+    try {
+      const client = ensureGateway();
+      await client.waitForConnect();
+      const agentId = parseAgentIdFromSessionKey(getSessionKey());
+      const models = await loadModelCatalogForAgent(client, agentId);
+      const data = { ok: true, models, agentId };
+      storeModelListResult(data);
+      broadcastModelsUpdated(data);
+      return data;
+    } catch (err) {
+      console.warn('[qizi] model list refresh failed:', err.message);
+      return null;
+    } finally {
+      modelListRefreshPromise = null;
+    }
+  })();
+  return modelListRefreshPromise;
+}
+
+function prefetchModelList() {
+  void refreshModelListInBackground();
+}
+
 function gatewayHttpBase(wsUrl) {
   return String(wsUrl || '')
     .replace(/^wss:\/\//i, 'https://')
@@ -2869,6 +2947,11 @@ async function sendDetachedBtwChat(event, { message, attachments }) {
 async function ensureGatewaySessionSubscription(client) {
   if (!client?.connected) return;
   try {
+    await client.request('sessions.subscribe', { limit: 60, ownerFirst: true });
+  } catch (err) {
+    console.warn('[qizi] sessions.subscribe failed:', err.message);
+  }
+  try {
     await client.request('sessions.messages.subscribe', { key: getSessionKey() });
   } catch (err) {
     console.warn('[qizi] sessions.messages.subscribe failed:', err.message);
@@ -2899,6 +2982,7 @@ function attachGatewayHandlers(client) {
   client.on('connected', () => {
     void ensureGatewaySessionSubscription(client);
     prefetchAgentList();
+    prefetchModelList();
     broadcastToRenderers('openclaw:gateway-status', {
       connected: true,
       reconnected: activeRuns.size > 0,
@@ -2909,16 +2993,18 @@ function attachGatewayHandlers(client) {
       });
     }
   });
-  client.on('close', () => {
+  client.on('close', (info) => {
     if (isQuitting) {
       failAllActiveRuns('应用正在退出');
     } else {
       suspendActiveRuns();
     }
     clearAllPendingBtwRuns();
+    const reconnecting = !isQuitting && info?.reconnecting !== false;
     broadcastToRenderers('openclaw:gateway-status', {
       connected: false,
-      reconnecting: !isQuitting,
+      reconnecting,
+      error: info?.errorMessage || null,
     });
   });
 }
@@ -2935,6 +3021,8 @@ function ensureGateway() {
       gateway.stop();
     }
     clearAgentListCache();
+    modelListCache = { cacheKey: null, at: 0, data: null };
+    modelListRefreshPromise = null;
     gateway = new GatewayWsClient({
       url: config.wsUrl,
       token: config.token,
@@ -3190,13 +3278,33 @@ async function getCurrentModel() {
   };
 }
 
-async function listModels() {
+async function listModels(options = {}) {
+  const forceRefresh = options?.forceRefresh === true;
+  const cacheKey = getModelListCacheKey();
+  const cacheValid = modelListCache.cacheKey === cacheKey;
+  const cached = cacheValid ? modelListCache.data : null;
+  const age = cacheValid ? Date.now() - modelListCache.at : Infinity;
+
+  if (!forceRefresh && cached?.ok) {
+    if (age < MODEL_LIST_FRESH_MS) {
+      return cached;
+    }
+    if (age < MODEL_LIST_STALE_MS) {
+      void refreshModelListInBackground();
+      return cached;
+    }
+  }
+
   try {
     const client = ensureGateway();
     await client.waitForConnect();
-    const result = await client.request('models.list', { view: 'configured' });
-    return { ok: true, models: Array.isArray(result?.models) ? result.models : [] };
+    const agentId = parseAgentIdFromSessionKey(getSessionKey());
+    const models = await loadModelCatalogForAgent(client, agentId);
+    const data = { ok: true, models, agentId };
+    storeModelListResult(data);
+    return data;
   } catch (err) {
+    if (cached?.ok) return cached;
     return { ok: false, error: formatGatewayError(err), models: [] };
   }
 }
@@ -3294,8 +3402,11 @@ async function setSessionModel(qualifiedModel) {
   try {
     const client = ensureGateway();
     await client.waitForConnect();
+    const sessionKey = getSessionKey();
+    const agentId = parseAgentIdFromSessionKey(sessionKey);
     const result = await client.request('sessions.patch', {
-      key: getSessionKey(),
+      key: sessionKey,
+      agentId,
       model: qualifiedModel.trim(),
     });
     const resolved = result?.resolved || {};
@@ -3307,6 +3418,248 @@ async function setSessionModel(qualifiedModel) {
       model,
       qualified: provider && model ? `${provider}/${model}` : qualifiedModel.trim(),
     };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
+const FAST_MODE_PROVIDER_IDS = new Set([
+  'anthropic',
+  'minimax',
+  'minimax-portal',
+  'openai',
+  'openrouter',
+  'xai',
+]);
+
+function sessionRowMatchesDefaults(row, defaults) {
+  if (!row) return false;
+  const rowProvider = row.modelProvider ?? null;
+  const rowModel = row.model ?? null;
+  const defProvider = defaults?.modelProvider ?? null;
+  const defModel = defaults?.model ?? null;
+  if (rowProvider && defProvider && rowProvider !== defProvider) return false;
+  if (rowModel && defModel && rowModel !== defModel) return false;
+  return true;
+}
+
+function normalizeThinkingLevelId(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  return text.toLowerCase().replace(/\s+/g, '_');
+}
+
+function formatThinkingLevelDisplayLabel(value) {
+  const raw = normalizeThinkingLevelId(value);
+  if (!raw || raw === 'off') return 'Off';
+  if (['on', 'enable', 'enabled'].includes(raw)) return 'On';
+  switch (raw) {
+    case 'adaptive':
+      return 'Adaptive';
+    case 'minimal':
+      return 'Minimal';
+    case 'low':
+      return 'Low';
+    case 'medium':
+      return 'Medium';
+    case 'high':
+      return 'High';
+    case 'xhigh':
+      return 'Extra high';
+    case 'max':
+      return 'Maximum';
+    case 'ultra':
+      return 'Ultra';
+    default: {
+      const text = String(value || '').trim();
+      if (!text) return 'Off';
+      return text.charAt(0).toUpperCase() + text.slice(1);
+    }
+  }
+}
+
+function formatThinkingOverrideLabel(value, label) {
+  const normalized = normalizeThinkingLevelId(value);
+  if (!normalized || normalized === 'off') return 'Off';
+  const trimmed = String(label || '').trim();
+  if (trimmed && normalizeThinkingLevelId(trimmed) !== normalized) {
+    return trimmed;
+  }
+  return formatThinkingLevelDisplayLabel(normalized);
+}
+
+function mapThinkingLevelEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries.map((entry) => {
+    if (entry && typeof entry === 'object') {
+      const id = entry.id ?? entry.value ?? normalizeThinkingLevelId(entry.label);
+      const idStr = String(id);
+      const rawLabel = entry.label ?? entry.id ?? idStr;
+      return {
+        id: idStr,
+        label: formatThinkingOverrideLabel(idStr, rawLabel),
+      };
+    }
+    const id = normalizeThinkingLevelId(entry);
+    return { id, label: formatThinkingLevelDisplayLabel(id || entry) };
+  }).filter((item) => item.id || item.label);
+}
+
+function resolveThinkingLevelOptions(row, defaults) {
+  if (Array.isArray(row?.thinkingLevels) && row.thinkingLevels.length) {
+    return mapThinkingLevelEntries(row.thinkingLevels);
+  }
+  const useDefaults = sessionRowMatchesDefaults(row, defaults);
+  if (useDefaults && Array.isArray(defaults?.thinkingLevels) && defaults.thinkingLevels.length) {
+    return mapThinkingLevelEntries(defaults.thinkingLevels);
+  }
+  const labels = Array.isArray(row?.thinkingOptions) && row.thinkingOptions.length
+    ? row.thinkingOptions
+    : (useDefaults && Array.isArray(defaults?.thinkingOptions) ? defaults.thinkingOptions : []);
+  return mapThinkingLevelEntries(labels);
+}
+
+function formatInheritedThinkingLabel(defaultLevel) {
+  return `Inherited: ${formatThinkingLevelDisplayLabel(defaultLevel || 'off')}`;
+}
+
+function resolveFastModeUiValue(row) {
+  const value = row?.fastMode;
+  if (value === true || value === 'on') return 'on';
+  if (value === false || value === 'off') return 'off';
+  if (value === 'auto') return 'auto';
+  if (value === null || value === undefined || value === '') return '';
+  return String(value);
+}
+
+function resolveFastModeSupported(row) {
+  const provider = String(row?.modelProvider || '').trim().toLowerCase();
+  if (provider && FAST_MODE_PROVIDER_IDS.has(provider)) return true;
+  const current = resolveFastModeUiValue(row);
+  return current === 'on' || current === 'off' || current === 'auto';
+}
+
+function resolveFastModeOptionsForSupportedProvider() {
+  return [
+    { id: '', label: 'Default' },
+    { id: 'off', label: 'Standard' },
+    { id: 'on', label: 'Fast' },
+    { id: 'auto', label: 'Auto' },
+  ];
+}
+
+function formatFastModeDisplayLabel(current) {
+  const id = current === undefined || current === null ? '' : String(current);
+  const match = resolveFastModeOptionsForSupportedProvider().find((o) => o.id === id);
+  if (match) return match.label;
+  if (id === 'on') return 'Fast';
+  if (id === 'off') return 'Standard';
+  if (id === 'auto') return 'Auto';
+  return 'Default';
+}
+
+function resolveSpeedSegmentOptions() {
+  return [
+    { id: 'off', label: 'Standard' },
+    { id: 'on', label: 'Fast' },
+  ];
+}
+
+function resolveSpeedSegmentSelection(current) {
+  if (current === 'on') return 'on';
+  if (current === 'auto') return 'auto';
+  return 'off';
+}
+
+function patchFastModeForGateway(uiValue) {
+  if (uiValue === '' || uiValue == null || uiValue === 'inherit') return null;
+  if (uiValue === 'on') return true;
+  if (uiValue === 'off') return false;
+  if (uiValue === 'auto') return 'auto';
+  return uiValue;
+}
+
+async function fetchSessionListRow(client, sessionKey) {
+  const agentId = parseAgentIdFromSessionKey(sessionKey);
+  const paramSets = [
+    { limit: 200, includeGlobal: true, includeUnknown: true, agentId },
+    { limit: 200, includeGlobal: true, includeUnknown: true },
+    { limit: 200 },
+  ];
+  for (const params of paramSets) {
+    try {
+      const result = await client.request('sessions.list', params);
+      const sessions = result?.sessions || [];
+      const row = sessions.find((s) => s?.key === sessionKey);
+      if (row) return { row, defaults: result?.defaults || {} };
+    } catch {
+      // try next param set
+    }
+  }
+  return { row: null, defaults: {} };
+}
+
+async function getSessionControls() {
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const sessionKey = getSessionKey();
+    const { row, defaults } = await fetchSessionListRow(client, sessionKey);
+    if (!row) {
+      return { ok: false, error: '未找到当前会话' };
+    }
+    const thinkingLevels = resolveThinkingLevelOptions(row, defaults);
+    const defaultLevel = row.thinkingDefault ?? defaults.thinkingDefault ?? 'off';
+    const thinkingCurrent = row.thinkingLevel ? String(row.thinkingLevel) : '';
+    const effectiveThinkingId = thinkingCurrent || defaultLevel;
+    const speedSupported = resolveFastModeSupported(row);
+    const speedCurrent = resolveFastModeUiValue(row);
+    return {
+      ok: true,
+      thinking: {
+        supported: thinkingLevels.length > 0,
+        current: thinkingCurrent,
+        defaultLevel: String(defaultLevel),
+        effectiveId: String(effectiveThinkingId),
+        inheritedLabel: formatInheritedThinkingLabel(defaultLevel),
+        display: thinkingCurrent
+          ? formatThinkingOverrideLabel(thinkingCurrent)
+          : formatThinkingLevelDisplayLabel(defaultLevel),
+        levels: thinkingLevels,
+      },
+      speed: {
+        supported: speedSupported,
+        current: speedCurrent,
+        display: speedSupported ? formatFastModeDisplayLabel(speedCurrent) : null,
+        options: speedSupported ? resolveFastModeOptionsForSupportedProvider() : [],
+        segments: speedSupported ? resolveSpeedSegmentOptions() : [],
+        segmentCurrent: speedSupported ? resolveSpeedSegmentSelection(speedCurrent) : '',
+      },
+    };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
+async function patchSessionControls(patch = {}) {
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const sessionKey = getSessionKey();
+    const agentId = parseAgentIdFromSessionKey(sessionKey);
+    const body = { key: sessionKey, agentId };
+    if ('thinkingLevel' in patch) {
+      const value = patch.thinkingLevel;
+      body.thinkingLevel = value === '' || value == null ? null : String(value);
+    }
+    if ('fastMode' in patch) {
+      body.fastMode = patchFastModeForGateway(patch.fastMode);
+    }
+    if (!('thinkingLevel' in patch) && !('fastMode' in patch)) {
+      return { ok: false, error: '未指定要更新的项' };
+    }
+    await client.request('sessions.patch', body);
+    return getSessionControls();
   } catch (err) {
     return { ok: false, error: formatGatewayError(err) };
   }
@@ -4034,6 +4387,14 @@ ipcMain.handle('openclaw:session:info', (event) => {
 ipcMain.handle('openclaw:models:set', (event, qualifiedModel) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return setSessionModel(qualifiedModel);
+});
+ipcMain.handle('openclaw:session:controls', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getSessionControls();
+});
+ipcMain.handle('openclaw:session:controls:patch', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return patchSessionControls(payload || {});
 });
 ipcMain.handle('openclaw:abort', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();

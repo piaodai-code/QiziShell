@@ -67,6 +67,11 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:agents-updated', handler);
     return () => ipcRenderer.removeListener('openclaw:agents-updated', handler);
   },
+  onModelsUpdated: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:models-updated', handler);
+    return () => ipcRenderer.removeListener('openclaw:models-updated', handler);
+  },
   abortChat: () => ipcRenderer.invoke('openclaw:abort'),
   getSessionKey: () => ipcRenderer.invoke('openclaw:getSessionKey'),
   listAgents: () => ipcRenderer.invoke('openclaw:agents:list'),
@@ -82,6 +87,8 @@ contextBridge.exposeInMainWorld('qizi', {
   getCurrentModel: () => ipcRenderer.invoke('openclaw:models:current'),
   getSessionInfo: () => ipcRenderer.invoke('openclaw:session:info'),
   setModel: (qualifiedModel) => ipcRenderer.invoke('openclaw:models:set', qualifiedModel),
+  getSessionControls: () => ipcRenderer.invoke('openclaw:session:controls'),
+  patchSessionControls: (payload) => ipcRenderer.invoke('openclaw:session:controls:patch', payload),
   normalizeImage: (dataUrl) => ipcRenderer.invoke('openclaw:normalize-image', dataUrl),
   pickImages: () => ipcRenderer.invoke('openclaw:pickImages'),
   pickFiles: () => ipcRenderer.invoke('openclaw:pickFiles'),

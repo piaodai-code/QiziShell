@@ -31,6 +31,9 @@ const composerContextMenuEl = document.getElementById('composer-context-menu');
 const modelBadge = document.getElementById('model-badge');
 const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
+const sessionControlsBtn = document.getElementById('session-controls-btn');
+const sessionControlsPopup = document.getElementById('session-controls-popup');
+const sessionControlsBadge = document.getElementById('session-controls-badge');
 const titlebarAgentBtn = document.getElementById('titlebar-agent-btn');
 const titlebarAgentAvatar = document.getElementById('titlebar-agent-avatar');
 const composerHistoryBtn = document.getElementById('composer-history-btn');
@@ -3885,8 +3888,15 @@ function formatCatalogEntryLabel(entry) {
 }
 
 function formatCatalogEntryQualified(entry) {
-  if (!entry?.provider || !entry?.id) return null;
-  return `${entry.provider}/${entry.id}`;
+  if (typeof entry?.qualified === 'string' && entry.qualified.trim()) {
+    return entry.qualified.trim();
+  }
+  if (entry?.provider && entry?.id) {
+    return `${entry.provider}/${entry.id}`;
+  }
+  const alias = String(entry?.alias || '').trim();
+  if (alias) return alias;
+  return null;
 }
 
 function setModelBadgeText(text) {
@@ -3932,6 +3942,7 @@ async function refreshSessionInfo() {
     const label = result.model || result.provider || '—';
     setModelBadgeText(formatModelShortName(label));
     updateContextMeter(result.context);
+    refreshSessionControlsBadge();
   } catch {
     // ignore
   }
@@ -3953,6 +3964,16 @@ async function loadModelCatalog(force) {
   modelCatalogCache = Array.isArray(result.models) ? result.models : [];
   modelCatalogExpiresAt = now + MODEL_CATALOG_TTL_MS;
   return modelCatalogCache;
+}
+
+function handleModelsCatalogUpdated(result) {
+  if (!result?.ok || !Array.isArray(result.models)) return;
+  modelCatalogCache = result.models;
+  modelCatalogExpiresAt = Date.now() + MODEL_CATALOG_TTL_MS;
+  if (modelPopup && !modelPopup.hidden) {
+    void refreshCurrentModelBadge();
+    renderModelPopup(result.models);
+  }
 }
 
 function hideAgentPopup() {
@@ -4277,6 +4298,291 @@ async function refreshAgentTitleFromGateway() {
   }
 }
 
+function setSessionControlsBadgeText(text) {
+  if (!sessionControlsBadge) return;
+  sessionControlsBadge.textContent = text || '—';
+}
+
+function labelForSessionControlOption(options, currentId) {
+  const id = currentId === undefined || currentId === null ? '' : String(currentId);
+  const match = (options || []).find((o) => String(o.id) === id);
+  return match?.label || (id ? id : '默认');
+}
+
+function formatSessionControlsBadge(data) {
+  if (!data?.ok) return '—';
+  const think = data.thinking?.display || '—';
+  return think.length > 12 ? `${think.slice(0, 12)}…` : think;
+}
+
+async function refreshSessionControlsBadge() {
+  if (!window.qizi.getSessionControls || !sessionControlsBadge) return;
+  try {
+    const result = await window.qizi.getSessionControls();
+    if (result?.ok) setSessionControlsBadgeText(formatSessionControlsBadge(result));
+  } catch {
+    // ignore
+  }
+}
+
+function hideSessionControlsPopup() {
+  if (!sessionControlsPopup) return;
+  sessionControlsPopup.hidden = true;
+  sessionControlsPopup.innerHTML = '';
+  if (sessionControlsBtn) sessionControlsBtn.classList.remove('open');
+}
+
+function resolveThinkingSliderIndex(thinking) {
+  const levels = thinking?.levels || [];
+  if (!levels.length) return 0;
+  const targetId = thinking.effectiveId || thinking.defaultLevel || levels[0].id;
+  let index = levels.findIndex((entry) => entry.id === targetId);
+  if (index < 0) index = 0;
+  return index;
+}
+
+function updateThinkingSliderUi(panel, thinking, activeIndex) {
+  const levels = thinking.levels || [];
+  const maxIndex = Math.max(1, levels.length - 1);
+  const ratio = activeIndex / maxIndex;
+  const valueEl = panel.querySelector('.sc-section-value');
+  if (valueEl) {
+    valueEl.textContent = levels[activeIndex]?.label || thinking.display || '—';
+  }
+  const track = panel.querySelector('.sc-slider-track');
+  if (track) {
+    track.style.setProperty('--sc-ratio', String(ratio));
+    track.classList.toggle('sc-at-min', activeIndex <= 0);
+    track.classList.toggle('sc-at-max', activeIndex >= maxIndex);
+    if (activeIndex <= 0) {
+      track.style.setProperty('--sc-fill-width', '0');
+    } else if (activeIndex >= maxIndex) {
+      track.style.setProperty('--sc-fill-width', '100%');
+    } else {
+      track.style.setProperty(
+        '--sc-fill-width',
+        'calc((var(--sc-thumb-w) / 2) + var(--sc-ratio) * (100% - var(--sc-thumb-w)))',
+      );
+    }
+  }
+  panel.querySelectorAll('.sc-slider-dot').forEach((dot, i) => {
+    dot.classList.toggle('active', i === activeIndex);
+    dot.setAttribute('aria-selected', i === activeIndex ? 'true' : 'false');
+  });
+}
+
+function renderThinkingSliderSection(thinking) {
+  const levels = thinking.levels || [];
+  if (!levels.length) return null;
+
+  const section = document.createElement('section');
+  section.className = 'sc-section sc-section--thinking';
+
+  const head = document.createElement('div');
+  head.className = 'sc-section-head';
+  const label = document.createElement('span');
+  label.className = 'sc-section-label';
+  label.textContent = 'Reasoning';
+  const value = document.createElement('span');
+  value.className = 'sc-section-value';
+  value.textContent = thinking.display || '—';
+  head.appendChild(label);
+  head.appendChild(value);
+
+  const slider = document.createElement('div');
+  slider.className = 'sc-slider';
+  slider.setAttribute('role', 'group');
+  slider.setAttribute('aria-label', 'Reasoning level');
+
+  const track = document.createElement('div');
+  track.className = 'sc-slider-track';
+
+  const fill = document.createElement('div');
+  fill.className = 'sc-slider-fill';
+
+  const dots = document.createElement('div');
+  dots.className = 'sc-slider-dots';
+
+  const thumb = document.createElement('div');
+  thumb.className = 'sc-slider-thumb';
+  thumb.setAttribute('aria-hidden', 'true');
+
+  const defaultLevel = thinking.defaultLevel || levels[0]?.id || '';
+  const activeIndex = resolveThinkingSliderIndex(thinking);
+
+  levels.forEach((level, index) => {
+    const dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = 'sc-slider-dot';
+    dot.title = level.label;
+    dot.setAttribute('aria-label', level.label);
+    dot.addEventListener('click', async () => {
+      updateThinkingSliderUi(section, thinking, index);
+      const patchValue = level.id === defaultLevel ? '' : level.id;
+      await selectSessionControl('thinking', patchValue, { optimisticThinking: { ...thinking, effectiveId: level.id, display: level.label, current: patchValue } });
+    });
+    dots.appendChild(dot);
+  });
+
+  track.appendChild(fill);
+  track.appendChild(dots);
+  track.appendChild(thumb);
+  slider.appendChild(track);
+  section.appendChild(head);
+  section.appendChild(slider);
+  updateThinkingSliderUi(section, thinking, activeIndex);
+  return section;
+}
+
+function renderSpeedSegmentSection(speed) {
+  if (!speed?.supported) return null;
+
+  const section = document.createElement('section');
+  section.className = 'sc-section sc-section--speed';
+
+  const head = document.createElement('div');
+  head.className = 'sc-section-head sc-section-head--speed';
+  const label = document.createElement('span');
+  label.className = 'sc-section-label';
+  label.textContent = 'Speed';
+  head.appendChild(label);
+  if (speed.current === 'auto') {
+    const value = document.createElement('span');
+    value.className = 'sc-section-value';
+    value.textContent = 'Auto';
+    head.appendChild(value);
+  }
+
+  const segment = document.createElement('div');
+  segment.className = 'sc-segment';
+  segment.setAttribute('role', 'radiogroup');
+  segment.setAttribute('aria-label', 'Speed');
+
+  let segmentCurrent = 'off';
+  if (speed.current === 'on') segmentCurrent = 'on';
+  else if (speed.current === 'auto') segmentCurrent = '';
+  for (const opt of speed.segments || []) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sc-segment-btn' + (segmentCurrent && opt.id === segmentCurrent ? ' active' : '');
+    btn.textContent = opt.label;
+    btn.setAttribute('role', 'radio');
+    btn.setAttribute('aria-checked', segmentCurrent && opt.id === segmentCurrent ? 'true' : 'false');
+    btn.addEventListener('click', () => selectSessionControl('speed', opt.id));
+    segment.appendChild(btn);
+  }
+
+  section.appendChild(head);
+  section.appendChild(segment);
+
+  const defaultOpt = (speed.options || []).find((entry) => entry.id === '');
+  const autoOpt = (speed.options || []).find((entry) => entry.id === 'auto');
+  if (defaultOpt || autoOpt) {
+    const extras = document.createElement('div');
+    extras.className = 'sc-speed-extras';
+    if (defaultOpt) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sc-speed-extra' + (speed.current === '' ? ' active' : '');
+      btn.textContent = defaultOpt.label;
+      btn.addEventListener('click', () => selectSessionControl('speed', ''));
+      extras.appendChild(btn);
+    }
+    if (autoOpt) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'sc-speed-extra' + (speed.current === 'auto' ? ' active' : '');
+      btn.textContent = autoOpt.label;
+      btn.addEventListener('click', () => selectSessionControl('speed', 'auto'));
+      extras.appendChild(btn);
+    }
+    section.appendChild(extras);
+  }
+  return section;
+}
+
+function renderSessionControlsPopup(data) {
+  if (!sessionControlsPopup) return;
+  if (!data?.ok) {
+    sessionControlsPopup.innerHTML = `<div class="sc-popup-message sc-popup-message--error">${escapeHtml(data?.error || 'Failed to load')}</div>`;
+    return;
+  }
+  sessionControlsPopup.innerHTML = '';
+  const panel = document.createElement('div');
+  panel.className = 'sc-panel';
+
+  const thinkingSection = data.thinking?.supported ? renderThinkingSliderSection(data.thinking) : null;
+  const speedSection = renderSpeedSegmentSection(data.speed);
+
+  if (!thinkingSection && !speedSection) {
+    sessionControlsPopup.innerHTML = '<div class="sc-popup-message">No session controls for this model.</div>';
+    return;
+  }
+  if (thinkingSection) panel.appendChild(thinkingSection);
+  if (thinkingSection && speedSection) {
+    const divider = document.createElement('hr');
+    divider.className = 'sc-divider';
+    panel.appendChild(divider);
+  }
+  if (speedSection) panel.appendChild(speedSection);
+  sessionControlsPopup.appendChild(panel);
+}
+
+async function showSessionControlsPopup() {
+  if (!sessionControlsPopup || !sessionControlsBtn) return;
+  if (!sessionControlsPopup.hidden) {
+    hideSessionControlsPopup();
+    return;
+  }
+  hideAgentPopup();
+  hideCommandPopup();
+  hideModelPopup();
+  sessionControlsPopup.hidden = false;
+  sessionControlsBtn.classList.add('open');
+  sessionControlsPopup.innerHTML = '<div class="sc-popup-message">Loading…</div>';
+
+  if (!connected) {
+    await checkConnection();
+    if (!connected) {
+      sessionControlsPopup.innerHTML = '<div class="sc-popup-message sc-popup-message--error">Gateway not connected</div>';
+      return;
+    }
+  }
+
+  try {
+    const result = await window.qizi.getSessionControls();
+    renderSessionControlsPopup(result);
+    if (result?.ok) setSessionControlsBadgeText(formatSessionControlsBadge(result));
+  } catch (err) {
+    sessionControlsPopup.innerHTML = `<div class="sc-popup-message sc-popup-message--error">${escapeHtml(err.message || 'Failed to load')}</div>`;
+  }
+}
+
+async function selectSessionControl(kind, value, options = {}) {
+  if (!window.qizi.patchSessionControls) return;
+  const patch = kind === 'thinking' ? { thinkingLevel: value } : { fastMode: value };
+  if (sessionControlsBtn) sessionControlsBtn.disabled = true;
+  try {
+    const result = await window.qizi.patchSessionControls(patch);
+    if (!result?.ok) throw new Error(result?.error || 'Update failed');
+    renderSessionControlsPopup(result);
+    setSessionControlsBadgeText(formatSessionControlsBadge(result));
+    setStatus(kind === 'thinking' ? 'Reasoning updated' : 'Speed updated', 'ok');
+  } catch (err) {
+    if (sessionControlsPopup && !sessionControlsPopup.hidden && window.qizi.getSessionControls) {
+      try {
+        const fresh = await window.qizi.getSessionControls();
+        if (fresh?.ok) renderSessionControlsPopup(fresh);
+      } catch {
+        // ignore refresh failure
+      }
+    }
+    setStatus(err.message || 'Update failed', 'error');
+  } finally {
+    if (sessionControlsBtn) sessionControlsBtn.disabled = false;
+  }
+}
+
 function hideModelPopup() {
   if (!modelPopup) return;
   modelPopup.hidden = true;
@@ -4329,9 +4635,15 @@ async function showModelPopup() {
   }
   hideAgentPopup();
   hideCommandPopup();
+  hideSessionControlsPopup();
   modelPopup.hidden = false;
   modelPickerBtn.classList.add('open');
-  modelPopup.innerHTML = '<div class="model-popup-loading">加载模型…</div>';
+  const cachedModels = modelCatalogCache && modelCatalogExpiresAt > Date.now() ? modelCatalogCache : null;
+  if (cachedModels?.length) {
+    renderModelPopup(cachedModels);
+  } else {
+    modelPopup.innerHTML = '<div class="model-popup-loading">加载模型…</div>';
+  }
 
   if (!connected) {
     await checkConnection();
@@ -4346,7 +4658,9 @@ async function showModelPopup() {
     const models = await loadModelCatalog(false);
     renderModelPopup(models);
   } catch (err) {
-    modelPopup.innerHTML = `<div class="model-popup-error">${escapeHtml(err.message || '加载失败')}</div>`;
+    if (!cachedModels?.length) {
+      modelPopup.innerHTML = `<div class="model-popup-error">${escapeHtml(err.message || '加载失败')}</div>`;
+    }
   }
 }
 
@@ -4878,15 +5192,21 @@ if (window.qizi.onAgentsUpdated) {
   });
 }
 
+if (window.qizi.onModelsUpdated) {
+  window.qizi.onModelsUpdated((payload) => {
+    handleModelsCatalogUpdated(payload);
+  });
+}
+
 if (window.qizi.onGatewayStatus) {
   window.qizi.onGatewayStatus((payload) => {
     if (payload?.connected === false) {
+      connected = false;
       stopSessionWatch();
       if (payload.reconnecting !== false) {
-        setStatus(busy ? '网络抖动，重连中…' : '重连中…', 'pending');
+        setStatus(payload.error || (busy ? '网络抖动，重连中…' : '重连中…'), 'pending');
       } else {
-        connected = false;
-        setStatus('连接断开', 'error');
+        setStatus(payload.error || '连接断开', 'error');
       }
     } else if (payload?.connected === true) {
       connected = true;
@@ -5657,9 +5977,19 @@ if (modelPickerBtn) {
   });
 }
 
+if (sessionControlsBtn) {
+  sessionControlsBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showSessionControlsPopup();
+  });
+}
+
 document.addEventListener('click', (e) => {
   if (modelPopup && !modelPopup.hidden) {
     if (!e.target.closest('.model-picker-wrap')) hideModelPopup();
+  }
+  if (sessionControlsPopup && !sessionControlsPopup.hidden) {
+    if (!e.target.closest('.session-controls-wrap')) hideSessionControlsPopup();
   }
   if (emojiPickerEl && !emojiPickerEl.hidden) {
     if (!e.target.closest('.emoji-picker-wrap') && !e.target.closest('.emoji-picker')) {
@@ -5689,6 +6019,7 @@ document.addEventListener('keydown', (e) => {
       return;
     }
     if (modelPopup && !modelPopup.hidden) hideModelPopup();
+    if (sessionControlsPopup && !sessionControlsPopup.hidden) hideSessionControlsPopup();
     if (emojiPickerEl && !emojiPickerEl.hidden) hideEmojiPicker();
     if (agentPopup && !agentPopup.hidden) hideAgentPopup();
     if (appMenuPopup && !appMenuPopup.hidden) hideAppMenu();

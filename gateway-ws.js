@@ -28,6 +28,14 @@ const OPERATOR_SCOPES = [
   'operator.approvals',
   'operator.pairing',
 ];
+function readConnectDetailCode(err) {
+  return err?.details?.code || err?.details?.detailCode || null;
+}
+
+function describeGatewayClose(detailCode) {
+  if (detailCode === 'AUTH_RATE_LIMITED') return '登录尝试过多，稍后会自动重试';
+  return null;
+}
 
 function isSecureGatewayUrl(url) {
   return /^wss:\/\//i.test(String(url || ''));
@@ -63,8 +71,10 @@ class GatewayWsClient extends EventEmitter {
     this.deviceIdentity = loadOrCreateDeviceIdentity();
     this.pendingDeviceTokenRetry = false;
     this.deviceTokenRetryBudgetUsed = false;
+    this.pendingConnectError = null;
     this.hello = null;
     this.connectPromise = null;
+    this.lastRxAt = 0;
   }
 
   start() {
@@ -75,16 +85,31 @@ class GatewayWsClient extends EventEmitter {
     this.connectSent = false;
     this.connected = false;
 
+    const previous = this.ws;
     const ws = new WebSocket(this.url, buildGatewayWsOptions(this.url));
     this.ws = ws;
+    if (previous && previous !== ws) {
+      previous.removeAllListeners();
+      try { previous.terminate(); } catch {}
+    }
 
-    ws.on('open', () => this.armConnectChallengeTimeout());
-    ws.on('message', (data) => this.handleMessage(String(data)));
-    ws.on('close', (code, reason) => this.handleClose(code, String(reason)));
+    ws.on('open', () => {
+      if (this.ws !== ws) return;
+      this.lastRxAt = Date.now();
+      this.armConnectChallengeTimeout();
+    });
+    ws.on('message', (data) => {
+      if (this.ws !== ws) return;
+      this.lastRxAt = Date.now();
+      this.handleMessage(String(data));
+    });
+    ws.on('close', (code, reason) => {
+      if (this.ws !== ws) return;
+      this.handleClose(code, String(reason));
+    });
     ws.on('error', (err) => {
-      if (!this.connectSent) {
-        this.emit('error', err);
-      }
+      if (this.ws !== ws || this.connectSent) return;
+      this.emit('error', err);
     });
   }
 
@@ -104,7 +129,9 @@ class GatewayWsClient extends EventEmitter {
     if (this.closed) return;
     this.clearReconnectTimer();
     const delay = this.backoffMs;
-    this.backoffMs = Math.min(this.backoffMs * 2, 30_000);
+    if (this.backoffMs < 30_000) {
+      this.backoffMs = Math.min(this.backoffMs * 2, 30_000);
+    }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.start();
@@ -142,9 +169,22 @@ class GatewayWsClient extends EventEmitter {
     this.connectSent = false;
     this.connectPromise = null;
     this.clearConnectTimer();
+    const failure = this.pendingConnectError;
+    this.pendingConnectError = null;
+    const detailCode = failure?.detailCode || null;
+    const reconnecting = !this.closed;
+    if (detailCode === 'AUTH_RATE_LIMITED') {
+      const waitMs = Math.max(failure?.retryAfterMs || 60_000, 15_000);
+      this.backoffMs = waitMs;
+    }
     this.flushPending(new Error(`gateway closed (${code}): ${reason}`));
-    this.emit('close', { code, reason });
-    if (!this.closed) {
+    this.emit('close', {
+      code,
+      reason,
+      reconnecting,
+      errorMessage: describeGatewayClose(detailCode),
+    });
+    if (reconnecting) {
       this.scheduleReconnect();
     }
   }
@@ -196,6 +236,7 @@ class GatewayWsClient extends EventEmitter {
         const err = new Error(parsed.error?.message || 'gateway request failed');
         err.gatewayCode = parsed.error?.code;
         err.details = parsed.error?.details;
+        err.retryAfterMs = parsed.error?.retryAfterMs;
         pending.reject(err);
       }
     }
@@ -241,6 +282,9 @@ class GatewayWsClient extends EventEmitter {
     if (this.connectSent || !this.connectNonce) return;
     const role = OPERATOR_ROLE;
     const selectedAuth = this.selectConnectAuth(role);
+    if (this.pendingDeviceTokenRetry && selectedAuth.authDeviceToken) {
+      this.pendingDeviceTokenRetry = false;
+    }
     const scopes = this.resolveConnectScopes(selectedAuth);
     const signedAtMs = Date.now();
     const nonce = this.connectNonce;
@@ -292,6 +336,7 @@ class GatewayWsClient extends EventEmitter {
       .then((hello) => {
         this.pendingDeviceTokenRetry = false;
         this.deviceTokenRetryBudgetUsed = false;
+        this.pendingConnectError = null;
         this.backoffMs = 1000;
         this.hello = hello;
         this.connected = true;
@@ -306,7 +351,12 @@ class GatewayWsClient extends EventEmitter {
         this.emit('connected', hello);
       })
       .catch((err) => {
-        const detailCode = err.details?.code || err.details?.detailCode;
+        const detailCode = readConnectDetailCode(err);
+        this.pendingConnectError = {
+          detailCode,
+          message: err?.message || 'connect failed',
+          retryAfterMs: err?.retryAfterMs || err?.details?.retryAfterMs || null,
+        };
         if (
           this.deviceIdentity &&
           selectedAuth.usingStoredDeviceToken &&
@@ -351,12 +401,21 @@ class GatewayWsClient extends EventEmitter {
             : this.requestTimeoutMs;
 
     return new Promise((resolve, reject) => {
+      const silentSince = this.lastRxAt;
       const timeout =
         timeoutMs === null
           ? null
           : setTimeout(() => {
               this.pending.delete(id);
               reject(new Error(`gateway request timeout for ${method}`));
+              // 这次请求从头到尾没有任何入站帧，连接多半是半开的。只在这种情况下拆掉它。
+              if (
+                this.ws
+                && this.ws.readyState === WebSocket.OPEN
+                && this.lastRxAt === silentSince
+              ) {
+                try { this.ws.terminate(); } catch {}
+              }
             }, timeoutMs);
       this.pending.set(id, { resolve, reject, expectFinal, timeout });
       this.ws.send(JSON.stringify(frame));
