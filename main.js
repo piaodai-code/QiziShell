@@ -3599,6 +3599,75 @@ async function fetchSessionListRow(client, sessionKey) {
   return { row: null, defaults: {} };
 }
 
+const SESSION_PERMISSION_MODES = new Set(['read-only', 'guarded', 'workspace', 'full']);
+
+function normalizeSessionPermissionMode(value) {
+  if (value == null || value === '') return null;
+  const text = String(value).trim();
+  return SESSION_PERMISSION_MODES.has(text) ? text : null;
+}
+
+async function fetchAgentDefaultPermissionMode(client, agentId) {
+  try {
+    const result = await client.request('agents.list', {});
+    const agents = Array.isArray(result?.agents) ? result.agents : [];
+    const found = agents.find((agent) => agent?.id === agentId)
+      || agents.find((agent) => agent?.id === (result?.defaultId || 'main'));
+    return normalizeSessionPermissionMode(found?.defaultPermissionMode);
+  } catch {
+    return null;
+  }
+}
+
+async function getSessionPermission() {
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const sessionKey = getSessionKey();
+    const agentId = parseAgentIdFromSessionKey(sessionKey);
+    const [{ row }, defaultMode] = await Promise.all([
+      fetchSessionListRow(client, sessionKey),
+      fetchAgentDefaultPermissionMode(client, agentId),
+    ]);
+    return {
+      ok: true,
+      mode: normalizeSessionPermissionMode(row?.permissionMode),
+      pending: row?.permissionModePending === true,
+      defaultMode,
+    };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
+async function setSessionPermission(mode) {
+  const clearing = mode == null || mode === '' || mode === 'default';
+  const normalized = clearing ? null : normalizeSessionPermissionMode(mode);
+  if (!clearing && !normalized) {
+    return { ok: false, error: '未知的执行权限' };
+  }
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const sessionKey = getSessionKey();
+    const agentId = parseAgentIdFromSessionKey(sessionKey);
+    await client.request('sessions.patch', {
+      key: sessionKey,
+      agentId,
+      permissionMode: normalized,
+    });
+    const fresh = await getSessionPermission();
+    if (!fresh.ok) {
+      return { ok: true, mode: normalized, pending: false, defaultMode: null };
+    }
+    fresh.mode = normalized;
+    fresh.pending = false;
+    return fresh;
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
 async function getSessionControls() {
   try {
     const client = ensureGateway();
@@ -4395,6 +4464,14 @@ ipcMain.handle('openclaw:session:controls', (event) => {
 ipcMain.handle('openclaw:session:controls:patch', (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return patchSessionControls(payload || {});
+});
+ipcMain.handle('openclaw:session:permission', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getSessionPermission();
+});
+ipcMain.handle('openclaw:session:permission:set', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return setSessionPermission(payload?.mode);
 });
 ipcMain.handle('openclaw:abort', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();

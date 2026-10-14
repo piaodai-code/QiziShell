@@ -34,6 +34,11 @@ const modelPopup = document.getElementById('model-popup');
 const sessionControlsBtn = document.getElementById('session-controls-btn');
 const sessionControlsPopup = document.getElementById('session-controls-popup');
 const sessionControlsBadge = document.getElementById('session-controls-badge');
+const permPickerBtn = document.getElementById('perm-picker-btn');
+const permPickerGlyph = document.getElementById('perm-picker-glyph');
+const permPopup = document.getElementById('perm-popup');
+const attachPickerBtn = document.getElementById('attach-picker-btn');
+const attachPopup = document.getElementById('attach-popup');
 const titlebarAgentBtn = document.getElementById('titlebar-agent-btn');
 const titlebarAgentAvatar = document.getElementById('titlebar-agent-avatar');
 const composerHistoryBtn = document.getElementById('composer-history-btn');
@@ -3943,6 +3948,7 @@ async function refreshSessionInfo() {
     setModelBadgeText(formatModelShortName(label));
     updateContextMeter(result.context);
     refreshSessionControlsBadge();
+    void refreshSessionPermission();
   } catch {
     // ignore
   }
@@ -4138,6 +4144,8 @@ async function showAgentPopup() {
   }
   hideModelPopup();
   hideCommandPopup();
+  hidePermissionPopup();
+  hideAttachPopup();
   agentPopup.hidden = false;
   titlebarAgentBtn.classList.add('open');
   titlebarAgentBtn.setAttribute('aria-expanded', 'true');
@@ -4330,6 +4338,293 @@ function hideSessionControlsPopup() {
   sessionControlsPopup.hidden = true;
   sessionControlsPopup.innerHTML = '';
   if (sessionControlsBtn) sessionControlsBtn.classList.remove('open');
+}
+
+const PERMISSION_DOCS_URL = 'https://docs.openclaw.ai/gateway/permission-modes';
+const PERMISSION_MODE_LABEL = {
+  'read-only': '只读',
+  guarded: '受保护',
+  workspace: '工作区',
+  full: '完全访问',
+};
+const PERMISSION_CHOICES = [
+  {
+    mode: null,
+    glyph: 'default',
+    description: '遵循智能体已配置的执行权限。',
+  },
+  {
+    mode: 'read-only',
+    glyph: 'read-only',
+    title: '只读',
+    description: '智能体工具可以读取会话根目录中的内容，但无法写入或运行命令。',
+  },
+  {
+    mode: 'guarded',
+    glyph: 'guarded',
+    title: '受保护',
+    description: '超出会话根目录范围的请求由人工审核。',
+  },
+  {
+    mode: 'workspace',
+    glyph: 'workspace',
+    title: '工作区',
+    description: '超出会话根目录范围的请求由 AI 审核。',
+  },
+  {
+    mode: 'full',
+    glyph: 'full',
+    title: '完全访问',
+    description: '无需审核；文件操作和命令不受限制。',
+  },
+];
+
+let sessionPermissionState = { mode: null, defaultMode: null, pending: false };
+let permissionBusy = false;
+let permissionPopupError = '';
+let permissionRefreshTimer = null;
+
+const PERMISSION_ICON_SRC = {
+  default: 'assets/icons/perm-default.png',
+  'read-only': 'assets/icons/perm-read-only.png',
+  guarded: 'assets/icons/perm-guarded.png',
+  workspace: 'assets/icons/perm-workspace.png',
+  full: 'assets/icons/perm-full.png',
+};
+
+function permissionIconSrc(glyph) {
+  return PERMISSION_ICON_SRC[glyph] || PERMISSION_ICON_SRC.default;
+}
+
+function permissionCheckSvg() {
+  return '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M3.2 8.3 6.3 11.4 12.8 4.8"/></svg>';
+}
+
+function formatDefaultPermissionTitle(defaultMode) {
+  const label = PERMISSION_MODE_LABEL[defaultMode];
+  return label ? `默认（${label}）` : '默认';
+}
+
+function permissionChoiceTitle(choice, state = sessionPermissionState) {
+  if (choice.mode == null) return formatDefaultPermissionTitle(state.defaultMode);
+  return choice.title;
+}
+
+function permissionSelectionGlyph(state = sessionPermissionState) {
+  if (state?.mode == null) return 'default';
+  return state.mode;
+}
+
+function applyPermissionButton(state = sessionPermissionState) {
+  if (!permPickerBtn) return;
+  const glyph = permissionSelectionGlyph(state);
+  const choice = PERMISSION_CHOICES.find((item) => item.glyph === glyph) || PERMISSION_CHOICES[0];
+  const title = permissionChoiceTitle(choice, state);
+  if (permPickerGlyph) permPickerGlyph.src = permissionIconSrc(glyph);
+  permPickerBtn.title = `执行权限：${title}`;
+  permPickerBtn.setAttribute('aria-label', `执行权限：${title}`);
+  permPickerBtn.classList.toggle('is-pending', state?.pending === true || permissionBusy);
+}
+
+function renderPermissionPopup(state = sessionPermissionState, errorText = permissionPopupError) {
+  if (!permPopup) return;
+  permPopup.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'perm-popup-head';
+  const title = document.createElement('div');
+  title.className = 'perm-popup-title';
+  title.textContent = '执行权限';
+  const more = document.createElement('a');
+  more.className = 'perm-popup-more';
+  more.href = PERMISSION_DOCS_URL;
+  more.target = '_blank';
+  more.rel = 'noopener noreferrer';
+  more.textContent = '了解更多';
+  head.appendChild(title);
+  head.appendChild(more);
+  permPopup.appendChild(head);
+
+  const locked = permissionBusy || state?.pending === true;
+  PERMISSION_CHOICES.forEach((choice, index) => {
+    const selected = (state?.mode ?? null) === choice.mode;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'perm-item' + (selected ? ' active' : '');
+    btn.setAttribute('role', 'menuitemradio');
+    btn.setAttribute('aria-checked', selected ? 'true' : 'false');
+    btn.disabled = locked;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      void selectSessionPermission(choice.mode);
+    });
+
+    const icon = document.createElement('span');
+    icon.className = 'perm-item-icon';
+    const iconImg = document.createElement('img');
+    iconImg.src = permissionIconSrc(choice.glyph);
+    iconImg.alt = '';
+    icon.appendChild(iconImg);
+
+    const copy = document.createElement('span');
+    copy.className = 'perm-item-copy';
+    const name = document.createElement('span');
+    name.className = 'perm-item-name';
+    name.textContent = permissionChoiceTitle(choice, state);
+    const desc = document.createElement('span');
+    desc.className = 'perm-item-desc';
+    desc.textContent = choice.description;
+    copy.appendChild(name);
+    copy.appendChild(desc);
+
+    const mark = document.createElement('span');
+    mark.className = 'perm-item-mark';
+    if (selected) {
+      mark.innerHTML = permissionCheckSvg();
+    } else {
+      mark.textContent = String(index + 1);
+    }
+
+    btn.appendChild(icon);
+    btn.appendChild(copy);
+    btn.appendChild(mark);
+    permPopup.appendChild(btn);
+  });
+
+  if (errorText) {
+    const err = document.createElement('div');
+    err.className = 'perm-popup-error';
+    err.textContent = errorText;
+    permPopup.appendChild(err);
+  }
+}
+
+function hideAttachPopup() {
+  if (!attachPopup) return;
+  attachPopup.hidden = true;
+  if (attachPickerBtn) {
+    attachPickerBtn.classList.remove('open');
+    attachPickerBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function showAttachPopup() {
+  if (!attachPopup || !attachPickerBtn) return;
+  if (!attachPopup.hidden) {
+    hideAttachPopup();
+    return;
+  }
+  hideAgentPopup();
+  hideCommandPopup();
+  hideModelPopup();
+  hideSessionControlsPopup();
+  hidePermissionPopup();
+  hideEmojiPicker();
+  attachPopup.hidden = false;
+  attachPickerBtn.classList.add('open');
+  attachPickerBtn.setAttribute('aria-expanded', 'true');
+}
+
+function hidePermissionPopup() {
+  if (!permPopup) return;
+  permPopup.hidden = true;
+  permPopup.innerHTML = '';
+  permissionPopupError = '';
+  if (permPickerBtn) {
+    permPickerBtn.classList.remove('open');
+    permPickerBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+async function refreshSessionPermission() {
+  if (!window.qizi?.getSessionPermission || permissionBusy) return;
+  try {
+    const result = await window.qizi.getSessionPermission();
+    if (!result?.ok) return;
+    sessionPermissionState = {
+      mode: result.mode ?? null,
+      defaultMode: result.defaultMode ?? null,
+      pending: result.pending === true,
+    };
+    applyPermissionButton(sessionPermissionState);
+    if (permPopup && !permPopup.hidden) renderPermissionPopup(sessionPermissionState);
+  } catch {
+    // ignore
+  }
+}
+
+function scheduleSessionPermissionRefresh() {
+  clearTimeout(permissionRefreshTimer);
+  permissionRefreshTimer = setTimeout(() => {
+    void refreshSessionPermission();
+  }, 600);
+}
+
+async function showPermissionPopup() {
+  if (!permPopup || !permPickerBtn) return;
+  if (!permPopup.hidden) {
+    hidePermissionPopup();
+    return;
+  }
+  hideAgentPopup();
+  hideCommandPopup();
+  hideModelPopup();
+  hideSessionControlsPopup();
+  hideAttachPopup();
+  permissionPopupError = '';
+  permPopup.hidden = false;
+  permPickerBtn.classList.add('open');
+  permPickerBtn.setAttribute('aria-expanded', 'true');
+  renderPermissionPopup(sessionPermissionState);
+
+  if (!connected) {
+    await checkConnection();
+    if (!connected) {
+      permissionPopupError = '未连接 Gateway';
+      renderPermissionPopup(sessionPermissionState, permissionPopupError);
+      return;
+    }
+  }
+  await refreshSessionPermission();
+}
+
+async function selectSessionPermission(mode) {
+  if (!window.qizi?.setSessionPermission || permissionBusy || sessionPermissionState.pending) return;
+  if ((sessionPermissionState.mode ?? null) === (mode ?? null) && !sessionPermissionState.pending) {
+    return;
+  }
+  const previous = { ...sessionPermissionState };
+  permissionBusy = true;
+  permissionPopupError = '';
+  sessionPermissionState = { ...sessionPermissionState, mode: mode ?? null, pending: true };
+  applyPermissionButton(sessionPermissionState);
+  if (permPopup && !permPopup.hidden) renderPermissionPopup(sessionPermissionState);
+  try {
+    const result = await window.qizi.setSessionPermission(mode);
+    if (!result?.ok) throw new Error(result?.error || '更新失败');
+    sessionPermissionState = {
+      mode: result.mode ?? null,
+      defaultMode: result.defaultMode ?? previous.defaultMode ?? null,
+      pending: result.pending === true,
+    };
+    applyPermissionButton(sessionPermissionState);
+    if (permPopup && !permPopup.hidden) renderPermissionPopup(sessionPermissionState);
+  } catch (err) {
+    sessionPermissionState = previous;
+    applyPermissionButton(sessionPermissionState);
+    permissionPopupError = err.message || '更新失败';
+    if (permPopup && !permPopup.hidden) renderPermissionPopup(sessionPermissionState, permissionPopupError);
+    try {
+      permissionBusy = false;
+      await refreshSessionPermission();
+    } catch {
+      // ignore
+    }
+    setStatus(err.message || '更新失败', 'error');
+  } finally {
+    permissionBusy = false;
+    applyPermissionButton(sessionPermissionState);
+    if (permPopup && !permPopup.hidden) renderPermissionPopup(sessionPermissionState, permissionPopupError);
+  }
 }
 
 function resolveThinkingSliderIndex(thinking) {
@@ -4537,6 +4832,8 @@ async function showSessionControlsPopup() {
   hideAgentPopup();
   hideCommandPopup();
   hideModelPopup();
+  hidePermissionPopup();
+  hideAttachPopup();
   sessionControlsPopup.hidden = false;
   sessionControlsBtn.classList.add('open');
   sessionControlsPopup.innerHTML = '<div class="sc-popup-message">Loading…</div>';
@@ -4636,6 +4933,8 @@ async function showModelPopup() {
   hideAgentPopup();
   hideCommandPopup();
   hideSessionControlsPopup();
+  hidePermissionPopup();
+  hideAttachPopup();
   modelPopup.hidden = false;
   modelPickerBtn.classList.add('open');
   const cachedModels = modelCatalogCache && modelCatalogExpiresAt > Date.now() ? modelCatalogCache : null;
@@ -4895,6 +5194,8 @@ function selectActiveCommandPopupItem() {
 }
 
 function showCommandPopup(filter) {
+  hidePermissionPopup();
+  hideAttachPopup();
   if (!cmdPopup) return;
   const q = (filter || '').toLowerCase();
   const items = SLASH_COMMANDS.filter((c) => !q || c.cmd.toLowerCase().includes(q));
@@ -5249,6 +5550,7 @@ if (window.qizi.onChatSegment) {
 if (window.qizi.onSessionChanged) {
   window.qizi.onSessionChanged(() => {
     debugEvent('session', 'session_changed_event', { sessionKey: currentSessionKey });
+    scheduleSessionPermissionRefresh();
     dismissBtwSideCard();
     if (!isLocalOwnedActiveRun()) {
       syncHistoryFromGateway({ preserveExternalStream: true });
@@ -5779,6 +6081,8 @@ function positionEmojiPicker() {
 function showEmojiPicker() {
   if (!emojiPickerEl) return;
   hideModelPopup();
+  hidePermissionPopup();
+  hideAttachPopup();
   emojiPickerEl.hidden = false;
   positionEmojiPicker();
   requestAnimationFrame(positionEmojiPicker);
@@ -5984,12 +6288,38 @@ if (sessionControlsBtn) {
   });
 }
 
+if (permPickerBtn) {
+  permPickerBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    void showPermissionPopup();
+  });
+}
+
+if (attachPickerBtn) {
+  attachPickerBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showAttachPopup();
+  });
+}
+
+if (attachPopup) {
+  attachPopup.addEventListener('click', (e) => {
+    if (e.target.closest('.attach-item')) hideAttachPopup();
+  });
+}
+
 document.addEventListener('click', (e) => {
   if (modelPopup && !modelPopup.hidden) {
     if (!e.target.closest('.model-picker-wrap')) hideModelPopup();
   }
   if (sessionControlsPopup && !sessionControlsPopup.hidden) {
     if (!e.target.closest('.session-controls-wrap')) hideSessionControlsPopup();
+  }
+  if (permPopup && !permPopup.hidden) {
+    if (!e.target.closest('.perm-picker-wrap')) hidePermissionPopup();
+  }
+  if (attachPopup && !attachPopup.hidden) {
+    if (!e.target.closest('.attach-picker-wrap')) hideAttachPopup();
   }
   if (emojiPickerEl && !emojiPickerEl.hidden) {
     if (!e.target.closest('.emoji-picker-wrap') && !e.target.closest('.emoji-picker')) {
@@ -6005,6 +6335,15 @@ document.addEventListener('click', (e) => {
 });
 
 document.addEventListener('keydown', (e) => {
+  if (permPopup && !permPopup.hidden && /^[1-5]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    const typing = e.target === inputEl || e.target?.closest?.('textarea, input, [contenteditable="true"]');
+    if (!typing) {
+      e.preventDefault();
+      const choice = PERMISSION_CHOICES[Number(e.key) - 1];
+      if (choice) void selectSessionPermission(choice.mode);
+      return;
+    }
+  }
   if (e.key === 'Escape') {
     if (multiSelectMode) {
       exitMultiSelectMode();
@@ -6020,6 +6359,8 @@ document.addEventListener('keydown', (e) => {
     }
     if (modelPopup && !modelPopup.hidden) hideModelPopup();
     if (sessionControlsPopup && !sessionControlsPopup.hidden) hideSessionControlsPopup();
+    if (permPopup && !permPopup.hidden) hidePermissionPopup();
+    if (attachPopup && !attachPopup.hidden) hideAttachPopup();
     if (emojiPickerEl && !emojiPickerEl.hidden) hideEmojiPicker();
     if (agentPopup && !agentPopup.hidden) hideAgentPopup();
     if (appMenuPopup && !appMenuPopup.hidden) hideAppMenu();

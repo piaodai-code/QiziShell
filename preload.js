@@ -89,6 +89,8 @@ contextBridge.exposeInMainWorld('qizi', {
   setModel: (qualifiedModel) => ipcRenderer.invoke('openclaw:models:set', qualifiedModel),
   getSessionControls: () => ipcRenderer.invoke('openclaw:session:controls'),
   patchSessionControls: (payload) => ipcRenderer.invoke('openclaw:session:controls:patch', payload),
+  getSessionPermission: () => ipcRenderer.invoke('openclaw:session:permission'),
+  setSessionPermission: (mode) => ipcRenderer.invoke('openclaw:session:permission:set', { mode }),
   normalizeImage: (dataUrl) => ipcRenderer.invoke('openclaw:normalize-image', dataUrl),
   pickImages: () => ipcRenderer.invoke('openclaw:pickImages'),
   pickFiles: () => ipcRenderer.invoke('openclaw:pickFiles'),

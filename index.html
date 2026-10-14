@@ -64,27 +64,44 @@
       <div class="composer-body" id="composer-body">
       <div class="composer-tools">
         <div class="composer-tools-left">
+          <div class="attach-picker-wrap">
+            <button type="button" class="icon-btn icon-btn-img" id="attach-picker-btn" title="添加" aria-label="添加" aria-haspopup="menu" aria-expanded="false">
+              <img src="assets/icons/composer-plus.png" alt="" aria-hidden="true">
+            </button>
+            <div class="attach-popup" id="attach-popup" hidden role="menu" aria-label="添加">
+              <button type="button" class="attach-item" id="screenshot-btn" title="截屏 (Cmd+Shift+4 也行)">
+                <img src="assets/icons/camera.png" alt="" aria-hidden="true">
+                <span>截屏</span>
+              </button>
+              <button type="button" class="attach-item" id="pick-image-btn" title="从文件夹选择图片">
+                <img src="assets/icons/picture.png" alt="" aria-hidden="true">
+                <span>图片</span>
+              </button>
+              <button type="button" class="attach-item" id="pick-file-btn" title="从文件夹选择文件">
+                <img src="assets/icons/folder.png" alt="" aria-hidden="true">
+                <span>文件</span>
+              </button>
+              <button type="button" class="attach-item icon-btn-mic" id="mic-btn" title="语音输入（请先在设置中安装语音识别）" disabled aria-disabled="true">
+                <img src="assets/icons/mic.png" alt="" aria-hidden="true">
+                <span>语音输入</span>
+              </button>
+            </div>
+          </div>
           <div class="emoji-picker-wrap">
             <button type="button" class="icon-btn icon-btn-img" id="emoji-btn" title="表情" aria-expanded="false" aria-haspopup="true">
               <img src="assets/icons/face.png" alt="" aria-hidden="true">
             </button>
           </div>
-          <button type="button" class="icon-btn icon-btn-img" id="screenshot-btn" title="截屏 (Cmd+Shift+4 也行)">
-            <img src="assets/icons/camera.png" alt="" aria-hidden="true">
-          </button>
-          <button type="button" class="icon-btn icon-btn-img" id="pick-image-btn" title="从文件夹选择图片">
-            <img src="assets/icons/picture.png" alt="" aria-hidden="true">
-          </button>
-          <button type="button" class="icon-btn icon-btn-img" id="pick-file-btn" title="从文件夹选择文件">
-            <img src="assets/icons/folder.png" alt="" aria-hidden="true">
-          </button>
-          <button type="button" class="icon-btn icon-btn-img icon-btn-mic" id="mic-btn" title="语音输入（请先在设置中安装语音识别）" disabled aria-disabled="true">
-            <img src="assets/icons/mic.png" alt="" aria-hidden="true">
-          </button>
-          <span class="composer-tools-separator" aria-hidden="true">|</span>
-          <button type="button" class="icon-btn icon-btn-img icon-btn-history" id="composer-history-btn" title="历史消息（近两个月）" aria-label="历史消息">
+          <button type="button" class="icon-btn icon-btn-img icon-btn-history" id="composer-history-btn" title="历史消息（近两个月）" aria-label="搜索历史消息">
             <img src="assets/icons/history-inline.png" alt="" aria-hidden="true">
           </button>
+          <span class="composer-tools-separator" aria-hidden="true">|</span>
+          <div class="perm-picker-wrap">
+            <button type="button" class="icon-btn icon-btn-img perm-picker-btn" id="perm-picker-btn" title="执行权限" aria-label="执行权限" aria-haspopup="menu" aria-expanded="false">
+              <img id="perm-picker-glyph" src="assets/icons/perm-default.png" alt="" aria-hidden="true">
+            </button>
+            <div class="perm-popup" id="perm-popup" hidden role="menu" aria-label="执行权限"></div>
+          </div>
         </div>
         <div class="context-meter" id="context-meter" title="Context 占用">
           <div class="context-meter-bar" aria-hidden="true">
