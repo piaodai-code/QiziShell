@@ -172,10 +172,10 @@
     if (key === LIVE_RECORD_KEY && running) {
       viewingLive = true;
       applyMeetingChrome();
-      render();
+      render({ scrollToBottom: true });
       return;
     }
-    void loadArchiveRecord(key);
+    void loadArchiveRecord(key, { scrollToBottom: true });
   }
 
   function setSelectedHistoryKey(key) {
@@ -314,10 +314,10 @@
 
   function render(options = {}) {
     if (!hubVisible || !messagesEl) return;
-    const preserveScroll = options.preserveScroll === true;
-    const prevScrollTop = preserveScroll ? messagesEl.scrollTop : 0;
+    const prevScrollTop = messagesEl.scrollTop;
     if (meetingMessages.length === 0) {
       messagesEl.innerHTML = `<div class="msg-hint">${escapeHtml(emptyHintText())}</div>`;
+      settleMeetingScroll(options, prevScrollTop);
       return;
     }
     messagesEl.innerHTML = '';
@@ -338,7 +338,19 @@
       row.querySelector('.msg-bubble').innerHTML = renderBubbleHtml(m.text, m.streaming);
       messagesEl.appendChild(row);
     }
-    if (preserveScroll) {
+    settleMeetingScroll(options, prevScrollTop);
+  }
+
+  function settleMeetingScroll(options, prevScrollTop) {
+    if (window.QiziShellScroll?.settle) {
+      window.QiziShellScroll.settle(messagesEl, {
+        prevScrollTop,
+        preserveScroll: options.preserveScroll === true,
+        scrollToBottom: options.scrollToBottom === true,
+      });
+      return;
+    }
+    if (options.preserveScroll) {
       messagesEl.scrollTop = prevScrollTop;
     } else {
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -403,10 +415,10 @@
     };
   }
 
-  function applyTranscript(messages) {
+  function applyTranscript(messages, options = {}) {
     if (!Array.isArray(messages)) return;
     meetingMessages = messages.map((m) => ({ ...m }));
-    if (hubVisible) render();
+    if (hubVisible) render(options);
   }
 
   function getMessages() {
@@ -484,14 +496,15 @@
     }
   }
 
-  async function loadArchiveRecord(key) {
+  async function loadArchiveRecord(key, options = {}) {
+    const renderOpts = options.scrollToBottom ? { scrollToBottom: true } : {};
     if (!key || key === LIVE_RECORD_KEY) {
       if (running) {
         viewingLive = true;
-        applyTranscript(meetingMessages);
+        applyTranscript(meetingMessages, renderOpts);
         setStatus(meetingStatus || '会议进行中…');
         updateComposerChrome();
-        render();
+        render(renderOpts);
       }
       return;
     }
@@ -499,7 +512,7 @@
     loadingArchive = true;
     viewingLive = false;
     updateComposerChrome();
-    render();
+    render(renderOpts);
     try {
       const payload = key.includes('/') || key.includes('\\')
         ? { file: key }
@@ -508,41 +521,42 @@
       if (!result?.ok || !result.record) {
         setStatus(result?.error || '加载失败');
         meetingMessages = [];
-        render();
+        render(renderOpts);
         return;
       }
       buildCatalogFromRecord(result.record);
       meetingConfig = configFromRecord(result.record);
-      applyTranscript(result.record.transcript || []);
+      applyTranscript(result.record.transcript || [], renderOpts);
       setStatus('只读');
     } catch (err) {
       setStatus(err.message || '加载失败');
       meetingMessages = [];
-      render();
+      render(renderOpts);
     } finally {
       loadingArchive = false;
-      render();
+      render(renderOpts);
     }
   }
 
-  async function refreshHistorySelectAndLoadDefault() {
+  async function refreshHistorySelectAndLoadDefault(options = {}) {
     await refreshRecordList();
     populateHistorySelect();
+    const renderOpts = options.scrollToBottom ? { scrollToBottom: true } : {};
     if (running) {
       viewingLive = true;
       selectedRecordKey = LIVE_RECORD_KEY;
       setSelectedHistoryKey(LIVE_RECORD_KEY);
       applyMeetingChrome();
-      render();
+      render(renderOpts);
       return;
     }
     const key = selectedRecordKey || historyOptions.find((o) => o.value)?.value;
     if (key) {
-      await loadArchiveRecord(key);
+      await loadArchiveRecord(key, options);
     } else {
       meetingMessages = [];
       setStatus('');
-      render();
+      render(renderOpts);
     }
   }
 
@@ -586,7 +600,7 @@
     }
     showMeetingScreen();
     applyMeetingChrome();
-    await refreshHistorySelectAndLoadDefault();
+    await refreshHistorySelectAndLoadDefault({ scrollToBottom: true });
     window.dispatchEvent(new CustomEvent('qizi-meeting-hub-opened', {
       detail: meetingConfig || {},
     }));
@@ -657,7 +671,7 @@
       showMeetingScreen();
     }
     applyMeetingChrome();
-    render();
+    render({ scrollToBottom: true });
     window.dispatchEvent(new CustomEvent('qizi-meeting-view-shown', { detail: meetingConfig }));
   }
 
@@ -679,7 +693,7 @@
     showMeetingScreen();
     applyMeetingChrome();
     setStatus('正在发送任务书…');
-    render();
+    render({ scrollToBottom: true });
 
     void refreshRecordList().then(() => populateHistorySelect());
 
@@ -718,7 +732,7 @@
     }
     hubVisible = true;
     applyMeetingChrome();
-    await refreshHistorySelectAndLoadDefault();
+    await refreshHistorySelectAndLoadDefault({ scrollToBottom: true });
   }
 
   async function openNewMeetingSetup() {

@@ -351,6 +351,35 @@ body.meeting-mode .titlebar-identity {
   flex: 1; overflow-y: auto; padding: 32px 0 20px;
   display: flex; flex-direction: column; gap: 22px;
 }
+.scroll-bottom-btn {
+  position: fixed;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  z-index: 30;
+  opacity: 0.5;
+}
+.scroll-bottom-btn[hidden] { display: none !important; }
+.scroll-bottom-btn img {
+  width: 28px;
+  height: 28px;
+  display: block;
+  pointer-events: none;
+}
+.scroll-bottom-btn:hover {
+  opacity: 0.88;
+  transform: translateX(-50%) scale(1.06);
+}
+.scroll-bottom-btn:active {
+  opacity: 0.88;
+  transform: translateX(-50%) scale(0.96);
+}
 .chat-screen,
 .meeting-screen {
   flex: 1;

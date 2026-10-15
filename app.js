@@ -757,6 +757,157 @@ function getMeetingMessagesEl() {
   return document.getElementById('meeting-messages');
 }
 
+// 离开底部后停住；滚回底部或点「回到最新」才继续跟随输出。
+const SCROLL_BOTTOM_SLOP = 2;
+const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
+const scrollPinned = new WeakMap();
+let suppressScrollPinUpdate = 0;
+
+function activeMessageList() {
+  if (window.MeetingView?.isVisible?.()) return getMeetingMessagesEl();
+  return messagesEl;
+}
+
+function isMessageListPinned(el) {
+  if (!el) return true;
+  return scrollPinned.get(el) !== false;
+}
+
+function isMessageListNearBottom(el) {
+  if (!el) return true;
+  return el.scrollHeight - el.clientHeight - el.scrollTop <= SCROLL_BOTTOM_SLOP;
+}
+
+function positionScrollBottomButton() {
+  if (!scrollBottomBtn) return;
+  const meeting = window.MeetingView?.isVisible?.() === true;
+  const footer = meeting ? document.getElementById('meeting-toolbar') : composerEl;
+  const height = footer && !footer.hidden ? footer.offsetHeight : 0;
+  scrollBottomBtn.style.bottom = `${height + 12}px`;
+}
+
+function syncScrollBottomButton() {
+  positionScrollBottomButton();
+  if (!scrollBottomBtn) return;
+  const el = activeMessageList();
+  const show = Boolean(el) && !isMessageListPinned(el);
+  scrollBottomBtn.hidden = !show;
+}
+
+function pinMessageList(el) {
+  if (!el) return;
+  scrollPinned.set(el, true);
+  const apply = () => {
+    if (!el.isConnected || scrollPinned.get(el) === false) return;
+    suppressScrollPinUpdate += 1;
+    el.scrollTop = el.scrollHeight;
+    el.dataset.pinScrollTop = String(el.scrollTop);
+    suppressScrollPinUpdate -= 1;
+  };
+  apply();
+  requestAnimationFrame(() => {
+    apply();
+    syncScrollBottomButton();
+  });
+  syncScrollBottomButton();
+}
+
+function markMessageListPinned(el) {
+  if (!el) return;
+  scrollPinned.set(el, true);
+}
+
+function settleMessageListScroll(el, { prevScrollTop = 0, preserveScroll = false, scrollToBottom = false } = {}) {
+  if (!el) return;
+  if (scrollToBottom) {
+    pinMessageList(el);
+    return;
+  }
+  if (preserveScroll || !isMessageListPinned(el)) {
+    suppressScrollPinUpdate += 1;
+    el.scrollTop = prevScrollTop;
+    el.dataset.pinScrollTop = String(el.scrollTop);
+    suppressScrollPinUpdate -= 1;
+    syncScrollBottomButton();
+    return;
+  }
+  pinMessageList(el);
+}
+
+function onMessageListScroll(el) {
+  if (!el || suppressScrollPinUpdate > 0) return;
+  const previous = Number(el.dataset.pinScrollTop);
+  const next = el.scrollTop;
+  const movedDown = Number.isFinite(previous) && next > previous + 0.5;
+  if (!isMessageListNearBottom(el)) {
+    scrollPinned.set(el, false);
+  } else if (isMessageListPinned(el) || movedDown) {
+    scrollPinned.set(el, true);
+  }
+  el.dataset.pinScrollTop = String(next);
+  syncScrollBottomButton();
+}
+
+function bindMessageListScrollPin(el) {
+  if (!el || el.dataset.scrollPinBound === '1') return;
+  el.dataset.scrollPinBound = '1';
+  el.addEventListener('wheel', (event) => {
+    if (event.deltaY >= -1) return;
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
+    if (el.scrollHeight <= el.clientHeight + 1) return;
+    const before = el.scrollTop;
+    scrollPinned.set(el, false);
+    syncScrollBottomButton();
+    requestAnimationFrame(() => {
+      if (scrollPinned.get(el) !== false) return;
+      if (el.scrollTop >= before - 0.5 && isMessageListNearBottom(el)) {
+        scrollPinned.set(el, true);
+        syncScrollBottomButton();
+      }
+    });
+  }, { passive: true });
+  el.addEventListener('scroll', () => onMessageListScroll(el), { passive: true });
+  el.addEventListener('load', (event) => {
+    if (event.target?.tagName !== 'IMG') return;
+    if (isMessageListPinned(el)) pinMessageList(el);
+  }, true);
+}
+
+bindMessageListScrollPin(messagesEl);
+bindMessageListScrollPin(getMeetingMessagesEl());
+
+if (scrollBottomBtn) {
+  scrollBottomBtn.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+  });
+  scrollBottomBtn.addEventListener('click', () => {
+    pinMessageList(activeMessageList());
+  });
+}
+
+window.addEventListener('resize', () => {
+  const el = activeMessageList();
+  if (el && isMessageListPinned(el) && !isMessageListNearBottom(el)) pinMessageList(el);
+  else syncScrollBottomButton();
+});
+
+if (typeof ResizeObserver !== 'undefined') {
+  const footerResizeObserver = new ResizeObserver(() => {
+    const el = activeMessageList();
+    if (el && isMessageListPinned(el) && !isMessageListNearBottom(el)) pinMessageList(el);
+    else syncScrollBottomButton();
+  });
+  if (composerEl) footerResizeObserver.observe(composerEl);
+  const meetingToolbarForScroll = document.getElementById('meeting-toolbar');
+  if (meetingToolbarForScroll) footerResizeObserver.observe(meetingToolbarForScroll);
+}
+
+window.QiziShellScroll = {
+  settle: settleMessageListScroll,
+  pin: pinMessageList,
+  syncButton: syncScrollBottomButton,
+};
+
 function renderActiveMessageView(options = {}) {
   if (contextMenuSource === 'meeting' || (multiSelectMode && window.MeetingView?.isVisible?.())) {
     window.MeetingView?.render?.(options);
@@ -768,11 +919,15 @@ function renderActiveMessageView(options = {}) {
 function render(options = {}) {
   if (window.MeetingView?.isVisible?.()) return;
   if (!messagesEl) return;
-  const preserveScroll = options.preserveScroll === true;
-  const prevScrollTop = preserveScroll ? messagesEl.scrollTop : 0;
+  const prevScrollTop = messagesEl.scrollTop;
   normalizeStreamingFlags();
   if (messages.length === 0) {
     messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
+    settleMessageListScroll(messagesEl, {
+      prevScrollTop,
+      preserveScroll: options.preserveScroll === true,
+      scrollToBottom: options.scrollToBottom === true || options.preserveScroll !== true,
+    });
     return;
   }
   messagesEl.innerHTML = '';
@@ -808,11 +963,11 @@ function render(options = {}) {
       console.error('render error:', e);
     }
   }
-  if (preserveScroll) {
-    messagesEl.scrollTop = prevScrollTop;
-  } else {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  }
+  settleMessageListScroll(messagesEl, {
+    prevScrollTop,
+    preserveScroll: options.preserveScroll === true,
+    scrollToBottom: options.scrollToBottom === true,
+  });
 }
 
 function getMessageAuthorLabel(msg) {
@@ -3046,6 +3201,7 @@ function applyLoadedSessionKey(result) {
   currentSessionKey = result.sessionKey;
   currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
   loadMessages();
+  markMessageListPinned(messagesEl);
   return true;
 }
 
@@ -3405,7 +3561,8 @@ function updateStreamingBubble(runId) {
     const suffix = m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '');
     meta.textContent = `${m.time || ''}${suffix}`;
   }
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (isMessageListPinned(messagesEl)) pinMessageList(messagesEl);
+  else syncScrollBottomButton();
 }
 
 function isLocalOwnedActiveRun() {
@@ -4231,7 +4388,7 @@ async function switchToAgent(agentId) {
       currentSessionKey = prevSessionKey;
       currentAgentId = parseAgentIdFromSessionKey(prevSessionKey);
       loadMessages();
-      render();
+      render({ scrollToBottom: true });
       setStatus(result?.error || '切换失败', 'error');
       return;
     }
@@ -4259,7 +4416,7 @@ async function switchToAgent(agentId) {
     loadMessages();
     messages = finalizeHistoryMessages(messages);
     syncCurrentRunIdFromMessages();
-    render();
+    render({ scrollToBottom: true });
 
     if (ENABLE_GATEWAY_HISTORY_SYNC) {
       lastSyncedHistorySignature = '';
@@ -4287,7 +4444,7 @@ async function switchToAgent(agentId) {
       error: err.message || '切换失败',
     });
     loadMessages();
-    render();
+    render({ scrollToBottom: true });
     setStatus(err.message || '切换失败', 'error');
   }
 }
@@ -5398,7 +5555,7 @@ async function send() {
   if (busy) {
     pendingOutbound = { user: userMsg, assistant: assistantMsg, runId: myRunId };
     showQueueSideCard(userMsg);
-    render();
+    render({ scrollToBottom: true });
     return;
   }
 
@@ -5407,7 +5564,7 @@ async function send() {
   messages.push(assistantMsg);
   setBusy(true);
   activeRunId = myRunId;
-  render();
+  render({ scrollToBottom: true });
   runStream(assistantMsg);
 }
 
@@ -5467,7 +5624,7 @@ function processQueue() {
   assistant.text = '…';
   setBusy(true);
   activeRunId = runId;
-  render();
+  render({ scrollToBottom: true });
   runStream(assistant);
 }
 
