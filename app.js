@@ -988,6 +988,13 @@ function extractQuoteTextFromMessage(msg) {
   if (contextMenuSource === 'meeting') {
     return String(msg.text || '').trim();
   }
+  const forwardRef = resolveMessageForwardRef(msg);
+  if (forwardRef?.text) {
+    const body = String(forwardRef.text).trim();
+    const comment = String(getUserMessageDisplayText(msg) || '').trim();
+    if (comment && comment !== body) return `${body}\n\n${comment}`;
+    return body;
+  }
   const { plainText } = renderMessageContent(msg.text || '');
   let body = plainText.trim();
   if (!body && Array.isArray(msg.images) && msg.images.length > 0) {
@@ -1184,15 +1191,24 @@ function normalizeUserMessageRecord(msg, localFallback = null) {
   if (base.who !== 'me') return base;
 
   if (localFallback?.forward) {
-    return {
-      ...base,
-      forward: localFallback.forward,
-      text: localFallback.text ?? extractCommentTextFromForwardOutbound(base.text),
-      images: localFallback.images ?? base.images,
-      files: localFallback.files ?? base.files,
-      time: localFallback.time || base.time,
-      runId: localFallback.runId ?? base.runId,
-    };
+    const serverBody = String(
+      base.forward?.text
+      || parseStoredForwardMessage(base.text)?.forward?.text
+      || '',
+    ).trim();
+    const localBody = String(localFallback.forward.text || '').trim();
+    // 同一套会议预设的留言每天相同，不能用旧本地转发盖住今天的结论
+    if (!serverBody || serverBody === localBody) {
+      return {
+        ...base,
+        forward: localFallback.forward,
+        text: localFallback.text ?? extractCommentTextFromForwardOutbound(base.text),
+        images: localFallback.images ?? base.images,
+        files: localFallback.files ?? base.files,
+        time: localFallback.time || base.time,
+        runId: localFallback.runId ?? base.runId,
+      };
+    }
   }
 
   if (localFallback?.quote) {
@@ -1271,9 +1287,17 @@ function userMessageTextsMatch(aText, bText) {
 }
 
 /** 同一条 user 消息（双写/归档重复），不是「用户又发了一次相同内容」 */
+function messageIsForward(msg) {
+  if (!msg || msg.who !== 'me') return false;
+  if (msg.forward?.text) return true;
+  return isForwardLikeUserText(msg.text);
+}
+
 function userMessagesSameEvent(a, b) {
   if (!a || !b || a.who !== 'me' || b.who !== 'me') return false;
-  if (historyForwardFingerprintsMatch(a, b)) return true;
+  if (messageIsForward(a) || messageIsForward(b)) {
+    return historyForwardFingerprintsMatch(a, b);
+  }
   if (!userMessageTextsMatch(a.text, b.text)) return false;
   const aMs = a.sentAtMs;
   const bMs = b.sentAtMs;
@@ -1290,21 +1314,23 @@ function userMessagesEquivalent(a, b) {
 
 function findLocalUserMessageForServer(server, localList) {
   const serverText = String(server?.text || '').trim();
-  if (!serverText) return null;
+  const serverIsForward = messageIsForward(server);
+  if (!serverText && !serverIsForward) return null;
   const serverParsed = parseStoredQuoteMessage(serverText);
   const serverReply = serverParsed?.reply ?? serverText;
 
   for (const candidate of localList) {
     if (candidate.who !== 'me') continue;
+    if (serverIsForward || messageIsForward(candidate)) {
+      if (historyForwardFingerprintsMatch(candidate, server)) return candidate;
+      continue;
+    }
     if (candidate.quote) {
       const outbound = formatQuoteForAgent(candidate.quote, candidate.text || '').trim();
       if (serverText === outbound || serverReply === String(candidate.text || '').trim()) {
         return candidate;
       }
       continue;
-    }
-    if (candidate.forward || isForwardLikeUserText(candidate.text)) {
-      if (historyForwardFingerprintsMatch(candidate, server)) return candidate;
     }
     const localText = String(candidate.text || '').trim();
     const serverPlain = normalizeUserMessagePlainText(serverText);
@@ -1438,11 +1464,14 @@ function getForwardSourceText(msg) {
   if (!msg) return '';
   if (msg.who === 'me') {
     const parts = [];
-    if (msg.quote?.text) {
+    const forwardRef = resolveMessageForwardRef(msg);
+    if (forwardRef?.text) {
+      parts.push(String(forwardRef.text).trim());
+    } else if (msg.quote?.text) {
       parts.push(`[引用 ${msg.quote.authorLabel || '未知'}]\n${msg.quote.text}`);
     }
     const reply = getUserMessageDisplayText(msg);
-    if (reply) parts.push(reply);
+    if (reply && reply !== String(forwardRef?.text || '').trim()) parts.push(reply);
     const combined = parts.join('\n\n').trim();
     if (combined) return combined;
   }
@@ -2862,9 +2891,9 @@ function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages)
     const serverText = String(server?.text || '').trim();
     let local = findLocalUserMessageForServer(server, localList);
 
-    if (!local && server.who === 'me') {
+    if (!local && server.who === 'me' && !messageIsForward(server)) {
       for (const candidate of localList) {
-        if (candidate.who !== 'me') continue;
+        if (candidate.who !== 'me' || messageIsForward(candidate)) continue;
         const localText = (candidate.text || '').trim();
         if (localText && serverText && localText === serverText) {
           local = candidate;

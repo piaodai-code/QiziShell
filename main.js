@@ -2646,7 +2646,11 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
 async function runMeetingBriefingFlow(config) {
   meetingBriefingRunning = true;
   meetingBriefingCancelled = false;
-  activeMeetingForwardConfig = { ...(config || {}) };
+  config = {
+    ...(config || {}),
+    startedAt: config?.startedAt || new Date().toISOString(),
+  };
+  activeMeetingForwardConfig = { ...config };
   activeMeetingTranscript = [];
   try {
     await startMeetingGroupRelay(config, {

@@ -83,13 +83,25 @@ function findModeratorFinalMessage(messages, moderatorAgentId) {
   return modMsgs[modMsgs.length - 1].msg;
 }
 
-function buildMeetingExecForwardNote(goal) {
-  const trimmedGoal = String(goal || '').trim();
+function formatMeetingNoteStamp(input) {
+  const date = input ? new Date(input) : new Date();
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function buildMeetingExecForwardNote(config) {
+  const source = config && typeof config === 'object' ? config : { goal: config };
   const parts = [];
+  const topic = String(source.topic || '').trim();
+  if (topic) parts.push(`议题：${topic}`);
+  const stamp = formatMeetingNoteStamp(source.startedAt);
+  if (stamp) parts.push(`会议时间：${stamp}`);
+  const trimmedGoal = String(source.goal || '').trim();
   if (trimmedGoal) {
     parts.push(`期望结论方向：${trimmedGoal}`);
   }
-  parts.push('请根据以上会议最终总结与留言要求执行工作。');
+  parts.push('请根据以上这场会议的最终总结执行工作。');
   return parts.join('\n');
 }
 
@@ -100,12 +112,13 @@ function buildMeetingForwardPayload(config, finalMsg) {
     text: String(finalMsg.text || '').trim(),
     time: finalMsg.time || '',
   };
-  return formatForwardForAgent(forward, buildMeetingExecForwardNote(config.goal));
+  return formatForwardForAgent(forward, buildMeetingExecForwardNote(config));
 }
 
 module.exports = {
   findModeratorFinalMessage,
   buildMeetingForwardPayload,
+  buildMeetingExecForwardNote,
   isMeetingClosingStub,
   hasSubstantiveMeetingSummary,
 };
