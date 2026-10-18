@@ -8,6 +8,7 @@ const { buildExportWordHtml } = require('./export-html');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
 const { startMeetingGroupRelay } = require('./meeting-group');
 const { saveMeetingRecord, listMeetingRecords, loadMeetingRecordFile, loadMeetingRecordById } = require('./meeting-store');
+const { listPriorTopicSummaries, recordMeetingDecision, priorTopicExcerpt } = require('./meeting-topic-ledger');
 const { isMeetingA2ASessionKey, isModeratorPostCloseStub } = require('./meeting-protocol');
 const {
   findModeratorFinalMessage,
@@ -2649,7 +2650,18 @@ async function runMeetingBriefingFlow(config) {
   config = {
     ...(config || {}),
     startedAt: config?.startedAt || new Date().toISOString(),
+    noRepeatPastTopics: Boolean(config?.noRepeatPastTopics),
   };
+  if (config.noRepeatPastTopics) {
+    try {
+      config.priorTopicSummaries = listPriorTopicSummaries(config.topic);
+    } catch (err) {
+      config.priorTopicSummaries = [];
+      console.error('[qizi] prior topic ledger:', err?.message || err);
+    }
+  } else {
+    config.priorTopicSummaries = [];
+  }
   activeMeetingForwardConfig = { ...config };
   activeMeetingTranscript = [];
   try {
@@ -2701,7 +2713,15 @@ async function runMeetingBriefingFlow(config) {
         }
         broadcastMeetingEvent(event);
       },
-      saveRecord: saveMeetingRecord,
+      saveRecord: (record) => {
+        const filePath = saveMeetingRecord(record);
+        try {
+          recordMeetingDecision(record);
+        } catch (err) {
+          console.error('[qizi] record topic ledger:', err?.message || err);
+        }
+        return filePath;
+      },
       isCancelled: () => meetingBriefingCancelled,
     });
   } catch (err) {
@@ -4325,6 +4345,20 @@ ipcMain.handle('qizi-meeting:status', (event) => {
 ipcMain.handle('qizi-meeting:list-records', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return { ok: true, records: listMeetingRecords(10) };
+});
+
+ipcMain.handle('qizi-meeting:prior-topics', (event, topic) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  try {
+    const entries = listPriorTopicSummaries(topic).map((entry) => ({
+      meetingId: entry.meetingId,
+      finishedAt: entry.finishedAt,
+      excerpt: priorTopicExcerpt(entry.finalSummary),
+    }));
+    return { ok: true, count: entries.length, entries };
+  } catch (err) {
+    return { ok: false, error: err.message || String(err) };
+  }
 });
 
 ipcMain.handle('qizi-meeting:load-record', (event, payload) => {

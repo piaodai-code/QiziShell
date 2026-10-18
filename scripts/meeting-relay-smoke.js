@@ -7,7 +7,7 @@
  * 验证 findNextMention：最终总结阶段不应因派活里的 @ 再 relay 议事 Agent。
  */
 const { findNextMention } = require('../meeting-group');
-const { hasClosingModeratorMessage } = require('../meeting-protocol');
+const { hasClosingModeratorMessage, extractMeetingFinalSummaryText } = require('../meeting-protocol');
 
 const MOD = 'qi_zi';
 const roster = [
@@ -42,9 +42,9 @@ function assertEqual(actual, expected, detail) {
   }
 }
 
-function relay(messages, roundCount = 1) {
+function relay(messages, roundCount = 1, options) {
   const processed = new Set();
-  return findNextMention(messages, roster, processed, MOD, roundCount);
+  return findNextMention(messages, roster, processed, MOD, roundCount, options);
 }
 
 // 一轮制、两人各发言一次 → 进入最终总结阶段
@@ -201,6 +201,56 @@ runCase('轮末：全员同步发言后应提示作当轮总结（非全员尚�
   if (!prompt.includes('所有议事 Agent 已各发言一次')) {
     throw new Error('should prompt round summary when round segment is complete');
   }
+});
+
+runCase('往期主题：同一轮驳回重选应再 relay 该 agent', () => {
+  const messages = [
+    mod('@nai_pang 请发言'),
+    participant('nai_pang', '首选银轨小学'),
+    mod('@nai_pang 往期主题重复，请重选'),
+  ];
+  const pending = relay(messages, 2, { noRepeatPastTopics: true });
+  assertEqual(pending, 'nai_pang');
+  if (!pending?.repick) throw new Error('expected repick');
+});
+
+runCase('往期主题：未写往期主题重复时，同一轮第二次 @ 仍不 relay', () => {
+  const messages = [
+    mod('@nai_pang 请发言'),
+    participant('nai_pang', '首选银轨小学'),
+    mod('@nai_pang 请再补充'),
+  ];
+  assertEqual(relay(messages, 2, { noRepeatPastTopics: true }), null);
+});
+
+runCase('往期主题：已经叫回过一次后不再 relay', () => {
+  const messages = [
+    mod('@nai_pang 请发言'),
+    { ...participant('nai_pang', '首选银轨小学'), excludeFromRound: true },
+    participant('nai_pang', '改选莱文'),
+    mod('@nai_pang 往期主题重复，请重选'),
+  ];
+  assertEqual(relay(messages, 2, { noRepeatPastTopics: true }), null);
+});
+
+runCase('往期主题：开场规则与 @ 不在同一行，仍 relay 第一位', () => {
+  const pending = relay([
+    mod('往期主题重复则要求重选\n@nai_pang 请发言'),
+  ], 2, { noRepeatPastTopics: true });
+  assertEqual(pending, 'nai_pang');
+  if (pending?.repick) throw new Error('opening dispatch is not a repick');
+});
+
+runCase('最终总结原文取收尾，不取第一轮共识', () => {
+  const text = extractMeetingFinalSummaryText({
+    moderatorAgentId: MOD,
+    transcript: [
+      mod('**共识**\n首选银轨小学'),
+      mod('**最终总结**\n定为莱文\nmeeting adjourned'),
+    ],
+  });
+  if (!text.includes('莱文')) throw new Error(`missing final pick: ${text}`);
+  if (text.includes('银轨')) throw new Error(`picked round summary: ${text}`);
 });
 
 if (process.exitCode) {

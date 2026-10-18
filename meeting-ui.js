@@ -13,6 +13,8 @@
   const deletePresetBtn = document.getElementById('meeting-delete-preset-btn');
   const presetPickerBtn = document.getElementById('meeting-preset-picker-btn');
   const presetMenu = document.getElementById('meeting-preset-menu');
+  const noRepeatInput = document.getElementById('meeting-no-repeat');
+  const noRepeatStatusEl = document.getElementById('meeting-norepeat-status');
   const toastEl = document.getElementById('meeting-toast');
 
   if (!modal) return;
@@ -21,6 +23,7 @@
   let catalogAgents = [];
   let starting = false;
   let toastTimer = null;
+  let priorTimer = null;
 
   function agentLabel(agent) {
     return agent?.label || agent?.name || agent?.id || 'Agent';
@@ -127,7 +130,59 @@
       moderatorLabel: agentLabel(moderator),
       participantAgentIds,
       roundCount,
+      noRepeatPastTopics: Boolean(noRepeatInput?.checked),
     };
+  }
+
+  function formatPriorDate(iso) {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return '';
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${month}-${day}`;
+  }
+
+  function schedulePriorStatus() {
+    if (!noRepeatStatusEl) return;
+    if (!noRepeatInput?.checked) {
+      noRepeatStatusEl.hidden = true;
+      noRepeatStatusEl.textContent = '';
+      return;
+    }
+    noRepeatStatusEl.hidden = false;
+    noRepeatStatusEl.textContent = '正在读取近 7 日账本…';
+    if (priorTimer) clearTimeout(priorTimer);
+    priorTimer = setTimeout(() => { void refreshPriorStatus(); }, 250);
+  }
+
+  async function refreshPriorStatus() {
+    if (!noRepeatStatusEl || !noRepeatInput?.checked) return;
+    const topic = topicInput?.value?.trim() || '';
+    if (!topic) {
+      noRepeatStatusEl.textContent = '填写议题后显示近 7 日账本';
+      return;
+    }
+    if (!window.qizi?.listPriorTopics) {
+      noRepeatStatusEl.textContent = '近 7 日账本暂不可用';
+      return;
+    }
+    const result = await window.qizi.listPriorTopics(topic);
+    if (!noRepeatInput.checked) return;
+    if (!result?.ok) {
+      noRepeatStatusEl.textContent = '近 7 日账本读取失败';
+      return;
+    }
+    const count = Number(result.count) || 0;
+    if (!count) {
+      noRepeatStatusEl.textContent = '近 7 日 0 条';
+      return;
+    }
+    const lines = (result.entries || []).map((entry) => {
+      const date = formatPriorDate(entry.finishedAt);
+      const excerpt = entry.excerpt || '';
+      return date ? `${date} ${excerpt}` : excerpt;
+    }).filter(Boolean);
+    noRepeatStatusEl.textContent = [`近 7 日 ${count} 条`, ...lines].join('\n');
   }
 
   function applyPreset(preset) {
@@ -150,6 +205,8 @@
     }
     renderParticipantCheckboxes(catalogAgents, preset.participantAgentIds || []);
     applyRoundCount(preset.roundCount);
+    if (noRepeatInput) noRepeatInput.checked = Boolean(preset.noRepeatPastTopics);
+    schedulePriorStatus();
   }
 
   function clearForm() {
@@ -161,6 +218,8 @@
       moderatorSelect.selectedIndex = 0;
     }
     applyRoundCount(2);
+    if (noRepeatInput) noRepeatInput.checked = false;
+    schedulePriorStatus();
     syncParticipantsWithModerator();
   }
 
@@ -300,6 +359,7 @@
     renderPresetMenu();
     closePresetMenu();
     hideToast();
+    schedulePriorStatus();
     modal.hidden = false;
     topicInput?.focus();
   }
@@ -358,6 +418,7 @@
       moderatorLabel: agentLabel(moderator),
       participantAgentIds,
       roundCount,
+      noRepeatPastTopics: Boolean(noRepeatInput?.checked),
       agentCatalog,
     };
 
@@ -383,6 +444,10 @@
     closeModal();
   }
 
+  if (noRepeatInput) noRepeatInput.addEventListener('change', schedulePriorStatus);
+  if (topicInput) topicInput.addEventListener('input', () => {
+    if (noRepeatInput?.checked) schedulePriorStatus();
+  });
   if (startBtn) startBtn.addEventListener('click', () => { void startMeeting(); });
   if (cancelBtn) cancelBtn.addEventListener('click', () => { void cancelSetup(); });
   if (closeBtn) closeBtn.addEventListener('click', () => { void cancelSetup(); });

@@ -42,6 +42,7 @@
         ? raw.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
         : [],
       roundCount: roundCount === 1 || roundCount === 3 ? roundCount : 2,
+      noRepeatPastTopics: Boolean(raw?.noRepeatPastTopics),
       savedAtMs: Number(raw?.savedAtMs) || Date.now(),
     };
   }

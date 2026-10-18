@@ -5,6 +5,10 @@ const {
   buildModeratorBriefingMessage,
   parseMeetingMentions,
   pickRelayMention,
+  isRepickMention,
+  hasCountableParticipantSpeech,
+  hasUsedRepick,
+  excludeLatestParticipantSpeech,
   markModeratorMessageMentionsProcessed,
   buildParticipantGroupPrompt,
   buildModeratorContinuePrompt,
@@ -65,6 +69,10 @@ async function startMeetingGroupRelay(config, deps) {
   onEvent?.({ type: 'preparing', payload: {} });
 
   const roundCount = normalizeRoundCount(config.roundCount);
+  const priorTopicSummaries = (Array.isArray(config.priorTopicSummaries) ? config.priorTopicSummaries : [])
+    .filter((entry) => entry && String(entry.finalSummary || '').trim());
+  const noRepeatActive = Boolean(config.noRepeatPastTopics) && priorTopicSummaries.length > 0;
+  const relayOptions = { noRepeatPastTopics: noRepeatActive };
   const maxRelayTurns = computeMaxRelayTurns(config);
   const promptTranscriptOpts = {
     maxMessageChars: MEETING_TRANSCRIPT_MSG_CHARS,
@@ -95,6 +103,8 @@ async function startMeetingGroupRelay(config, deps) {
       label: config.moderatorLabel || config.moderatorAgentId,
     },
     participants: roster,
+    noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
+    priorTopicSummaries,
   });
 
   onEvent?.({
@@ -201,7 +211,14 @@ async function startMeetingGroupRelay(config, deps) {
       return 'break';
     }
 
-    if (findNextMention(messages, roster, processedMentionKeys, config.moderatorAgentId)) {
+    if (findNextMention(
+      messages,
+      roster,
+      processedMentionKeys,
+      config.moderatorAgentId,
+      roundCount,
+      relayOptions,
+    )) {
       return 'continue';
     }
 
@@ -314,6 +331,7 @@ async function startMeetingGroupRelay(config, deps) {
           speechKind: speechMode.kind,
           softChars: speechMode.softChars,
           hardChars: speechMode.hardChars,
+          noRepeatPastTopics: noRepeatActive,
           ...extraPromptArgs,
         }),
         {
@@ -398,11 +416,15 @@ async function startMeetingGroupRelay(config, deps) {
       processedMentionKeys,
       config.moderatorAgentId,
       roundCount,
+      relayOptions,
     );
 
     if (pending) {
       nudgedAfterParticipant = false;
       const msgText = messages[pending.messageIndex]?.text || '';
+      if (pending.repick) {
+        excludeLatestParticipantSpeech(messages, pending.agentId);
+      }
 
       onEvent?.({
         type: 'participant_turn_start',
@@ -421,6 +443,7 @@ async function startMeetingGroupRelay(config, deps) {
         instruction: pending.instruction,
         transcript: transcript.formatForPrompt(participantPromptOpts),
         groupSessionKey: participantSessionKey,
+        priorTopicSummaries: noRepeatActive ? priorTopicSummaries : [],
       });
 
       let replyText = '';
@@ -611,6 +634,7 @@ async function startMeetingGroupRelay(config, deps) {
     draft: config.draft,
     goal: config.goal || '',
     postMeetingExecAgentId: config.postMeetingExecAgentId || '',
+    noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
     roundCount,
     moderatorAgentId: config.moderatorAgentId,
     moderatorLabel: config.moderatorLabel || config.moderatorAgentId,
@@ -663,7 +687,7 @@ function collectSpokenAgentIds(messages) {
     .map((m) => m.speakerAgentId);
 }
 
-function findNextMention(messages, roster, processed, moderatorAgentId, roundCount = 2) {
+function findNextMention(messages, roster, processed, moderatorAgentId, roundCount = 2, options = {}) {
   if (!Array.isArray(messages)) return null;
 
   const speechMode = resolveModeratorSpeechMode(messages, roster, moderatorAgentId, roundCount);
@@ -697,7 +721,16 @@ function findNextMention(messages, roster, processed, moderatorAgentId, roundCou
     }
 
     const mentions = parseMeetingMentions(text, roster, moderatorAgentId);
-    const mention = pickRelayMention(text, mentions, messages, roster, moderatorAgentId, i, roundCount);
+    const mention = pickRelayMention(
+      text,
+      mentions,
+      messages,
+      roster,
+      moderatorAgentId,
+      i,
+      roundCount,
+      options,
+    );
     if (!mention) {
       for (const skipped of mentions) {
         processed.add(`${i}:${skipped.agentId}`);
@@ -708,11 +741,17 @@ function findNextMention(messages, roster, processed, moderatorAgentId, roundCou
     const key = `${i}:${mention.agentId}`;
     if (processed.has(key)) continue;
 
+    const repick = Boolean(options.noRepeatPastTopics)
+      && isRepickMention(text, mention.agentId)
+      && hasCountableParticipantSpeech(messages, mention.agentId)
+      && !hasUsedRepick(messages, mention.agentId);
+
     return {
       messageIndex: i,
       agentId: mention.agentId,
       label: resolveRosterLabel(roster, mention.agentId),
       instruction: mention.instruction || text,
+      repick,
     };
   }
   return null;

@@ -130,6 +130,7 @@ function participantTurnCounts(messages, roster) {
   const rosterIds = new Set((roster || []).map((r) => r.agentId));
   const counts = new Map();
   for (const msg of messages || []) {
+    if (msg.excludeFromRound) continue;
     if (msg.who !== 'them' || !msg.speakerAgentId || !rosterIds.has(msg.speakerAgentId)) continue;
     counts.set(msg.speakerAgentId, (counts.get(msg.speakerAgentId) || 0) + 1);
   }
@@ -356,9 +357,11 @@ function buildParticipantGroupPrompt({
   instruction,
   transcript,
   groupSessionKey,
+  priorTopicSummaries = [],
   softChars = MEETING_PARTICIPANT_SOFT_CHARS,
   hardChars = MEETING_PARTICIPANT_HARD_CHARS,
 }) {
+  const priorBlock = buildPriorTopicsSection(priorTopicSummaries, { emptyNote: false });
   return [
     '【QiziShell 会议 · 你的发言轮次】',
     '',
@@ -369,6 +372,7 @@ function buildParticipantGroupPrompt({
     '- **不要**在发言末尾 @ 下一位 Agent——由主持 Agent 统一派发，你只需完成自己的论述；',
     '- 只发表一次性完整意见，不要代笔其他 Agent；',
     '- 不要输出 JSON，用自然语言直接发言。',
+    priorBlock ? '- 不得再选下方「往期主题」里已经定过的主题；换标题、换角度、换说法仍算同一主题。拿不准时当成不重复，照常说出你的选择。' : '',
     '',
     `本次会议隔离 session：\`${groupSessionKey}\`（不是你的 main 私聊）`,
     `你的 agentId：\`${agentId}\`（${agentLabel}）`,
@@ -377,6 +381,7 @@ function buildParticipantGroupPrompt({
     '',
     '## 讨论底稿',
     draft.trim(),
+    priorBlock ? `\n${priorBlock}` : '',
     '',
     '## 当前群聊记录',
     transcript || '（暂无）',
@@ -385,7 +390,7 @@ function buildParticipantGroupPrompt({
     instruction.trim(),
     '',
     '请直接输出你在群里的发言正文：',
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function getLastParticipantAgentId(messages) {
@@ -411,6 +416,41 @@ function getSuggestedNextParticipant(roster, lastParticipantAgentId) {
 }
 
 /** 主持在纠正/自省时误写的 @，不应触发 relay */
+function isRepickMention(text, agentId) {
+  const raw = String(text || '');
+  if (!agentId || !raw.includes(`@${agentId}`)) return false;
+  const lines = raw.split(/\r?\n/);
+  for (const line of lines) {
+    if (!line.includes(`@${agentId}`)) continue;
+    if (/往期主题重复|不得再定|请重选|要求重选/.test(line)) return true;
+  }
+  return false;
+}
+
+function hasCountableParticipantSpeech(messages, agentId) {
+  return (messages || []).some((msg) => (
+    msg.who === 'them' && msg.speakerAgentId === agentId && !msg.excludeFromRound
+  ));
+}
+
+function hasUsedRepick(messages, agentId) {
+  return (messages || []).some((msg) => (
+    msg.who === 'them' && msg.speakerAgentId === agentId && msg.excludeFromRound
+  ));
+}
+
+function excludeLatestParticipantSpeech(messages, agentId) {
+  if (!Array.isArray(messages) || !agentId) return false;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg.who === 'them' && msg.speakerAgentId === agentId && !msg.excludeFromRound) {
+      msg.excludeFromRound = true;
+      return true;
+    }
+  }
+  return false;
+}
+
 function isCorrectionMention(text, agentId) {
   const raw = String(text || '');
   if (!raw.includes(`@${agentId}`)) return false;
@@ -445,10 +485,16 @@ function shouldSkipRelayMention(
   messageIndex = -1,
   roster = null,
   roundCount = 2,
+  options = {},
 ) {
   if (!agentId || agentId === moderatorAgentId) return true;
   if (messageIndex >= 0 && hasParticipantReplyAfter(messages, messageIndex, agentId)) {
     return true;
+  }
+  if (options.noRepeatPastTopics
+    && isRepickMention(text, agentId)
+    && hasCountableParticipantSpeech(messages, agentId)) {
+    return hasUsedRepick(messages, agentId);
   }
   if (isCorrectionMention(text, agentId)) return true;
   if (Array.isArray(roster) && roster.length > 0
@@ -467,6 +513,7 @@ function pickRelayMention(
   moderatorAgentId,
   messageIndex = -1,
   roundCount = 2,
+  options = {},
 ) {
   if (!Array.isArray(mentions) || mentions.length === 0) return null;
   for (const mention of mentions) {
@@ -478,6 +525,7 @@ function pickRelayMention(
       messageIndex,
       roster,
       roundCount,
+      options,
     )) {
       continue;
     }
@@ -493,12 +541,23 @@ function markModeratorMessageMentionsProcessed(messageIndex, text, roster, moder
   }
 }
 
-function buildModeratorDispatchHint(roster, messages) {
+function moderatorNoRepeatRules() {
+  return [
+    '- **往期主题**：议事 Agent 的选择若与「往期主题」原文是同一件事（换标题、换角度、换说法仍算），当场驳回，不要写入共识、下轮焦点或最终结论；',
+    '- 驳回必须单独成行，同一行里写 `@agentId` 和「往期主题重复」，要求该 agent 重选；同一人同一轮只驳回一次；',
+    '- 重选后仍是往期主题：该提议作废，不写入共识，改 @ 下一位；',
+    '- 拿不准是否同一主题时，当成不重复，会议继续。',
+  ].join('\n');
+}
+
+function buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics = false } = {}) {
   const lastId = getLastParticipantAgentId(messages);
   const lastEntry = roster.find((r) => r.agentId === lastId);
   const next = getSuggestedNextParticipant(roster, lastId);
   const parts = [];
-  if (lastEntry) {
+  if (lastEntry && noRepeatPastTopics) {
+    parts.push(`上一位刚发完言：${lastEntry.label} (@${lastEntry.agentId})。若其选择与往期主题是同一件事，单独一行写 @${lastEntry.agentId} 和「往期主题重复」，要求重选（同一轮只此一次）。否则请勿再次 @ 同一人。`);
+  } else if (lastEntry) {
     parts.push(`上一位刚发完言：${lastEntry.label} (@${lastEntry.agentId})——**请勿再次 @ 同一人**（纠正错误时也勿写 @，用纯文字 agentId 即可）`);
   }
   if (next) {
@@ -518,9 +577,10 @@ function buildModeratorContinuePrompt({
   speechKind = 'dispatch',
   softChars = MEETING_MODERATOR_SOFT_CHARS,
   hardChars = MEETING_MODERATOR_HARD_CHARS,
+  noRepeatPastTopics = false,
 } = {}) {
   const remaining = resolveRoundDispatchState(messages, roster, roundCount).remaining;
-  const dispatchHint = buildModeratorDispatchHint(roster, messages);
+  const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
   const lastFromTranscript = resolveLastParticipantLabel(roster, messages);
   const lastLabel = lastFromTranscript || lastSpeakerLabel;
   const rounds = normalizeRoundCount(roundCount);
@@ -528,7 +588,9 @@ function buildModeratorContinuePrompt({
   const summaryHint = speechKind === 'final_summary'
     ? `- 全员已发言：作 **最终总结**，${meetingAdjournInstruction()}；**勿 @ 任何人**。`
     : (speechKind === 'round_summary'
-      ? '- 本轮所有人已发言完毕：请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；'
+      ? (noRepeatPastTopics
+        ? '- 若上一位的选择与往期主题是同一件事，先不要总结；单独一行 @ 该 agent 并写「往期主题重复」，要求重选。否则按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；'
+        : '- 本轮所有人已发言完毕：请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；')
       : '- 若本轮按名单尚未派完，请 @ **下一位** 议事 Agent（**必须**用 agentId，如 @nai_pang；@墨宝 无效）；');
   return [
     '[系统 · QiziShell]',
@@ -538,11 +600,14 @@ function buildModeratorContinuePrompt({
     '（以上依据当前群聊记录最后一条议事 Agent 发言判定。）',
     '请继续主持会议。硬约束：',
     moderatorSpeechGuidance(speechKind, softChars, hardChars),
-    '- **每条发言只 @ 一位** agentId；QiziShell 会对每个 @agentId 自动 relay——纠正派发时**不要**写 @（写 nai_pang 等纯文字即可）；',
+    noRepeatPastTopics
+      ? '- **每条发言只 @ 一位** agentId；驳回往期主题时，`@agentId` 和「往期主题重复」必须在同一行，才会转发重选；'
+      : '- **每条发言只 @ 一位** agentId；QiziShell 会对每个 @agentId 自动 relay——纠正派发时**不要**写 @（写 nai_pang 等纯文字即可）；',
     summaryHint,
     speechKind === 'dispatch'
       ? '- 若本轮所有人已各发言一次，请作 **当轮总结（仅结论，见格式块）**，然后 @ 名单第一位开始下一轮反馈；'
       : '',
+    noRepeatPastTopics ? moderatorNoRepeatRules() : '',
     `- 共 ${rounds} 轮；结束后最终总结，${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
     '一次只 @ 一位 Agent。',
     dispatchHint ? `\n${dispatchHint}` : '',
@@ -567,17 +632,20 @@ function buildModeratorIdleWatchdogPrompt({
   strike = 1,
   maxStrikes = 3,
   idleMs = 0,
+  noRepeatPastTopics = false,
 } = {}) {
   const spoken = new Set(spokenAgentIds);
   const remaining = (roster || []).filter((entry) => !spoken.has(entry.agentId));
-  const dispatchHint = buildModeratorDispatchHint(roster, messages);
+  const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
   const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
   const rounds = normalizeRoundCount(roundCount);
   const idleMin = Math.max(1, Math.round(idleMs / 60_000));
   const actionHint = speechKind === 'final_summary'
     ? `作 **最终总结**，${meetingAdjournInstruction()}；**勿 @ 任何人**。`
     : (speechKind === 'round_summary'
-      ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
+      ? (noRepeatPastTopics
+        ? '若上一位与往期主题重复，先单独一行 @ 该 agent 并写「往期主题重复」要求重选；否则按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
+        : '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。')
       : (next
         ? `请立即 @：@${next.agentId}（${next.label}）`
         : (remaining.length
@@ -592,8 +660,11 @@ function buildModeratorIdleWatchdogPrompt({
     strike >= maxStrikes
       ? '若仍无法推进，下一条系统消息将要求你强制最终总结并结束会议。'
       : '',
+    noRepeatPastTopics ? moderatorNoRepeatRules() : '',
     `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
-    '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
+    noRepeatPastTopics
+      ? '一次只 @ 一位 Agent。驳回往期主题时，@ 必须和「往期主题重复」写在同一行。'
+      : '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
     '## 当前群聊记录',
@@ -611,10 +682,11 @@ function buildModeratorForceFinalSummaryPrompt({
   hardChars = MEETING_MODERATOR_FINAL_HARD_CHARS,
   idleMs = 0,
   endReason = '长时间无议事 Agent 反馈',
+  noRepeatPastTopics = false,
 } = {}) {
   const idleMin = Math.max(1, Math.round(idleMs / 60_000));
   const rounds = normalizeRoundCount(roundCount);
-  const dispatchHint = buildModeratorDispatchHint(roster, messages);
+  const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
   return [
     '[系统 · QiziShell]',
     `⚠️ 已连续提醒仍无议事 Agent 新发言（约 ${idleMin} 分钟），**必须立即强制收尾**。`,
@@ -625,6 +697,7 @@ function buildModeratorForceFinalSummaryPrompt({
     '- 总结中**明确写出**上述提前结束原因；',
     `- ${meetingAdjournInstruction()}；`,
     '- **不要 @ 任何人**（含派活描述也不要写 @）。',
+    noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
     `- 共 ${rounds} 轮制；当前为强制提前结束，不必再等待未发言者。`,
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
@@ -642,10 +715,11 @@ function buildModeratorIdlePrompt({
   speechKind = 'dispatch',
   softChars = MEETING_MODERATOR_SOFT_CHARS,
   hardChars = MEETING_MODERATOR_HARD_CHARS,
+  noRepeatPastTopics = false,
 } = {}) {
   const spoken = new Set(spokenAgentIds);
   const remaining = (roster || []).filter((entry) => !spoken.has(entry.agentId));
-  const dispatchHint = buildModeratorDispatchHint(roster, messages);
+  const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
   const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
   const rounds = normalizeRoundCount(roundCount);
   if (speechKind === 'final_summary') {
@@ -656,6 +730,7 @@ function buildModeratorIdlePrompt({
       `若已发过最终总结，**只**回复一行 \`${MEETING_ADJOURN_KEYWORD}\`。`,
       `若尚未总结，作 **最终总结** 并 ${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
       moderatorSpeechGuidance('final_summary', softChars, hardChars),
+      noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
       `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
       '',
       '## 当前群聊记录',
@@ -663,7 +738,9 @@ function buildModeratorIdlePrompt({
     ].filter(Boolean).join('\n');
   }
   const actionHint = speechKind === 'round_summary'
-    ? '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
+    ? (noRepeatPastTopics
+      ? '若上一位与往期主题重复，先单独一行 @ 该 agent 并写「往期主题重复」要求重选；否则按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。'
+      : '请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮反馈。')
     : (next
       ? `建议现在 @：@${next.agentId}（${next.label}）`
       : (remaining.length
@@ -675,7 +752,10 @@ function buildModeratorIdlePrompt({
     moderatorSpeechGuidance(speechKind, softChars, hardChars),
     actionHint,
     `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
-    '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
+    noRepeatPastTopics
+      ? '一次只 @ 一位 Agent。驳回往期主题时，@ 必须和「往期主题重复」写在同一行。'
+      : '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
+    noRepeatPastTopics ? moderatorNoRepeatRules() : '',
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
     '## 当前群聊记录',
@@ -853,6 +933,68 @@ function validateModeratorSummary(parsed, { round, finalRound = false } = {}) {
   return { ok: true, data: parsed };
 }
 
+const PRIOR_TOPIC_SUMMARY_CHARS = 2500;
+const PRIOR_TOPIC_MAX_ENTRIES = 8;
+
+function formatPriorTopicDate(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return String(iso || '').slice(0, 10);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function clipPriorSummary(text) {
+  const t = String(text || '').trim();
+  if (t.length <= PRIOR_TOPIC_SUMMARY_CHARS) return t;
+  return `${t.slice(0, PRIOR_TOPIC_SUMMARY_CHARS).trim()}\n\n（下文已截断）`;
+}
+
+function listPriorTopicEntries(entries) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => entry && String(entry.finalSummary || '').trim());
+}
+
+function buildPriorTopicsSection(entries, { emptyNote = true } = {}) {
+  const list = listPriorTopicEntries(entries);
+  if (!list.length) {
+    if (!emptyNote) return '';
+    return [
+      '## 往期主题',
+      '近 7 日没有本议题已结束会议的最终总结，本场不设排除。',
+    ].join('\n');
+  }
+  const shown = list.slice(0, PRIOR_TOPIC_MAX_ENTRIES);
+  const blocks = shown.map((entry) => (
+    `### ${formatPriorTopicDate(entry.finishedAt)}\n${clipPriorSummary(entry.finalSummary)}`
+  ));
+  const extra = list.length - shown.length;
+  return [
+    '## 往期主题（原文，不得再定）',
+    '以下是本议题近 7 日已结束会议的最终总结原文。',
+    '这些主题不得再定。换标题、换角度、换说法，仍算同一主题。',
+    '拿不准是否同一主题时，当成不重复。',
+    '',
+    ...blocks,
+    extra > 0 ? `（另有 ${extra} 条未附上，以已附原文为准。）` : '',
+  ].filter(Boolean).join('\n');
+}
+
+function extractMeetingFinalSummaryText(record) {
+  const messages = record?.transcript;
+  const moderatorAgentId = record?.moderatorAgentId;
+  if (!Array.isArray(messages) || !moderatorAgentId) return '';
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (!msg || msg.streaming) continue;
+    if (msg.speakerLabel === '任务书') continue;
+    if (msg.who !== 'me' || msg.speakerAgentId !== moderatorAgentId) continue;
+    const text = String(msg.text || '').trim();
+    if (!text) continue;
+    if (hasMeetingAdjournedMarker(text) || /最终总结/.test(text)) return text;
+  }
+  return '';
+}
+
 function buildModeratorBriefingMessage({
   topic,
   draft,
@@ -860,6 +1002,8 @@ function buildModeratorBriefingMessage({
   moderator,
   participants,
   roundCount = 2,
+  noRepeatPastTopics = false,
+  priorTopicSummaries = [],
 }) {
   const rounds = normalizeRoundCount(roundCount);
   const roundWord = roundCountLabel(rounds);
@@ -890,6 +1034,10 @@ function buildModeratorBriefingMessage({
     '## 讨论底稿（原始素材）',
     draft.trim(),
     goal ? `\n## 期望结论方向\n${goal.trim()}` : '',
+    noRepeatPastTopics ? `\n${buildPriorTopicsSection(priorTopicSummaries)}` : '',
+    noRepeatPastTopics && listPriorTopicEntries(priorTopicSummaries).length
+      ? `\n${moderatorNoRepeatRules()}`
+      : '',
     '',
     '## 议事 Agent 名单（已确认参与）',
     roster,
@@ -1081,6 +1229,10 @@ module.exports = {
   getLastParticipantAgentId,
   getSuggestedNextParticipant,
   isCorrectionMention,
+  isRepickMention,
+  hasCountableParticipantSpeech,
+  hasUsedRepick,
+  excludeLatestParticipantSpeech,
   shouldSkipRelayMention,
   pickRelayMention,
   markModeratorMessageMentionsProcessed,
@@ -1101,6 +1253,8 @@ module.exports = {
   hasClosingModeratorMessage,
   isFinalSummaryExpected,
   buildModeratorBriefingMessage,
+  buildPriorTopicsSection,
+  extractMeetingFinalSummaryText,
   extractJsonFromText,
   validateDeliberantOutput,
   validateModeratorSummary,

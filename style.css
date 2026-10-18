@@ -2638,6 +2638,38 @@ body.drag-over .composer-pending {
   cursor: pointer;
 }
 .meeting-round-option input { flex-shrink: 0; }
+.meeting-topic-line {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.meeting-norepeat {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fafafa;
+  font-size: 13px;
+  line-height: 1.4;
+  color: #444;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.meeting-norepeat:hover { background: #f2f6ff; }
+.meeting-norepeat input { flex-shrink: 0; margin: 0; }
+.meeting-norepeat-status {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--meta-text);
+  max-height: 72px;
+  overflow-y: auto;
+  white-space: pre-line;
+}
+.meeting-norepeat-status[hidden] { display: none !important; }
 .meeting-participant-item {
   display: flex;
   align-items: flex-start;
@@ -2947,6 +2979,8 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
   display: flex;
   align-items: stretch;
   gap: 0;
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .meeting-topic-input {
   flex: 1;

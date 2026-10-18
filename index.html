@@ -392,16 +392,23 @@
       </div>
       <div class="meeting-setup" id="meeting-setup-panel">
         <p class="meeting-hint">界面为群聊气泡；后台在隔离 A2A session 中通信，不写入你与 Agent 的 main 私聊。</p>
-        <label class="meeting-field">
-          <span class="meeting-label">议题</span>
-          <div class="meeting-topic-row">
-            <input type="text" class="meeting-input meeting-topic-input" id="meeting-topic" placeholder="例如：QiziShell 下一版功能取舍" autocomplete="off">
-            <button type="button" class="meeting-preset-picker-btn" id="meeting-preset-picker-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="已保存的会议" title="已保存的会议">
-              <span class="meeting-preset-picker-caret" aria-hidden="true">▾</span>
-            </button>
-            <div class="meeting-preset-menu" id="meeting-preset-menu" hidden role="listbox" aria-label="已保存的会议"></div>
+        <div class="meeting-field">
+          <label class="meeting-label" for="meeting-topic">议题</label>
+          <div class="meeting-topic-line">
+            <div class="meeting-topic-row">
+              <input type="text" class="meeting-input meeting-topic-input" id="meeting-topic" placeholder="例如：每日选题会议" autocomplete="off">
+              <button type="button" class="meeting-preset-picker-btn" id="meeting-preset-picker-btn" aria-haspopup="listbox" aria-expanded="false" aria-label="已保存的会议" title="已保存的会议">
+                <span class="meeting-preset-picker-caret" aria-hidden="true">▾</span>
+              </button>
+              <div class="meeting-preset-menu" id="meeting-preset-menu" hidden role="listbox" aria-label="已保存的会议"></div>
+            </div>
+            <label class="meeting-norepeat">
+              <input type="checkbox" id="meeting-no-repeat">
+              <span>不可与往日主题重复</span>
+            </label>
           </div>
-        </label>
+          <p class="meeting-norepeat-status" id="meeting-norepeat-status" hidden></p>
+        </div>
         <label class="meeting-field">
           <span class="meeting-label">讨论底稿</span>
           <span class="meeting-field-hint">支持 Markdown 格式，可粘贴较长素材</span>
