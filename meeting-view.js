@@ -880,10 +880,10 @@
     if (event.type === 'post_meeting_forward' && event.payload) {
       const { ok, label, error, deduped, agentId, sessionKey } = event.payload;
       if (ok) {
-        const suffix = deduped ? '（此前已派活）' : '';
-        setStatus(`会议已结束 · 已派活至 ${label || agentId || 'Agent'}${suffix}`);
+        const suffix = deduped ? '（此前已转发）' : '';
+        setStatus(`会议已结束 · 已将结论转发至 ${label || agentId || 'Agent'}${suffix}`);
       } else {
-        setStatus(`会议已结束 · 派活失败：${error || '未知错误'}`);
+        setStatus(`会议已结束 · 结论转发失败：${error || '未知错误'}`);
       }
       if (sessionKey) {
         window.dispatchEvent(new CustomEvent('qizi-meeting-exec-forward', {

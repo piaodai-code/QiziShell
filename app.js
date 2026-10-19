@@ -3553,7 +3553,7 @@ async function openExecAgentAfterMeetingForward(detail) {
   });
   resetOutboundChatState({ clearQueue: true });
   render();
-  setStatus(`会议派活已送达 ${label}，请在该会话继续执行`, 'ok');
+  setStatus(`会议结论已转发至 ${label}`, 'ok');
 }
 
 function updateStreamingBubble(runId) {

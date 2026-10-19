@@ -2595,7 +2595,7 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
       sessionKey: execSessionKey,
       goal,
       label,
-      error: '未找到主持最终总结，无法派活',
+      error: '未找到主持最终总结，无法转发结论',
     };
   }
   if (isMeetingClosingStub(finalMsg.text) || isModeratorPostCloseStub(finalMsg.text)) {
@@ -2605,7 +2605,7 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
       sessionKey: execSessionKey,
       goal,
       label,
-      error: '主持仅回复了「会议结束」等收尾语，缺少可派活的最终总结',
+      error: '主持仅回复了「会议结束」等收尾语，缺少可转发的最终总结',
     };
   }
 

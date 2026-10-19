@@ -50,13 +50,16 @@ function roundCountLabel(roundCount) {
 
 function moderatorSummaryRules({ final = false } = {}) {
   const label = final ? '最终总结' : '当轮总结';
+  const allowed = final
+    ? '  - **只允许**：已经决定的结论、仍未定的分歧（各一句）。**禁止派活**：不要安排写稿、剪辑、配音、发布、排期。若会前选了接收人，只转给这个系统指定的 agent 去执行；'
+    : '  - **只允许**：已形成的共识、仍未定的分歧（各一句立场）、下轮要验证的一点；';
   const formatBlock = final
     ? [
       '  - **输出格式**（按顺序，每项一行；不要散文、不要铺垫）：',
       '    **结论** …（1–3 条编号，写「决定了什么」）',
       '    **分歧/风险** …（无则写「无」；各一句）',
-      '    **派活** …（执行人与事项）',
       `    \`${MEETING_ADJOURN_KEYWORD}\`（**必须为本条发言最后一行/最后一句**）`,
+      '  - 不要输出「派活」这一项。',
     ]
     : [
       '  - **输出格式**（按顺序，不要散文、不要铺垫）：',
@@ -67,7 +70,7 @@ function moderatorSummaryRules({ final = false } = {}) {
   return [
     `- **${label} = 只写结论，不写过程**（硬约束）：`,
     '  - **禁止**：逐人复述谁说了什么、引用原话、描述讨论先后、铺垫背景、补充新议题、发散性提问或「还可以考虑…」类探索；',
-    '  - **只允许**：已形成的共识、仍未定的分歧（各一句立场）、下轮/执行需盯住的一点；',
+    allowed,
     ...formatBlock,
   ].join('\n');
 }
@@ -77,7 +80,7 @@ function meetingSummaryGuidance(softMax, hardMax, { final = false } = {}) {
   if (final) {
     return [
       moderatorSummaryRules({ final }),
-      `- **${label}篇幅**：会议即将结束，**不设字数上限**；请把结论、分歧、派活写完整，系统不会截断；`,
+      `- **${label}篇幅**：会议即将结束，**不设字数上限**；请把结论、分歧写完整，系统不会截断；`,
       '- 下方群聊记录仅供**提炼结论**；总结中**不得**复述或改写各位的发言过程。',
     ].join('\n');
   }
@@ -367,7 +370,7 @@ function buildParticipantGroupPrompt({
     '【QiziShell 会议 · 你的发言轮次】',
     '',
     '你正在一场 **会议群聊** 中发言（由 QiziShell 展示给老大）。硬约束：',
-    '- 按照你在 IDENTITY.md 中定义的身份与职责角度发表意见；',
+    '- 只回答本次议题要决定的那一件事。判断理由可以带上，但不要展开议题没要求的工序（写稿、剪辑、配音、发布、排期）；',
     meetingSpeechGuidance(softChars, hardChars),
     '- 你的回复会出现在 **会议群聊界面**，不要尝试 sessions_send 或私聊其他 Agent；',
     '- **不要**在发言末尾 @ 下一位 Agent——由主持 Agent 统一派发，你只需完成自己的论述；',
@@ -588,7 +591,7 @@ function buildModeratorContinuePrompt({
   const rounds = normalizeRoundCount(roundCount);
   const roundWord = roundCountLabel(rounds);
   const summaryHint = speechKind === 'final_summary'
-    ? `- 全员已发言：作 **最终总结**，${meetingAdjournInstruction()}；**勿 @ 任何人**。`
+    ? `- 全员已发言：作 **最终总结**（只写结论和分歧，不要派活），${meetingAdjournInstruction()}；**勿 @ 任何人**。`
     : (speechKind === 'round_summary'
       ? (noRepeatPastTopics
         ? '- 若上一位的选择与往期主题是同一件事，先不要总结；单独一行 @ 该 agent 并写「往期主题重复」，要求重选。否则按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；'
@@ -605,6 +608,7 @@ function buildModeratorContinuePrompt({
     noRepeatPastTopics
       ? '- **每条发言只 @ 一位** agentId；驳回往期主题时，`@agentId` 和「往期主题重复」必须在同一行，才会转发重选；'
       : '- **每条发言只 @ 一位** agentId；QiziShell 会对每个 @agentId 自动 relay——纠正派发时**不要**写 @（写 nai_pang 等纯文字即可）；',
+    '- **派发范围**：只问本次议题要拍板的那一件事，不要按岗位追问写稿、剪辑、配音、收料时长或出片时间；',
     summaryHint,
     speechKind === 'dispatch'
       ? '- 若本轮所有人已各发言一次，请作 **当轮总结（仅结论，见格式块）**，然后 @ 名单第一位开始下一轮反馈；'
@@ -695,10 +699,10 @@ function buildModeratorForceFinalSummaryPrompt({
     `提前结束原因（须写入总结正文）：${endReason}`,
     '硬约束：',
     moderatorSpeechGuidance('final_summary', softChars, hardChars),
-    '- 按 **最终总结格式（仅结论+派活）** 输出；',
+    '- 按 **最终总结格式（仅结论与分歧，不要派活）** 输出；',
     '- 总结中**明确写出**上述提前结束原因；',
     `- ${meetingAdjournInstruction()}；`,
-    '- **不要 @ 任何人**（含派活描述也不要写 @）。',
+    '- **不要 @ 任何人**。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
     noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
     `- 共 ${rounds} 轮制；当前为强制提前结束，不必再等待未发言者。`,
     dispatchHint ? `\n${dispatchHint}` : '',
@@ -728,7 +732,7 @@ function buildModeratorIdlePrompt({
     return [
       '[系统 · QiziShell]',
       '当前处于**最终总结/收尾**阶段。',
-      '**本阶段不再向议事 Agent relay**；派活仅写在总结正文里（写纯文字 agentId 即可，**勿写 @**）。',
+      '**本阶段不再向议事 Agent relay**。只写结论与分歧，不要派活，**勿写 @**。',
       `若已发过最终总结，**只**回复一行 \`${MEETING_ADJOURN_KEYWORD}\`。`,
       `若尚未总结，作 **最终总结** 并 ${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
       moderatorSpeechGuidance('final_summary', softChars, hardChars),
@@ -1019,16 +1023,17 @@ function buildModeratorBriefingMessage({
     '【QiziShell 会议模式 · 启动任务书】',
     '',
     '你现在是本次会议 **主持 Agent**。硬约束：',
-    '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾与派活；',
+    '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
     '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
     `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**（仅结论）建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；`,
-    '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧、下步/派活），**禁止**复述研讨过程、逐人回顾、发散新问题；格式见系统后续提示中的 **共识/分歧/下轮焦点** 或 **结论/派活** 块；',
+    '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧），**禁止**派活、复述研讨过程、逐人回顾、发散新问题；格式见系统后续提示中的 **共识/分歧/下轮焦点** 或 **结论/分歧** 块；',
     '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的**结论型**轮次总结；',
     `- **${rounds} 轮制**：每轮 @ 各议事 Agent 各发言一次 → 当轮总结；${rounds} 轮结束后作最终总结，${meetingAdjournInstruction()}；收尾 **勿 @ 任何人**。`,
     '- **派发语法（硬约束）**：只认 @agentId，例如 @mo_bao；**@墨宝 等中文名不会被 relay**；一次只 @ 一人；',
     '- **纠正派发错误时**：正文里**不要**写 @agentId（用纯文字 nai_pang 即可），否则 QiziShell 仍会 relay；',
     '- **禁止**调用 sessions_send / sessions_spawn，**禁止**向任何 Agent 的 main 私聊发消息；只需在发言里 @，QiziShell 会 relay；',
-    '- **派发时务必提醒**：请对方「按照你在 IDENTITY.md 中定义的身份与职责角度」对议题发表一次性完整意见。',
+    '- **派发范围（硬约束）**：每次 @ 只问本次议题要拍板的那一件事（例如选题会只问选哪一条、为什么、备选是什么）。不要按 IDENTITY.md 的岗位出题，不要问写稿、剪辑、配音、收料时长、出片时间、发布验收。',
+    '- **禁止派活**：最终总结只写决定了什么。不要安排写稿、剪辑、配音、发布、排期。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
     '',
     '---',
     '## 会议参数',
@@ -1038,7 +1043,7 @@ function buildModeratorBriefingMessage({
     '',
     '## 讨论底稿（原始素材）',
     draft.trim(),
-    goal ? `\n## 期望结论方向\n${goal.trim()}` : '',
+    goal ? `\n## 期望结论方向\n${goal.trim()}\n（这是结论要落到的方向，写进「结论」即可。不要据此给任何人派活。）` : '',
     noRepeatPastTopics ? `\n${buildPriorTopicsSection(priorTopicSummaries)}` : '',
     noRepeatPastTopics && listPriorTopicEntries(priorTopicSummaries).length
       ? `\n${moderatorNoRepeatRules()}`
@@ -1053,7 +1058,7 @@ function buildModeratorBriefingMessage({
     '---',
     '请阅读以上任务书后：',
     '1. 用简短开场向「老大」宣布议题与参与名单；',
-    '2. 立即开始 **第 1 轮**：按名单顺序 @ 第一位议事 Agent 的 agentId（如 @mo_bao），要求其 **按 IDENTITY.md 身份** 基于底稿作一次性完整论述；',
+    '2. 立即开始 **第 1 轮**：按名单顺序 @ 第一位议事 Agent 的 agentId（如 @mo_bao），要求其只基于底稿回答本次议题要决定的那一件事，一次说完；',
     `3. 按议程推进，直到 ${rounds} 轮结束或达成结论。`,
     '',
     '（本消息由 QiziShell 代老大发送；老大当前仅观察，不插话。）',
