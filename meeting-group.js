@@ -443,6 +443,7 @@ async function startMeetingGroupRelay(config, deps) {
         instruction: pending.instruction,
         transcript: transcript.formatForPrompt(participantPromptOpts),
         groupSessionKey: participantSessionKey,
+        noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
         priorTopicSummaries: noRepeatActive ? priorTopicSummaries : [],
       });
 

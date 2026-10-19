@@ -38,7 +38,13 @@ function normalizeEntry(entry) {
   if (finalSummary.length > SUMMARY_STORE_CHARS) {
     finalSummary = `${finalSummary.slice(0, SUMMARY_STORE_CHARS).trim()}\n\n（下文已截断）`;
   }
-  return { meetingId, topic, finishedAt, finalSummary };
+  return {
+    meetingId,
+    topic,
+    finishedAt,
+    finalSummary,
+    noRepeatPastTopics: Boolean(entry?.noRepeatPastTopics),
+  };
 }
 
 function writeLedger(entries) {
@@ -64,7 +70,13 @@ function entryFromRecord(record) {
   const topic = String(record?.topic || '').trim();
   const finishedAt = String(record?.finishedAt || record?.startedAt || '').trim();
   const finalSummary = extractMeetingFinalSummaryText(record);
-  return normalizeEntry({ meetingId, topic, finishedAt, finalSummary });
+  return normalizeEntry({
+    meetingId,
+    topic,
+    finishedAt,
+    finalSummary,
+    noRepeatPastTopics: Boolean(record?.noRepeatPastTopics),
+  });
 }
 
 function backfill(entries) {
@@ -87,7 +99,14 @@ function backfill(entries) {
       continue;
     }
     const entry = entryFromRecord(record);
-    if (!entry || seen.has(entry.meetingId) || !withinWindow(entry.finishedAt)) continue;
+    if (!entry || !withinWindow(entry.finishedAt)) continue;
+    if (seen.has(entry.meetingId)) {
+      if (Object.prototype.hasOwnProperty.call(record, 'noRepeatPastTopics')) {
+        const existing = next.find((item) => item.meetingId === entry.meetingId);
+        if (existing) existing.noRepeatPastTopics = Boolean(record.noRepeatPastTopics);
+      }
+      continue;
+    }
     seen.add(entry.meetingId);
     next.push(entry);
   }
