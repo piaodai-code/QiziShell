@@ -41,6 +41,7 @@ const attachPickerBtn = document.getElementById('attach-picker-btn');
 const attachPopup = document.getElementById('attach-popup');
 const titlebarAgentBtn = document.getElementById('titlebar-agent-btn');
 const titlebarAgentAvatar = document.getElementById('titlebar-agent-avatar');
+const unreadAgentStackEl = document.getElementById('unread-agent-stack');
 const composerHistoryBtn = document.getElementById('composer-history-btn');
 const agentPopup = document.getElementById('agent-popup');
 const contextMeter = document.getElementById('context-meter');
@@ -3229,6 +3230,7 @@ function applyLoadedSessionKey(result) {
   messages = [];
   currentSessionKey = result.sessionKey;
   currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
+  clearAgentUnread(currentAgentId);
   loadMessages();
   markMessageListPinned(messagesEl);
   return true;
@@ -3266,6 +3268,108 @@ function messagesStorageKey(sessionKey = currentSessionKey) {
 function parseAgentIdFromSessionKey(sessionKey) {
   const match = /^agent:([^:]+):/.exec(sessionKey || '');
   return match ? match[1] : 'main';
+}
+
+const UNREAD_AGENTS_STORAGE_KEY = 'qizi-shell-unread-agents';
+
+function readStoredUnreadAgentIds() {
+  try {
+    const raw = localStorage.getItem(UNREAD_AGENTS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return [];
+    const seen = new Set();
+    const ids = [];
+    for (const entry of parsed) {
+      const agentId = String(entry || '').trim();
+      if (!agentId || seen.has(agentId)) continue;
+      seen.add(agentId);
+      ids.push(agentId);
+    }
+    return ids;
+  } catch {
+    return [];
+  }
+}
+
+/** 有未读回复的其他 Agent，从左到右；后到的在右边并压住左边 */
+let unreadAgentIds = readStoredUnreadAgentIds();
+
+function saveUnreadAgentIds() {
+  try {
+    localStorage.setItem(UNREAD_AGENTS_STORAGE_KEY, JSON.stringify(unreadAgentIds));
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function sessionChatHasVisibleText(payload) {
+  return Boolean(String(payload?.text || payload?.delta || '').trim());
+}
+
+function noteUnreadAgentFromSessionChat(payload) {
+  if (!payload || !sessionChatHasVisibleText(payload)) return;
+  const state = payload.state;
+  if (state !== 'delta' && state !== 'final' && state !== 'aborted' && state !== 'error') return;
+  const sessionKey = String(payload.sessionKey || '').trim();
+  const match = /^agent:([^:]+):/.exec(sessionKey);
+  if (!match) return;
+  const agentId = match[1];
+  if (!agentId || agentId === currentAgentId) return;
+  markAgentUnread(agentId);
+}
+
+function markAgentUnread(agentId) {
+  const id = String(agentId || '').trim();
+  if (!id || id === currentAgentId || unreadAgentIds.includes(id)) return;
+  unreadAgentIds.push(id);
+  saveUnreadAgentIds();
+  renderUnreadAgentStack();
+  refreshOpenAgentPopup();
+}
+
+function clearAgentUnread(agentId) {
+  const id = String(agentId || '').trim();
+  if (!id) return;
+  const next = unreadAgentIds.filter((entry) => entry !== id);
+  if (next.length === unreadAgentIds.length) return;
+  unreadAgentIds = next;
+  saveUnreadAgentIds();
+  renderUnreadAgentStack();
+  refreshOpenAgentPopup();
+}
+
+function refreshOpenAgentPopup() {
+  if (!agentPopup || agentPopup.hidden) return;
+  const agents = getAgentCatalogList();
+  if (!agents.length) return;
+  renderAgentPopup(agents);
+}
+
+function renderUnreadAgentStack() {
+  if (!unreadAgentStackEl) return;
+  const ids = unreadAgentIds.filter((id) => id && id !== currentAgentId);
+  unreadAgentStackEl.innerHTML = '';
+  if (!ids.length) {
+    unreadAgentStackEl.hidden = true;
+    return;
+  }
+  unreadAgentStackEl.hidden = false;
+  ids.forEach((agentId, index) => {
+    const agent = agentCatalog.get(agentId) || { id: agentId, label: formatAgentLabel({ id: agentId }) };
+    const label = formatAgentLabel(agent);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'unread-agent-chip';
+    btn.style.zIndex = String(index + 1);
+    btn.title = `未读 · ${label}`;
+    btn.setAttribute('aria-label', `未读消息 · ${label}，切换 Agent`);
+    btn.innerHTML = buildAgentAvatarInner(agent, 'unread');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showAgentPopup();
+    });
+    unreadAgentStackEl.appendChild(btn);
+  });
 }
 
 function formatAgentLabel(agent) {
@@ -3307,10 +3411,12 @@ window.qiziExportHistoryArchive = exportHistoryArchiveForSession;
 
 function applyAgentCatalog(agents) {
   agentCatalog = new Map();
-  if (!Array.isArray(agents)) return;
-  for (const agent of agents) {
-    if (agent?.id) agentCatalog.set(agent.id, agent);
+  if (Array.isArray(agents)) {
+    for (const agent of agents) {
+      if (agent?.id) agentCatalog.set(agent.id, agent);
+    }
   }
+  renderUnreadAgentStack();
 }
 
 function getAgentCatalogList() {
@@ -3693,6 +3799,7 @@ function applyCurrentSessionContinuation(payload) {
 }
 
 async function applyGatewaySessionChat(payload) {
+  noteUnreadAgentFromSessionChat(payload);
   if (!payload || isLocalOwnedActiveRun()) return;
   if (window.MeetingView?.isVisible?.()) return;
 
@@ -4184,7 +4291,14 @@ function buildAgentPopupItem(agent, { active = false, onClick } = {}) {
   btn.className = 'agent-item' + (active ? ' active' : '');
 
   const avatarWrap = document.createElement('span');
+  avatarWrap.className = 'agent-item-avatar-wrap';
   avatarWrap.innerHTML = buildAgentAvatarInner(agent, 'menu');
+  if (agent?.id && agent.id !== currentAgentId && unreadAgentIds.includes(agent.id)) {
+    const dot = document.createElement('span');
+    dot.className = 'agent-unread-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    avatarWrap.appendChild(dot);
+  }
 
   const body = document.createElement('span');
   body.className = 'agent-item-body';
@@ -4204,7 +4318,7 @@ function buildAgentPopupItem(agent, { active = false, onClick } = {}) {
 
   body.appendChild(nameRow);
   body.appendChild(meta);
-  btn.appendChild(avatarWrap.firstElementChild || avatarWrap);
+  btn.appendChild(avatarWrap);
   btn.appendChild(body);
   btn.appendChild(check);
   btn.addEventListener('click', onClick);
@@ -4431,6 +4545,7 @@ async function switchToAgent(agentId) {
     }
     currentSessionKey = nextSessionKey;
     currentAgentId = agentId;
+    clearAgentUnread(agentId);
     debugEvent('session', 'switch_agent_success', {
       agentId,
       sessionKey: nextSessionKey,
@@ -6418,12 +6533,16 @@ inputEl.addEventListener('paste', async (e) => {
     chatScopeEpoch += 1;
     currentSessionKey = await window.qizi.getSessionKey();
     currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);
+    clearAgentUnread(currentAgentId);
+    renderUnreadAgentStack();
     loadMessages();
     messages = finalizeHistoryMessages(messages);
     syncCurrentRunIdFromMessages();
     render();
     await refreshAgentTitleFromGateway();
   } catch {
+    clearAgentUnread(currentAgentId);
+    renderUnreadAgentStack();
     updateAgentTitleLabel({ id: currentAgentId });
   }
   checkConnection();

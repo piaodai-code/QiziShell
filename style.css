@@ -100,6 +100,75 @@ body.meeting-mode .titlebar-identity {
   font-size: 22px;
   font-weight: 600;
 }
+/* 其他 Agent 未读：白条内小头像，距大头像右侧约 10mm，互相压住 1/3 */
+.unread-agent-stack {
+  --unread-avatar-size: 22px;
+  position: absolute;
+  left: calc(100% + 10mm);
+  top: calc((var(--titlebar-height) - var(--unread-avatar-size)) / 2);
+  display: flex;
+  align-items: center;
+  height: var(--unread-avatar-size);
+  -webkit-app-region: no-drag;
+  z-index: 4;
+}
+.unread-agent-stack[hidden] { display: none !important; }
+.unread-agent-chip {
+  position: relative;
+  width: var(--unread-avatar-size);
+  height: var(--unread-avatar-size);
+  padding: 0;
+  border: 1.5px solid #fff;
+  border-radius: 50%;
+  background: #1296DB;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+  cursor: pointer;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  -webkit-app-region: no-drag;
+}
+.unread-agent-chip + .unread-agent-chip {
+  margin-left: calc(var(--unread-avatar-size) / -3);
+}
+.unread-agent-chip:hover {
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.22);
+}
+.unread-agent-chip .agent-avatar-unread {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 1;
+}
+.unread-agent-chip .agent-avatar-unread.agent-avatar-letter {
+  font-size: 11px;
+  font-weight: 600;
+}
+.unread-agent-chip .agent-avatar-unread.agent-avatar-emoji {
+  font-size: 13px;
+}
+.agent-unread-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fa5151;
+  box-shadow: 0 0 0 1.5px #fff;
+  pointer-events: none;
+}
+.agent-item-avatar-wrap {
+  position: relative;
+  flex-shrink: 0;
+  display: inline-flex;
+  overflow: visible;
+}
+.agent-unread-dot {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
 .agent-popup {
   position: absolute;
   top: calc(100% + 8px);
