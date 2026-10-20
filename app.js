@@ -62,6 +62,19 @@ const settingsStatusEl = document.getElementById('settings-status');
 const settingsTestBtn = document.getElementById('settings-test-btn');
 const settingsLaunchAtLogin = document.getElementById('settings-launch-at-login');
 const settingsShowMainOnLaunch = document.getElementById('settings-show-main-on-launch');
+const settingsMessageSound = document.getElementById('settings-message-sound');
+const settingsMessageSoundSelect = document.getElementById('settings-message-sound-id');
+if (settingsMessageSound) {
+  settingsMessageSound.addEventListener('change', syncMessageSoundSelectEnabled);
+}
+const MESSAGE_SOUNDS = [
+  { id: '日历铃声.mp3', file: 'assets/sounds/日历铃声.mp3' },
+  { id: '明亮音调.mp3', file: 'assets/sounds/明亮音调.mp3' },
+  { id: '水滴音.mp3', file: 'assets/sounds/水滴音.mp3' },
+];
+let messageSoundEnabled = false;
+let messageSoundId = MESSAGE_SOUNDS[0].id;
+const soundedRunIds = new Map();
 const forwardModal = document.getElementById('forward-modal');
 const forwardAgentsListEl = document.getElementById('forward-agents-list');
 const forwardPreviewMetaEl = document.getElementById('forward-preview-meta');
@@ -3315,7 +3328,44 @@ function noteUnreadAgentFromSessionChat(payload) {
   if (!match) return;
   const agentId = match[1];
   if (!agentId || agentId === currentAgentId) return;
+  maybePlayNewMessageSound(payload);
   markAgentUnread(agentId);
+}
+
+function normalizeMessageSoundId(value) {
+  const id = String(value || '').trim();
+  return MESSAGE_SOUNDS.some((sound) => sound.id === id) ? id : MESSAGE_SOUNDS[0].id;
+}
+
+function applyMessageSoundSettings(snapshot) {
+  messageSoundEnabled = snapshot?.messageSoundEnabled === true;
+  messageSoundId = normalizeMessageSoundId(snapshot?.messageSoundId);
+}
+
+function syncMessageSoundSelectEnabled() {
+  if (!settingsMessageSoundSelect) return;
+  settingsMessageSoundSelect.disabled = settingsMessageSound?.checked !== true;
+}
+
+function maybePlayNewMessageSound(payload) {
+  if (!messageSoundEnabled) return;
+  const runId = String(payload?.gatewayRunId || '').trim();
+  if (!runId || soundedRunIds.has(runId)) return;
+  const now = Date.now();
+  soundedRunIds.set(runId, now);
+  if (soundedRunIds.size > 80) {
+    for (const [id, at] of soundedRunIds) {
+      if (now - at > 10 * 60 * 1000) soundedRunIds.delete(id);
+    }
+  }
+  const sound = MESSAGE_SOUNDS.find((entry) => entry.id === messageSoundId) || MESSAGE_SOUNDS[0];
+  try {
+    const audio = new Audio(sound.file);
+    audio.loop = false;
+    void audio.play();
+  } catch {
+    // 浏览器或系统拒绝播放时保持静默
+  }
 }
 
 function markAgentUnread(agentId) {
@@ -6547,6 +6597,13 @@ inputEl.addEventListener('paste', async (e) => {
   }
   checkConnection();
   refreshSttUi();
+  if (window.qizi?.getSettings) {
+    try {
+      applyMessageSoundSettings(await window.qizi.getSettings());
+    } catch {
+      // 读不到设置时保持关闭
+    }
+  }
 })();
 
 window.addEventListener('beforeunload', () => {
@@ -7401,6 +7458,10 @@ async function populateSettingsForm() {
   }
   if (settingsLaunchAtLogin) settingsLaunchAtLogin.checked = snapshot.launchAtLogin === true;
   if (settingsShowMainOnLaunch) settingsShowMainOnLaunch.checked = snapshot.showMainOnLaunch !== false;
+  applyMessageSoundSettings(snapshot);
+  if (settingsMessageSound) settingsMessageSound.checked = messageSoundEnabled;
+  if (settingsMessageSoundSelect) settingsMessageSoundSelect.value = messageSoundId;
+  syncMessageSoundSelectEnabled();
   setSettingsStatus('', '');
   await renderSttSettingsPanel();
 }
@@ -7445,11 +7506,14 @@ async function saveSettingsFromForm() {
       token: settingsTokenInput?.value || '',
       launchAtLogin: settingsLaunchAtLogin?.checked === true,
       showMainOnLaunch: settingsShowMainOnLaunch?.checked !== false,
+      messageSoundEnabled: settingsMessageSound?.checked === true,
+      messageSoundId: settingsMessageSoundSelect?.value || MESSAGE_SOUNDS[0].id,
     });
     if (!result?.ok) {
       setSettingsStatus(result?.error || '保存失败', 'error');
       return;
     }
+    applyMessageSoundSettings(result.snapshot);
     closeSettingsModal();
     await checkConnection();
   } catch (err) {

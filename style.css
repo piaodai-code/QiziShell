@@ -2209,7 +2209,7 @@ body.drag-over .composer-pending {
 .settings-modal[hidden] { display: none; }
 .settings-panel {
   width: min(520px, calc(100vw - 48px));
-  height: min(660px, calc(88vh - 48px));
+  height: min(720px, calc(88vh - 48px));
   background: #fff;
   border-radius: 14px;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.22);
@@ -2379,6 +2379,32 @@ body.drag-over .composer-pending {
   cursor: pointer;
 }
 .settings-check input { margin-top: 2px; }
+.settings-sound-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+  min-height: 19px;
+}
+.settings-sound-row .settings-check {
+  margin-bottom: 0;
+  min-width: 0;
+  align-items: center;
+}
+.settings-sound-row .settings-check input { margin-top: 0; }
+.settings-sound-select {
+  width: 168px;
+  flex: 0 0 168px;
+  height: 22px;
+  padding: 0 6px;
+  font-size: 12px;
+  line-height: 20px;
+}
+.settings-sound-select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 .settings-tips {
   margin-left: 18px;
   font-size: 12px;

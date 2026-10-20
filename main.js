@@ -429,6 +429,12 @@ const SYSTEM_SESSION_SUFFIXES = new Set([
 ]);
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
+const MESSAGE_SOUND_IDS = ['日历铃声.mp3', '明亮音调.mp3', '水滴音.mp3'];
+
+function normalizeMessageSoundId(value) {
+  const id = String(value || '').trim();
+  return MESSAGE_SOUND_IDS.includes(id) ? id : MESSAGE_SOUND_IDS[0];
+}
 
 // 单实例锁：避免用户多次点击 .app 启动多个进程
 if (process.env.QIZI_DEVTOOLS_PORT) {
@@ -1027,6 +1033,8 @@ function loadShellSettings() {
       token: typeof parsed.token === 'string' ? parsed.token.trim() : undefined,
       launchAtLogin: parsed.launchAtLogin === true,
       showMainOnLaunch: parsed.showMainOnLaunch !== false,
+      messageSoundEnabled: parsed.messageSoundEnabled === true,
+      messageSoundId: normalizeMessageSoundId(parsed.messageSoundId),
       debugMode: normalizeDebugMode(parsed.debugMode),
     };
   } catch {
@@ -1045,6 +1053,12 @@ function saveShellSettings(next) {
       : current.token,
     launchAtLogin: next.launchAtLogin == null ? current.launchAtLogin === true : next.launchAtLogin === true,
     showMainOnLaunch: next.showMainOnLaunch == null ? current.showMainOnLaunch !== false : next.showMainOnLaunch !== false,
+    messageSoundEnabled: next.messageSoundEnabled == null
+      ? current.messageSoundEnabled === true
+      : next.messageSoundEnabled === true,
+    messageSoundId: next.messageSoundId == null
+      ? normalizeMessageSoundId(current.messageSoundId)
+      : normalizeMessageSoundId(next.messageSoundId),
     debugMode: normalizeDebugMode(nextDebugMode),
   };
   if (!merged.wsUrl) delete merged.wsUrl;
@@ -1115,6 +1129,8 @@ function getSettingsSnapshot() {
     shellSettingsPath: SETTINGS_PATH,
     launchAtLogin: shell.launchAtLogin === true,
     showMainOnLaunch: shell.showMainOnLaunch !== false,
+    messageSoundEnabled: shell.messageSoundEnabled === true,
+    messageSoundId: normalizeMessageSoundId(shell.messageSoundId),
     debugMode: getRuntimeDebugMode(),
     debugModeSource: ENV_DEBUG_MODE ? 'env' : 'settings',
     envOverrides: Boolean(process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN),
@@ -4240,6 +4256,8 @@ ipcMain.handle('openclaw:settings:save', (event, payload) => {
       token,
       launchAtLogin: payload?.launchAtLogin === true,
       showMainOnLaunch: payload?.showMainOnLaunch !== false,
+      messageSoundEnabled: payload?.messageSoundEnabled === true,
+      messageSoundId: payload?.messageSoundId,
     });
     restartGatewayAfterSettings();
     return { ok: true, snapshot: getSettingsSnapshot() };

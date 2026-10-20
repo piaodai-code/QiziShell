@@ -335,6 +335,17 @@
             <input type="checkbox" id="settings-show-main-on-launch" checked>
             <span>启动时显示主窗口（关闭后仍保留在菜单栏）</span>
           </label>
+          <div class="settings-sound-row">
+            <label class="settings-check" for="settings-message-sound">
+              <input type="checkbox" id="settings-message-sound">
+              <span>打开新消息声音提醒</span>
+            </label>
+            <select class="settings-input settings-sound-select" id="settings-message-sound-id" disabled aria-label="新消息提示音">
+              <option value="日历铃声.mp3">日历铃声</option>
+              <option value="明亮音调.mp3">明亮音调</option>
+              <option value="水滴音.mp3">水滴音</option>
+            </select>
+          </div>
         </section>
         <section class="settings-section settings-section-muted">
           <h3 class="settings-section-title">说明</h3>
