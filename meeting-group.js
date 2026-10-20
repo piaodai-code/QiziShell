@@ -656,10 +656,12 @@ async function startMeetingGroupRelay(config, deps) {
   };
 
   let recordPath = null;
+  let recordError = '';
   try {
-    recordPath = saveRecord(record);
+    recordPath = await Promise.resolve(saveRecord(record));
   } catch (err) {
-    onEvent?.({ type: 'record_error', payload: { error: err.message || String(err) } });
+    recordError = err.message || String(err);
+    onEvent?.({ type: 'record_error', payload: { error: recordError } });
   }
 
   onEvent?.({
@@ -667,6 +669,7 @@ async function startMeetingGroupRelay(config, deps) {
     payload: {
       meetingId,
       recordPath,
+      recordError,
       sessionKey: moderatorSessionKey,
       messages: finalMessages,
       state: endedEarly ? 'DONE_EARLY_IDLE' : 'DONE',

@@ -10,7 +10,7 @@
 <body>
   <article class="help-doc" id="help-doc">
     <h1>启用 QiziShell 会议模式：OpenClaw 网关要准备什么</h1>
-    <p>这份说明给要在 OpenClaw 上启用会议模式、或排查「保存会议 / 开始会议失败」的人。全文可以直接粘贴给<strong>正在跑 Gateway 的那台机器</strong>上的 agent，让它按下面做配置或检查。已经可用时，只回报现状，不要重装，不要删除已有会议文件。</p>
+    <p>这份说明给要在 OpenClaw 上启用会议模式、或排查「保存会议 / 开始会议失败」的人。全文可以直接粘贴给<strong>正在跑 Gateway 的那台机器</strong>上的 agent，让它按下面做配置或检查。会议参数已经可用时，不要重装，不要删除已有会议文件。若 <code>qizi.meetingRecords.list</code> 还不存在，在现有插件上补「已开完的会议全文」那三个方法。</p>
 
     <h2>在哪台机器上做</h2>
     <p>插件和会议文件都放在<strong>正在运行 OpenClaw Gateway 的那台机器</strong>上。QiziShell 如果连的是远程网关，本机 Mac 的 <code>~/.openclaw</code> 只是客户端配置，不要在那里装这个插件，也不要改 QiziShell 仓库。</p>
@@ -25,7 +25,9 @@
       <li>存储目录 <code>&lt;状态目录&gt;/qizi/meeting-presets/</code> 存在，目录权限 <code>0700</code>，里面的 <code>.md</code> 是 <code>0600</code>。</li>
     </ol>
     <pre>openclaw gateway call qizi.meetings.list --params '{}'</pre>
-    <p>检查时不要删除目录里已有的会议文件。</p>
+    <p>检查时不要删除目录里已有的会议文件。参数存储可用之后，再执行：</p>
+    <pre>openclaw gateway call qizi.meetingRecords.list --params '{}'</pre>
+    <p>返回 <code>{"records":[...]}</code> 才算会议全文也能存。返回 unknown method 时，按「已开完的会议全文」在<strong>现有</strong> <code>qizi-meetings</code> 插件里补三个方法，然后重启网关。不要另装一个插件，不要动 <code>meeting-presets</code>。</p>
 
     <h2>还没有时要装的插件</h2>
     <p>不要改 OpenClaw 核心。用官方插件入口 <code>api.registerGatewayMethod</code> 增加 4 个 RPC。方法名必须用插件前缀 <code>qizi.meetings.*</code>。不要用 <code>config.*</code>、<code>exec.approvals.*</code>、<code>operator.admin.*</code>、<code>wizard.*</code>、<code>update.*</code>，那些会被收成 <code>operator.admin</code>。</p>
@@ -42,7 +44,7 @@
     "properties": {}
   }
 }</pre>
-    <p><code>package.json</code> 的运行入口按本机插件惯例写。常见写法是 <code>"openclaw": { "extensions": ["./index.js"] }</code>。入口导出默认函数，在里面注册下面 4 个方法。</p>
+    <p><code>package.json</code> 的运行入口按本机插件惯例写。常见写法是 <code>"openclaw": { "extensions": ["./index.js"] }</code>。入口导出默认函数，在里面注册下面 4 个会议参数方法，以及后文 3 个会议全文方法。</p>
     <p>不要用 <code>openKeyedStore</code>。第三方插件通常没有这个权限。用普通文件即可。日志里不要打出 Markdown 全文。</p>
 
     <h2>会议文件放在哪</h2>
@@ -64,6 +66,24 @@ api.registerGatewayMethod("qizi.meetings.delete", handler, { scope: "operator.wr
       <li><code>qizi.meetings.put</code> 参数 <code>{"id","markdown"}</code>。返回 <code>{"id","bytes"}</code>。<code>markdown</code> 必须是非空字符串，最长 256000 个字符。已存在则整篇覆盖。</li>
       <li><code>qizi.meetings.delete</code> 参数 <code>{"id"}</code>。返回 <code>{"id","deleted":true}</code>。文件本来就不存在时返回成功，<code>deleted</code> 为 <code>false</code>。</li>
     </ul>
+
+    <h2>已开完的会议全文</h2>
+    <p>这是另一份文件，不要写进 <code>meeting-presets</code>。一场已保存会议对应一篇参数；每场开完的会各有一份全文，同一议题会有很多份。</p>
+    <p>目录：<code>&lt;Gateway 状态目录&gt;/qizi/meeting-records/</code>。目录权限 <code>0700</code>，文件权限 <code>0600</code>。文件名 <code>&lt;id&gt;.json</code>。<code>id</code> 规则与上面相同。写入先写同目录临时文件，再改名替换。</p>
+    <p>服务端把 <code>record</code> 当作字符串原样落盘，不要解析后重新格式化，不要改字段，不要截断正文。日志里不要打出全文。</p>
+    <pre>api.registerGatewayMethod("qizi.meetingRecords.list", handler, { scope: "operator.read" });
+api.registerGatewayMethod("qizi.meetingRecords.get", handler, { scope: "operator.read" });
+api.registerGatewayMethod("qizi.meetingRecords.put", handler, { scope: "operator.write" });</pre>
+    <ul>
+      <li><code>qizi.meetingRecords.list</code> 参数 <code>{}</code>。返回 <code>{"records":[{"id","topic","state","startedAt","finishedAt","noRepeatPastTopics","finalSummary"}]}</code>，<code>finishedAt</code> 新的在前。只读这些字段。没有 <code>finishedAt</code> 时用文件修改时间的 ISO 字符串。某个文件不是 JSON 对象时，仍列出该 <code>id</code>，其他字段可空，不要让整个 list 失败。不要返回 <code>transcript</code>、<code>draft</code>、<code>briefingMessage</code>。</li>
+      <li><code>qizi.meetingRecords.get</code> 参数 <code>{"id":"..."}</code>。返回 <code>{"id","record"}</code>，<code>record</code> 是文件全文的字符串。文件不存在就失败。</li>
+      <li><code>qizi.meetingRecords.put</code> 参数 <code>{"id","record"}</code>。返回 <code>{"id","bytes"}</code>。<code>record</code> 必须是非空字符串，而且 <code>JSON.parse</code> 的结果是对象，最长 2000000 个字符。已存在则整篇覆盖。解析失败不要写文件。</li>
+    </ul>
+    <p>验收用下面这组，做完删掉 <code>qizi-record-smoke.json</code>。不要删已有记录。</p>
+    <pre>openclaw gateway call qizi.meetingRecords.put --params '{"id":"qizi-record-smoke","record":"{\"id\":\"qizi-record-smoke\",\"topic\":\"验收\",\"finishedAt\":\"2026-10-20T00:00:00.000Z\",\"finalSummary\":\"定为验收\"}"}'
+openclaw gateway call qizi.meetingRecords.list --params '{}'
+openclaw gateway call qizi.meetingRecords.get --params '{"id":"qizi-record-smoke"}'</pre>
+    <p>必须看到：磁盘上的文件与写入的字符串一致；list 里有这条且带 <code>topic</code> 和 <code>finalSummary</code>，没有 <code>transcript</code>；get 的 <code>record</code> 与写入一致。<code>id</code> 为 <code>../x</code> 时 put 失败，目录外没有新文件。</p>
 
     <h2>启用与重启</h2>
     <p>在网关所在机器、用跑 Gateway 的同一个系统用户执行：</p>
@@ -94,7 +114,7 @@ openclaw plugins enable qizi-meetings</pre>
       <li>不要给 Agent 加写文件或执行命令的工具。</li>
       <li>不要新开端口，不要加 HTTP 上传接口。</li>
       <li>不要为了通过检查去放开 <code>operator.admin</code>。如果这 4 个方法报 profile 校验失败，而同一个 token 调用 <code>chat.send</code> 这类 <code>operator.write</code> 方法是成功的，就把准入改成和那些已能用的写方法一致。不要改成未认证可写。</li>
-      <li>检查时不要删掉 <code>meeting-presets</code> 里已有的会议。</li>
+      <li>检查时不要删掉 <code>meeting-presets</code> 和 <code>meeting-records</code> 里已有的会议。</li>
     </ul>
 
     <h2>尚未安装时的验收</h2>

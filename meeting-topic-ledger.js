@@ -142,8 +142,13 @@ function priorTopicExcerpt(text) {
   return `${line.slice(0, 80)}…`;
 }
 
+function isWithinLedgerWindow(iso) {
+  return withinWindow(iso);
+}
+
 module.exports = {
   LEDGER_MS,
+  isWithinLedgerWindow,
   recordMeetingDecision,
   listPriorTopicSummaries,
   priorTopicExcerpt,

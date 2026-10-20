@@ -7,8 +7,14 @@ const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-poli
 const { buildExportWordHtml } = require('./export-html');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
 const { startMeetingGroupRelay } = require('./meeting-group');
-const { saveMeetingRecord, listMeetingRecords, loadMeetingRecordFile, loadMeetingRecordById } = require('./meeting-store');
-const { listPriorTopicSummaries, recordMeetingDecision, priorTopicExcerpt } = require('./meeting-topic-ledger');
+const { saveMeetingRecord } = require('./meeting-store');
+const { priorTopicExcerpt } = require('./meeting-topic-ledger');
+const {
+  listFinishedMeetings,
+  saveFinishedMeeting,
+  loadFinishedMeeting,
+  listPriorSummaries,
+} = require('./meeting-record-remote');
 const { isMeetingA2ASessionKey, isModeratorPostCloseStub } = require('./meeting-protocol');
 const {
   PRESET_ID_RE,
@@ -2694,7 +2700,7 @@ async function runMeetingBriefingFlow(config) {
   };
   if (config.noRepeatPastTopics) {
     try {
-      config.priorTopicSummaries = listPriorTopicSummaries(config.topic);
+      config.priorTopicSummaries = await listPriorSummaries(requestMeetingGateway, config.topic);
     } catch (err) {
       config.priorTopicSummaries = [];
       console.error('[qizi] prior topic ledger:', err?.message || err);
@@ -2753,14 +2759,10 @@ async function runMeetingBriefingFlow(config) {
         }
         broadcastMeetingEvent(event);
       },
-      saveRecord: (record) => {
-        const filePath = saveMeetingRecord(record);
-        try {
-          recordMeetingDecision(record);
-        } catch (err) {
-          console.error('[qizi] record topic ledger:', err?.message || err);
-        }
-        return filePath;
+      saveRecord: async (record) => {
+        const saved = await saveFinishedMeeting(requestMeetingGateway, record);
+        if (!saved.ok) throw new Error(saved.error || '保存会议记录失败');
+        return saved.id;
       },
       isCancelled: () => meetingBriefingCancelled,
     });
@@ -4355,6 +4357,11 @@ function normalizeMeetingPresetInput(raw) {
   };
 }
 
+async function requestMeetingGateway(method, params) {
+  const client = await withMeetingPresetClient();
+  return client.request(method, params);
+}
+
 async function withMeetingPresetClient() {
   const client = ensureGateway();
   await client.waitForConnect();
@@ -4519,15 +4526,19 @@ ipcMain.handle('qizi-meeting:status', (event) => {
   };
 });
 
-ipcMain.handle('qizi-meeting:list-records', (event) => {
-  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
-  return { ok: true, records: listMeetingRecords(10) };
-});
-
-ipcMain.handle('qizi-meeting:prior-topics', (event, topic) => {
+ipcMain.handle('qizi-meeting:list-records', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
-    const entries = listPriorTopicSummaries(topic).map((entry) => ({
+    return await listFinishedMeetings(requestMeetingGateway, 10);
+  } catch (err) {
+    return { ok: false, error: err.message || String(err), records: [] };
+  }
+});
+
+ipcMain.handle('qizi-meeting:prior-topics', async (event, topic) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  try {
+    const entries = (await listPriorSummaries(requestMeetingGateway, topic)).map((entry) => ({
       meetingId: entry.meetingId,
       finishedAt: entry.finishedAt,
       excerpt: priorTopicExcerpt(entry.finalSummary),
@@ -4538,14 +4549,10 @@ ipcMain.handle('qizi-meeting:prior-topics', (event, topic) => {
   }
 });
 
-ipcMain.handle('qizi-meeting:load-record', (event, payload) => {
+ipcMain.handle('qizi-meeting:load-record', async (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
-    const file = payload?.file;
-    const id = payload?.id;
-    const record = file
-      ? loadMeetingRecordFile(file)
-      : loadMeetingRecordById(id);
+    const record = await loadFinishedMeeting(requestMeetingGateway, payload || {});
     return { ok: true, record };
   } catch (err) {
     return { ok: false, error: err.message || String(err) };

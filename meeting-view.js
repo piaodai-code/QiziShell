@@ -28,6 +28,7 @@
   if (!messagesEl) return;
 
   let running = false;
+  let unfinishedRecordError = '';
   let hubVisible = false;
   let viewingLive = false;
   /** @type {Array<object>} */
@@ -870,7 +871,10 @@
       viewingLive = false;
       updateComposerChrome();
       liveMeetingId = event.payload?.meetingId || liveMeetingId;
-      if (event.payload?.endedEarly || event.payload?.state === 'DONE_EARLY_IDLE') {
+      unfinishedRecordError = event.payload?.recordError || '';
+      if (unfinishedRecordError) {
+        setStatus(`会议已结束 · 全文未写入服务器：${unfinishedRecordError}`);
+      } else if (event.payload?.endedEarly || event.payload?.state === 'DONE_EARLY_IDLE') {
         const reason = event.payload?.endReason || '长时间无反馈';
         setStatus(`会议已提前结束 · ${reason}`);
       } else {
@@ -880,11 +884,12 @@
     }
     if (event.type === 'post_meeting_forward' && event.payload) {
       const { ok, label, error, deduped, agentId, sessionKey } = event.payload;
+      const saveNote = unfinishedRecordError ? ` · 全文未写入服务器：${unfinishedRecordError}` : '';
       if (ok) {
         const suffix = deduped ? '（此前已转发）' : '';
-        setStatus(`会议已结束 · 已将结论转发至 ${label || agentId || 'Agent'}${suffix}`);
+        setStatus(`会议已结束 · 已将结论转发至 ${label || agentId || 'Agent'}${suffix}${saveNote}`);
       } else {
-        setStatus(`会议已结束 · 结论转发失败：${error || '未知错误'}`);
+        setStatus(`会议已结束 · 结论转发失败：${error || '未知错误'}${saveNote}`);
       }
       if (sessionKey) {
         window.dispatchEvent(new CustomEvent('qizi-meeting-exec-forward', {
