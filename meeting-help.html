@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none';">
+  <title>会议模式配置</title>
+  <link rel="stylesheet" href="meeting-help.css">
+</head>
+<body>
+  <article class="help-doc" id="help-doc">
+    <h1>启用 QiziShell 会议模式：OpenClaw 网关要准备什么</h1>
+    <p>这份说明给要在 OpenClaw 上启用会议模式、或排查「保存会议 / 开始会议失败」的人。全文可以直接粘贴给<strong>正在跑 Gateway 的那台机器</strong>上的 agent，让它按下面做配置或检查。已经可用时，只回报现状，不要重装，不要删除已有会议文件。</p>
+
+    <h2>在哪台机器上做</h2>
+    <p>插件和会议文件都放在<strong>正在运行 OpenClaw Gateway 的那台机器</strong>上。QiziShell 如果连的是远程网关，本机 Mac 的 <code>~/.openclaw</code> 只是客户端配置，不要在那里装这个插件，也不要改 QiziShell 仓库。</p>
+    <p>先确认自己就在网关机器上，并且用的是跑 Gateway 的同一个系统用户。状态目录：有环境变量 <code>OPENCLAW_STATE_DIR</code> 就用它，否则是该用户的 <code>~/.openclaw</code>。能用插件 API 的 <code>resolveStateDir()</code> 就用它，不要写死某一台 Mac 的路径。</p>
+
+    <h2>先检查是否已经可用</h2>
+    <p>按这个顺序看。四步都通过，就不用再装：</p>
+    <ol>
+      <li><code>openclaw plugins list</code> 里 <code>qizi-meetings</code> 已启用。</li>
+      <li>网关启动日志里有 <code>qizi-meetings</code>（类似 <code>http server listening (... qizi-meetings ...)</code>）。只显示 enabled、但调用报 <code>unknown method</code>，通常是清单里少了 <code>activation.onStartup</code>，或装完后没有重启网关。</li>
+      <li>用现有操作员身份调用 <code>qizi.meetings.list</code>，返回 <code>{"meetings":[...]}</code>。不需要 <code>operator.admin</code>。</li>
+      <li>存储目录 <code>&lt;状态目录&gt;/qizi/meeting-presets/</code> 存在，目录权限 <code>0700</code>，里面的 <code>.md</code> 是 <code>0600</code>。</li>
+    </ol>
+    <pre>openclaw gateway call qizi.meetings.list --params '{}'</pre>
+    <p>检查时不要删除目录里已有的会议文件。</p>
+
+    <h2>还没有时要装的插件</h2>
+    <p>不要改 OpenClaw 核心。用官方插件入口 <code>api.registerGatewayMethod</code> 增加 4 个 RPC。方法名必须用插件前缀 <code>qizi.meetings.*</code>。不要用 <code>config.*</code>、<code>exec.approvals.*</code>、<code>operator.admin.*</code>、<code>wizard.*</code>、<code>update.*</code>，那些会被收成 <code>operator.admin</code>。</p>
+    <p>插件 id：<code>qizi-meetings</code>。目录自己定，例如网关用户家目录下的 <code>qizi-meetings-plugin/</code>。先看这台机器上的 OpenClaw 版本和现有插件怎么写入口。版本和下面示例不一致时，以本机文档为准，但方法名、参数、返回字段不要改。</p>
+    <p><code>openclaw.plugin.json</code> 必须带 <code>activation.onStartup: true</code>。没有这一项时，插件可以显示为已启用，方法却永远不会被网关加载。</p>
+    <pre>{
+  "id": "qizi-meetings",
+  "name": "Qizi meeting presets",
+  "description": "Store QiziShell meeting presets as markdown",
+  "activation": { "onStartup": true },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}</pre>
+    <p><code>package.json</code> 的运行入口按本机插件惯例写。常见写法是 <code>"openclaw": { "extensions": ["./index.js"] }</code>。入口导出默认函数，在里面注册下面 4 个方法。</p>
+    <p>不要用 <code>openKeyedStore</code>。第三方插件通常没有这个权限。用普通文件即可。日志里不要打出 Markdown 全文。</p>
+
+    <h2>会议文件放在哪</h2>
+    <p>目录：<code>&lt;Gateway 状态目录&gt;/qizi/meeting-presets/</code></p>
+    <p>目录权限 <code>0700</code>，文件权限 <code>0600</code>。每个会议一个文件：<code>&lt;id&gt;.md</code>。写入先写同目录临时文件，再改名替换，避免写一半。</p>
+    <p><code>id</code> 只允许 <code>^[a-z0-9][a-z0-9-]{0,80}$</code>。拒绝空字符串、<code>..</code>、绝对路径、斜杠和其他字符。QiziShell 保存时用的 id 是 <code>m</code> 加上议题 UTF-8 的 SHA-256 十六进制前 32 位，不要改成议题原文当文件名。</p>
+    <p>服务端只原样保存 Markdown，不要解析或改写正文，不要补 front matter，不要改换行，不要格式化。</p>
+
+    <h2>四个方法</h2>
+    <p><code>list</code> 和 <code>get</code> 用 <code>operator.read</code>；<code>put</code> 和 <code>delete</code> 用 <code>operator.write</code>。不要要求 <code>operator.admin</code>。QiziShell 连接时已经申请这两个 scope。</p>
+    <pre>api.registerGatewayMethod("qizi.meetings.list", handler, { scope: "operator.read" });
+api.registerGatewayMethod("qizi.meetings.get", handler, { scope: "operator.read" });
+api.registerGatewayMethod("qizi.meetings.put", handler, { scope: "operator.write" });
+api.registerGatewayMethod("qizi.meetings.delete", handler, { scope: "operator.write" });</pre>
+    <p>成功时 <code>respond(true, payload)</code>。失败时按本机其他插件的写法 <code>respond(false, undefined, error)</code>，错误里要有人能看懂的 <code>message</code>。</p>
+    <ul>
+      <li><code>qizi.meetings.list</code> 参数 <code>{}</code>。返回 <code>{"meetings":[{"id","topic","savedAt"}]}</code>，<code>savedAt</code> 新的在前。只读每个文件开头的 front matter。没有 <code>topic</code> 时用 <code>id</code>。没有 <code>savedAt</code> 时用文件修改时间的 ISO 字符串。front matter 坏了也要列出该文件，不要让整个 list 失败。不要返回正文。</li>
+      <li><code>qizi.meetings.get</code> 参数 <code>{"id":"..."}</code>。返回 <code>{"id","markdown"}</code>，<code>markdown</code> 是文件全文。文件不存在就失败，不要返回空字符串冒充成功。</li>
+      <li><code>qizi.meetings.put</code> 参数 <code>{"id","markdown"}</code>。返回 <code>{"id","bytes"}</code>。<code>markdown</code> 必须是非空字符串，最长 256000 个字符。已存在则整篇覆盖。</li>
+      <li><code>qizi.meetings.delete</code> 参数 <code>{"id"}</code>。返回 <code>{"id","deleted":true}</code>。文件本来就不存在时返回成功，<code>deleted</code> 为 <code>false</code>。</li>
+    </ul>
+
+    <h2>启用与重启</h2>
+    <p>在网关所在机器、用跑 Gateway 的同一个系统用户执行：</p>
+    <pre>openclaw plugins install --link &lt;插件目录&gt;
+openclaw plugins enable qizi-meetings</pre>
+    <p>本地未受信任的插件如果安装命令要求确认，加上该版本要求的 <code>--force</code>。配置里如果有 <code>plugins.allow</code>，把 <code>qizi-meetings</code> 加进去，并且不要留在 <code>plugins.deny</code> 里。</p>
+    <p>允许改的配置只有这三处：<code>plugins.entries.qizi-meetings.enabled</code>、<code>plugins.load.paths</code>、<code>plugins.allow</code>。改之前先备份 <code>openclaw.json</code>。</p>
+    <p>热加载和 <code>plugins reload</code> 不会把新方法挂进正在跑的网关。装完后按这台机器现有的方式重启 Gateway（launchd、systemd 或现有进程），不要另起一个网关。重启后日志里应能看到 <code>qizi-meetings</code>。</p>
+
+    <h2>一篇会议文件里必须有的内容</h2>
+    <p>QiziShell 点「保存会议」时会自己写成下面的形状：文首是参数，后面是七节会议要求。开始会议时会按议题读回这七节。某一节被删掉、删到只剩标题，或整篇读失败，开会会直接报错，不会退回程序里写死的规则。所以这七个标题必须原样保留，而且标题下面要有正文：</p>
+    <ul>
+      <li><code>## 篇幅与收尾</code></li>
+      <li><code>## 主持启动任务书</code></li>
+      <li><code>## 主持过程中的要求</code></li>
+      <li><code>## 当轮总结</code></li>
+      <li><code>## 最终总结</code></li>
+      <li><code>## 议事发言要求</code></li>
+      <li><code>## 往期主题</code></li>
+    </ul>
+    <p>文首字段是：<code>topic</code>、<code>goal</code>、<code>moderatorAgentId</code>、<code>moderatorLabel</code>、<code>participantAgentIds</code>、<code>postMeetingExecAgentId</code>、<code>roundCount</code>（1、2 或 3）、<code>noRepeatPastTopics</code>、<code>savedAt</code>。讨论底稿不在文件里，每次开会时另填。</p>
+    <p>还没保存过的议题不能直接开始。客户端会提示先保存再开始。</p>
+
+    <h2>不要做的事</h2>
+    <ul>
+      <li>不要改 Agent 工作区，不要写 <code>AGENTS.md</code>、<code>SOUL.md</code> 或其他引导文件。</li>
+      <li>不要改 <code>openclaw.json</code> 里的模型、渠道、token。</li>
+      <li>不要给 Agent 加写文件或执行命令的工具。</li>
+      <li>不要新开端口，不要加 HTTP 上传接口。</li>
+      <li>不要为了通过检查去放开 <code>operator.admin</code>。如果这 4 个方法报 profile 校验失败，而同一个 token 调用 <code>chat.send</code> 这类 <code>operator.write</code> 方法是成功的，就把准入改成和那些已能用的写方法一致。不要改成未认证可写。</li>
+      <li>检查时不要删掉 <code>meeting-presets</code> 里已有的会议。</li>
+    </ul>
+
+    <h2>尚未安装时的验收</h2>
+    <p>只有方法还不存在、需要新装时才做。做完删掉验收文件。已有会议不要动。</p>
+    <pre>openclaw gateway call qizi.meetings.put --params '{"id":"qizi-smoke","markdown":"---\ntopic: 验收\nsavedAt: 2026-10-20T00:00:00.000Z\n---\n\n# 验收\n"}'
+openclaw gateway call qizi.meetings.list --params '{}'
+openclaw gateway call qizi.meetings.get --params '{"id":"qizi-smoke"}'
+openclaw gateway call qizi.meetings.delete --params '{"id":"qizi-smoke"}'
+openclaw gateway call qizi.meetings.list --params '{}'</pre>
+    <p>必须看到：put 后磁盘上出现 <code>qizi-smoke.md</code> 且内容一致；list 里有 <code>id=qizi-smoke</code>、<code>topic=验收</code>；get 的全文与写入一致；delete 后再 list 没有这条。<code>id</code> 为 <code>../x</code>、<code>/tmp/x</code>、空字符串时 put 失败，并且目录外没有新文件。不带 <code>operator.admin</code> 的现有操作员也能成功。</p>
+
+    <h2>做完后回报</h2>
+    <ul>
+      <li>是检查已有安装，还是新装了一份。</li>
+      <li>插件目录和 Gateway 状态目录的实际路径。</li>
+      <li>OpenClaw 版本。</li>
+      <li>4 个方法是否已加载；若重启过网关，写明重启方式。</li>
+      <li><code>qizi.meetings.list</code> 的结果（有几份会议即可，不要贴出 Markdown 全文）。</li>
+      <li>方法名或字段如果和上面不一致，写明差异。</li>
+    </ul>
+  </article>
+  <footer class="help-copy">
+    <p class="help-copy-status" id="help-copy-status" aria-live="polite"></p>
+    <button type="button" class="help-copy-btn" id="help-copy-btn" title="复制全文" aria-label="复制全文">
+      <img src="assets/icons/meeting-help-copy.png" width="48" height="48" alt="">
+    </button>
+  </footer>
+  <script src="meeting-help.js"></script>
+</body>
+</html>

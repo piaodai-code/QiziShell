@@ -66,6 +66,9 @@ async function startMeetingGroupRelay(config, deps) {
   } = deps;
 
   validateRelayConfig(config);
+  if (!config.meetingRequirements) {
+    throw new Error('未读取到会议要求，请先保存会议');
+  }
   onEvent?.({ type: 'preparing', payload: {} });
 
   const roundCount = normalizeRoundCount(config.roundCount);
@@ -105,6 +108,7 @@ async function startMeetingGroupRelay(config, deps) {
     participants: roster,
     noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
     priorTopicSummaries,
+    requirements: config.meetingRequirements,
   });
 
   onEvent?.({
@@ -332,6 +336,7 @@ async function startMeetingGroupRelay(config, deps) {
           softChars: speechMode.softChars,
           hardChars: speechMode.hardChars,
           noRepeatPastTopics: noRepeatActive,
+          requirements: config.meetingRequirements,
           ...extraPromptArgs,
         }),
         {
@@ -445,6 +450,7 @@ async function startMeetingGroupRelay(config, deps) {
         groupSessionKey: participantSessionKey,
         noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
         priorTopicSummaries: noRepeatActive ? priorTopicSummaries : [],
+        requirements: config.meetingRequirements,
       });
 
       let replyText = '';

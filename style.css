@@ -3043,6 +3043,28 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
 .meeting-delete-preset-btn:hover {
   background: #ffebee;
 }
+.meeting-help-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 10px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  cursor: pointer;
+}
+.meeting-help-btn img {
+  width: 22px;
+  height: 22px;
+  display: block;
+  object-fit: contain;
+}
+.meeting-help-btn:hover {
+  background: #f3f0ff;
+}
 .meeting-topic-row {
   position: relative;
   display: flex;

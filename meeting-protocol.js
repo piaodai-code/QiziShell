@@ -352,6 +352,22 @@ function parseMeetingMentions(text, roster, moderatorAgentId) {
   return results;
 }
 
+function meetingRequirementText(requirements, title) {
+  if (!requirements) return '';
+  const text = String(requirements[title] || '').trim();
+  if (!text) throw new Error(`会议要求缺少：${title}`);
+  return text;
+}
+
+function moderatorRequirementBlock(requirements, speechKind, noRepeatPastTopics) {
+  if (!requirements) return '';
+  const titles = ['主持过程中的要求'];
+  if (speechKind === 'round_summary') titles.push('当轮总结');
+  if (speechKind === 'final_summary') titles.push('最终总结');
+  if (noRepeatPastTopics) titles.push('往期主题');
+  return titles.map((title) => meetingRequirementText(requirements, title)).join('\n\n');
+}
+
 function buildParticipantGroupPrompt({
   topic,
   draft,
@@ -364,20 +380,29 @@ function buildParticipantGroupPrompt({
   priorTopicSummaries = [],
   softChars = MEETING_PARTICIPANT_SOFT_CHARS,
   hardChars = MEETING_PARTICIPANT_HARD_CHARS,
+  requirements = null,
 }) {
   const priorBlock = buildPriorTopicsSection(priorTopicSummaries, { emptyNote: false });
+  const fileRules = requirements
+    ? [
+      meetingRequirementText(requirements, '议事发言要求'),
+      noRepeatPastTopics ? meetingRequirementText(requirements, '往期主题') : '',
+    ].filter(Boolean).join('\n\n')
+    : '';
   return [
     '【QiziShell 会议 · 你的发言轮次】',
     '',
-    '你正在一场 **会议群聊** 中发言（由 QiziShell 展示给老大）。硬约束：',
-    '- 只回答本次议题要决定的那一件事。判断理由可以带上，但不要展开议题没要求的工序（写稿、剪辑、配音、发布、排期）；',
-    meetingSpeechGuidance(softChars, hardChars),
-    '- 你的回复会出现在 **会议群聊界面**，不要尝试 sessions_send 或私聊其他 Agent；',
-    '- **不要**在发言末尾 @ 下一位 Agent——由主持 Agent 统一派发，你只需完成自己的论述；',
-    '- 只发表一次性完整意见，不要代笔其他 Agent；',
-    '- 不要输出 JSON，用自然语言直接发言。',
-    `- 会议参数 · 不可与往日主题重复：${noRepeatPastTopics ? 'true' : 'false'}`,
-    priorBlock ? '- 不得再选下方「往期主题」里已经定过的主题；换标题、换角度、换说法仍算同一主题。拿不准时当成不重复，照常说出你的选择。' : '',
+    fileRules || [
+      '你正在一场 **会议群聊** 中发言（由 QiziShell 展示给老大）。硬约束：',
+      '- 只回答本次议题要决定的那一件事。判断理由可以带上，但不要展开议题没要求的工序（写稿、剪辑、配音、发布、排期）；',
+      meetingSpeechGuidance(softChars, hardChars),
+      '- 你的回复会出现在 **会议群聊界面**，不要尝试 sessions_send 或私聊其他 Agent；',
+      '- **不要**在发言末尾 @ 下一位 Agent——由主持 Agent 统一派发，你只需完成自己的论述；',
+      '- 只发表一次性完整意见，不要代笔其他 Agent；',
+      '- 不要输出 JSON，用自然语言直接发言。',
+      `- 会议参数 · 不可与往日主题重复：${noRepeatPastTopics ? 'true' : 'false'}`,
+      priorBlock ? '- 不得再选下方「往期主题」里已经定过的主题；换标题、换角度、换说法仍算同一主题。拿不准时当成不重复，照常说出你的选择。' : '',
+    ].filter(Boolean).join('\n'),
     '',
     `本次会议隔离 session：\`${groupSessionKey}\`（不是你的 main 私聊）`,
     `你的 agentId：\`${agentId}\`（${agentLabel}）`,
@@ -546,6 +571,72 @@ function markModeratorMessageMentionsProcessed(messageIndex, text, roster, moder
   }
 }
 
+function buildMeetingRequirementSections() {
+  return [
+    '## 篇幅与收尾',
+    `- 议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字，硬上限 ${MEETING_PARTICIPANT_HARD_CHARS}`,
+    `- 主持派发建议 ${MEETING_MODERATOR_SOFT_CHARS} 字，硬上限 ${MEETING_MODERATOR_HARD_CHARS}`,
+    `- 当轮总结建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字，硬上限 ${MEETING_MODERATOR_SUMMARY_HARD_CHARS}`,
+    `- 最终总结建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字，不截断`,
+    `- 散会：${meetingAdjournInstruction()}`,
+    '- 轮次以本文开头的 roundCount 为准（1、2 或 3）。',
+    '',
+    '## 主持启动任务书',
+    '你现在是本次会议 **主持 Agent**。硬约束：',
+    '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
+    '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
+    `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**（仅结论）建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；`,
+    '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧），**禁止**派活、复述研讨过程、逐人回顾、发散新问题；',
+    '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的**结论型**轮次总结；',
+    '- **N 轮制**：每轮 @ 各议事 Agent 各发言一次 → 当轮总结；全部轮次结束后作最终总结，收尾 **勿 @ 任何人**。',
+    '- **派发语法（硬约束）**：只认 @agentId，例如 @mo_bao；**@墨宝 等中文名不会被 relay**；一次只 @ 一人；',
+    '- **纠正派发错误时**：正文里**不要**写 @agentId（用纯文字 agentId 即可），否则仍会 relay；',
+    '- **禁止**调用 sessions_send / sessions_spawn，**禁止**向任何 Agent 的 main 私聊发消息；只需在发言里 @；',
+    '- **派发范围（硬约束）**：每次 @ 只问本次议题要拍板的那一件事。不要按 IDENTITY.md 的岗位出题，不要问写稿、剪辑、配音、收料时长、出片时间、发布验收。',
+    '- **禁止派活**：最终总结只写决定了什么。不要安排写稿、剪辑、配音、发布、排期。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
+    '',
+    '## 主持过程中的要求',
+    '继续主持、空闲提醒、没有识别到 @、强制收尾时都遵守：',
+    '- **每条发言只 @ 一位** agentId；纠正派发时**不要**写 @（写纯文字 agentId 即可）；',
+    '- 驳回往期主题时，`@agentId` 和「往期主题重复」必须在同一行，才会转发重选；',
+    '- **派发范围**：只问本次议题要拍板的那一件事，不要按岗位追问写稿、剪辑、配音、收料时长或出片时间；',
+    '- 本轮所有人已发言：按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；',
+    '- 全部轮次结束后作 **最终总结**（只写结论和分歧，不要派活），然后写散会口令；**勿 @ 任何人**；',
+    '- 空闲时必须在正文里写 @agentId（如 @mo_bao）才会触发 relay；',
+    '- 连续空闲仍无新发言则强制最终总结，正文写明提前结束原因，**不要 @ 任何人**；',
+    '- 上一条没有可识别的 @ 时，按建议补上 @agentId，不要就此结束。',
+    '',
+    '## 当轮总结',
+    moderatorSummaryRules({ final: false }),
+    meetingSummaryGuidance(
+      MEETING_MODERATOR_SUMMARY_SOFT_CHARS,
+      MEETING_MODERATOR_SUMMARY_HARD_CHARS,
+      { final: false },
+    ),
+    '',
+    '## 最终总结',
+    moderatorSummaryRules({ final: true }),
+    meetingSummaryGuidance(
+      MEETING_MODERATOR_FINAL_SOFT_CHARS,
+      MEETING_MODERATOR_FINAL_HARD_CHARS,
+      { final: true },
+    ),
+    '',
+    '## 议事发言要求',
+    '你正在一场 **会议群聊** 中发言。硬约束：',
+    '- 只回答本次议题要决定的那一件事。判断理由可以带上，但不要展开议题没要求的工序（写稿、剪辑、配音、发布、排期）；',
+    meetingSpeechGuidance(MEETING_PARTICIPANT_SOFT_CHARS, MEETING_PARTICIPANT_HARD_CHARS),
+    '- 回复出现在 **会议群聊界面**，不要尝试 sessions_send 或私聊其他 Agent；',
+    '- **不要**在发言末尾 @ 下一位 Agent——由主持 Agent 统一派发；',
+    '- 只发表一次性完整意见，不要代笔其他 Agent；',
+    '- 不要输出 JSON，用自然语言直接发言。',
+    '- 若开头「不可与往日主题重复」为 true：不得再选往期主题里已经定过的主题；换标题、换角度、换说法仍算同一主题。拿不准时当成不重复。',
+    '',
+    '## 往期主题',
+    moderatorNoRepeatRules(),
+  ].join('\n');
+}
+
 function moderatorNoRepeatRules() {
   return [
     '- **往期主题**：议事 Agent 的选择若与「往期主题」原文是同一件事（换标题、换角度、换说法仍算），当场驳回，不要写入共识、下轮焦点或最终结论；',
@@ -583,6 +674,7 @@ function buildModeratorContinuePrompt({
   softChars = MEETING_MODERATOR_SOFT_CHARS,
   hardChars = MEETING_MODERATOR_HARD_CHARS,
   noRepeatPastTopics = false,
+  requirements = null,
 } = {}) {
   const remaining = resolveRoundDispatchState(messages, roster, roundCount).remaining;
   const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
@@ -597,6 +689,7 @@ function buildModeratorContinuePrompt({
         ? '- 若上一位的选择与往期主题是同一件事，先不要总结；单独一行 @ 该 agent 并写「往期主题重复」，要求重选。否则按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；'
         : '- 本轮所有人已发言完毕：请按 **当轮总结格式（仅结论）** 收束，**然后** @ 名单第一位开始下一轮；总结正文里不要 @；')
       : '- 若本轮按名单尚未派完，请 @ **下一位** 议事 Agent（**必须**用 agentId，如 @nai_pang；@墨宝 无效）；');
+  const fileRules = moderatorRequirementBlock(requirements, speechKind, noRepeatPastTopics);
   return [
     '[系统 · QiziShell]',
     lastLabel
@@ -604,16 +697,16 @@ function buildModeratorContinuePrompt({
       : '上一位议事 Agent 已在群聊中发言完毕。',
     '（以上依据当前群聊记录最后一条议事 Agent 发言判定。）',
     '请继续主持会议。硬约束：',
-    moderatorSpeechGuidance(speechKind, softChars, hardChars),
-    noRepeatPastTopics
+    fileRules || moderatorSpeechGuidance(speechKind, softChars, hardChars),
+    fileRules ? '' : (noRepeatPastTopics
       ? '- **每条发言只 @ 一位** agentId；驳回往期主题时，`@agentId` 和「往期主题重复」必须在同一行，才会转发重选；'
-      : '- **每条发言只 @ 一位** agentId；QiziShell 会对每个 @agentId 自动 relay——纠正派发时**不要**写 @（写 nai_pang 等纯文字即可）；',
-    '- **派发范围**：只问本次议题要拍板的那一件事，不要按岗位追问写稿、剪辑、配音、收料时长或出片时间；',
+      : '- **每条发言只 @ 一位** agentId；QiziShell 会对每个 @agentId 自动 relay——纠正派发时**不要**写 @（写 nai_pang 等纯文字即可）；'),
+    fileRules ? '' : '- **派发范围**：只问本次议题要拍板的那一件事，不要按岗位追问写稿、剪辑、配音、收料时长或出片时间；',
     summaryHint,
     speechKind === 'dispatch'
       ? '- 若本轮所有人已各发言一次，请作 **当轮总结（仅结论，见格式块）**，然后 @ 名单第一位开始下一轮反馈；'
       : '',
-    noRepeatPastTopics ? moderatorNoRepeatRules() : '',
+    !fileRules && noRepeatPastTopics ? moderatorNoRepeatRules() : '',
     `- 共 ${rounds} 轮；结束后最终总结，${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
     '一次只 @ 一位 Agent。',
     dispatchHint ? `\n${dispatchHint}` : '',
@@ -639,6 +732,7 @@ function buildModeratorIdleWatchdogPrompt({
   maxStrikes = 3,
   idleMs = 0,
   noRepeatPastTopics = false,
+  requirements = null,
 } = {}) {
   const spoken = new Set(spokenAgentIds);
   const remaining = (roster || []).filter((entry) => !spoken.has(entry.agentId));
@@ -646,6 +740,7 @@ function buildModeratorIdleWatchdogPrompt({
   const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
   const rounds = normalizeRoundCount(roundCount);
   const idleMin = Math.max(1, Math.round(idleMs / 60_000));
+  const fileRules = moderatorRequirementBlock(requirements, speechKind, noRepeatPastTopics);
   const actionHint = speechKind === 'final_summary'
     ? `作 **最终总结**，${meetingAdjournInstruction()}；**勿 @ 任何人**。`
     : (speechKind === 'round_summary'
@@ -661,16 +756,16 @@ function buildModeratorIdleWatchdogPrompt({
     '[系统 · QiziShell]',
     `⚠️ 已约 ${idleMin} 分钟无任何议事 Agent 新发言（空闲提醒 ${strike}/${maxStrikes}）。`,
     '会议仍在进行：请主动推进——**必须**在正文里写 @agentId（如 @mo_bao）才会触发 relay。',
-    moderatorSpeechGuidance(speechKind, softChars, hardChars),
+    fileRules || moderatorSpeechGuidance(speechKind, softChars, hardChars),
     actionHint,
     strike >= maxStrikes
       ? '若仍无法推进，下一条系统消息将要求你强制最终总结并结束会议。'
       : '',
-    noRepeatPastTopics ? moderatorNoRepeatRules() : '',
+    !fileRules && noRepeatPastTopics ? moderatorNoRepeatRules() : '',
     `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
-    noRepeatPastTopics
+    fileRules ? '' : (noRepeatPastTopics
       ? '一次只 @ 一位 Agent。驳回往期主题时，@ 必须和「往期主题重复」写在同一行。'
-      : '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
+      : '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。'),
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
     '## 当前群聊记录',
@@ -689,21 +784,23 @@ function buildModeratorForceFinalSummaryPrompt({
   idleMs = 0,
   endReason = '长时间无议事 Agent 反馈',
   noRepeatPastTopics = false,
+  requirements = null,
 } = {}) {
   const idleMin = Math.max(1, Math.round(idleMs / 60_000));
   const rounds = normalizeRoundCount(roundCount);
   const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
+  const fileRules = moderatorRequirementBlock(requirements, 'final_summary', noRepeatPastTopics);
   return [
     '[系统 · QiziShell]',
     `⚠️ 已连续提醒仍无议事 Agent 新发言（约 ${idleMin} 分钟），**必须立即强制收尾**。`,
     `提前结束原因（须写入总结正文）：${endReason}`,
     '硬约束：',
-    moderatorSpeechGuidance('final_summary', softChars, hardChars),
-    '- 按 **最终总结格式（仅结论与分歧，不要派活）** 输出；',
+    fileRules || moderatorSpeechGuidance('final_summary', softChars, hardChars),
+    fileRules ? '' : '- 按 **最终总结格式（仅结论与分歧，不要派活）** 输出；',
     '- 总结中**明确写出**上述提前结束原因；',
     `- ${meetingAdjournInstruction()}；`,
-    '- **不要 @ 任何人**。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
-    noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
+    fileRules ? '' : '- **不要 @ 任何人**。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
+    !fileRules && noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
     `- 共 ${rounds} 轮制；当前为强制提前结束，不必再等待未发言者。`,
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
@@ -722,12 +819,14 @@ function buildModeratorIdlePrompt({
   softChars = MEETING_MODERATOR_SOFT_CHARS,
   hardChars = MEETING_MODERATOR_HARD_CHARS,
   noRepeatPastTopics = false,
+  requirements = null,
 } = {}) {
   const spoken = new Set(spokenAgentIds);
   const remaining = (roster || []).filter((entry) => !spoken.has(entry.agentId));
   const dispatchHint = buildModeratorDispatchHint(roster, messages, { noRepeatPastTopics });
   const next = getSuggestedNextParticipant(roster, getLastParticipantAgentId(messages));
   const rounds = normalizeRoundCount(roundCount);
+  const fileRules = moderatorRequirementBlock(requirements, speechKind, noRepeatPastTopics);
   if (speechKind === 'final_summary') {
     return [
       '[系统 · QiziShell]',
@@ -735,8 +834,8 @@ function buildModeratorIdlePrompt({
       '**本阶段不再向议事 Agent relay**。只写结论与分歧，不要派活，**勿写 @**。',
       `若已发过最终总结，**只**回复一行 \`${MEETING_ADJOURN_KEYWORD}\`。`,
       `若尚未总结，作 **最终总结** 并 ${meetingAdjournInstruction()}；**勿 @ 任何人**。`,
-      moderatorSpeechGuidance('final_summary', softChars, hardChars),
-      noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
+      fileRules || moderatorSpeechGuidance('final_summary', softChars, hardChars),
+      !fileRules && noRepeatPastTopics ? '- 最终结论不得把往期主题再定为决定；拿不准时不要写进结论。' : '',
       `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
       '',
       '## 当前群聊记录',
@@ -755,13 +854,13 @@ function buildModeratorIdlePrompt({
   return [
     '[系统 · QiziShell]',
     '你的上一条发言里没有可被 relay 识别的 @（**必须**写 @agentId，例如 @mo_bao）。',
-    moderatorSpeechGuidance(speechKind, softChars, hardChars),
+    fileRules || moderatorSpeechGuidance(speechKind, softChars, hardChars),
     actionHint,
     `共 ${rounds} 轮；结束后 ${meetingAdjournInstruction()}，勿 @ 任何人。`,
-    noRepeatPastTopics
+    fileRules ? '' : (noRepeatPastTopics
       ? '一次只 @ 一位 Agent。驳回往期主题时，@ 必须和「往期主题重复」写在同一行。'
-      : '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。',
-    noRepeatPastTopics ? moderatorNoRepeatRules() : '',
+      : '一次只 @ 一位 Agent；纠正错误时正文里不要写 @。'),
+    !fileRules && noRepeatPastTopics ? moderatorNoRepeatRules() : '',
     dispatchHint ? `\n${dispatchHint}` : '',
     '',
     '## 当前群聊记录',
@@ -1010,6 +1109,7 @@ function buildModeratorBriefingMessage({
   roundCount = 2,
   noRepeatPastTopics = false,
   priorTopicSummaries = [],
+  requirements = null,
 }) {
   const rounds = normalizeRoundCount(roundCount);
   const roundWord = roundCountLabel(rounds);
@@ -1018,22 +1118,32 @@ function buildModeratorBriefingMessage({
     const label = p.label || id;
     return `- ${label} → 派发时写 **@${id}**（不要写 @${label}）`;
   }).join('\n');
+  const fileRules = requirements
+    ? [
+      meetingRequirementText(requirements, '主持启动任务书'),
+      '',
+      meetingRequirementText(requirements, '篇幅与收尾'),
+      noRepeatPastTopics ? meetingRequirementText(requirements, '往期主题') : '',
+    ].filter(Boolean).join('\n\n')
+    : '';
 
   return [
     '【QiziShell 会议模式 · 启动任务书】',
     '',
-    '你现在是本次会议 **主持 Agent**。硬约束：',
-    '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
-    '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
-    `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**（仅结论）建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；`,
-    '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧），**禁止**派活、复述研讨过程、逐人回顾、发散新问题；格式见系统后续提示中的 **共识/分歧/下轮焦点** 或 **结论/分歧** 块；',
-    '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的**结论型**轮次总结；',
-    `- **${rounds} 轮制**：每轮 @ 各议事 Agent 各发言一次 → 当轮总结；${rounds} 轮结束后作最终总结，${meetingAdjournInstruction()}；收尾 **勿 @ 任何人**。`,
-    '- **派发语法（硬约束）**：只认 @agentId，例如 @mo_bao；**@墨宝 等中文名不会被 relay**；一次只 @ 一人；',
-    '- **纠正派发错误时**：正文里**不要**写 @agentId（用纯文字 nai_pang 即可），否则 QiziShell 仍会 relay；',
-    '- **禁止**调用 sessions_send / sessions_spawn，**禁止**向任何 Agent 的 main 私聊发消息；只需在发言里 @，QiziShell 会 relay；',
-    '- **派发范围（硬约束）**：每次 @ 只问本次议题要拍板的那一件事（例如选题会只问选哪一条、为什么、备选是什么）。不要按 IDENTITY.md 的岗位出题，不要问写稿、剪辑、配音、收料时长、出片时间、发布验收。',
-    '- **禁止派活**：最终总结只写决定了什么。不要安排写稿、剪辑、配音、发布、排期。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
+    fileRules || [
+      '你现在是本次会议 **主持 Agent**。硬约束：',
+      '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
+      '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
+      `- **篇幅**：派发/开场建议 ${MEETING_MODERATOR_SOFT_CHARS} 字内；**当轮总结**（仅结论）建议 ${MEETING_MODERATOR_SUMMARY_SOFT_CHARS} 字内；**最终总结**建议 ${MEETING_MODERATOR_FINAL_SOFT_CHARS} 字内；议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字内；`,
+      '- **总结铁律**：当轮/最终总结**只写结论**（共识、分歧），**禁止**派活、复述研讨过程、逐人回顾、发散新问题；格式见系统后续提示中的 **共识/分歧/下轮焦点** 或 **结论/分歧** 块；',
+      '- 议事 Agent 之间 **互不可见** 彼此原文，只能看到你整理后的**结论型**轮次总结；',
+      `- **${rounds} 轮制**：每轮 @ 各议事 Agent 各发言一次 → 当轮总结；${rounds} 轮结束后作最终总结，${meetingAdjournInstruction()}；收尾 **勿 @ 任何人**。`,
+      '- **派发语法（硬约束）**：只认 @agentId，例如 @mo_bao；**@墨宝 等中文名不会被 relay**；一次只 @ 一人；',
+      '- **纠正派发错误时**：正文里**不要**写 @agentId（用纯文字 nai_pang 即可），否则 QiziShell 仍会 relay；',
+      '- **禁止**调用 sessions_send / sessions_spawn，**禁止**向任何 Agent 的 main 私聊发消息；只需在发言里 @，QiziShell 会 relay；',
+      '- **派发范围（硬约束）**：每次 @ 只问本次议题要拍板的那一件事（例如选题会只问选哪一条、为什么、备选是什么）。不要按 IDENTITY.md 的岗位出题，不要问写稿、剪辑、配音、收料时长、出片时间、发布验收。',
+      '- **禁止派活**：最终总结只写决定了什么。不要安排写稿、剪辑、配音、发布、排期。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
+    ].join('\n'),
     '',
     '---',
     '## 会议参数',
@@ -1045,7 +1155,7 @@ function buildModeratorBriefingMessage({
     draft.trim(),
     goal ? `\n## 期望结论方向\n${goal.trim()}\n（这是结论要落到的方向，写进「结论」即可。不要据此给任何人派活。）` : '',
     noRepeatPastTopics ? `\n${buildPriorTopicsSection(priorTopicSummaries)}` : '',
-    noRepeatPastTopics && listPriorTopicEntries(priorTopicSummaries).length
+    !fileRules && noRepeatPastTopics && listPriorTopicEntries(priorTopicSummaries).length
       ? `\n${moderatorNoRepeatRules()}`
       : '',
     '',
@@ -1263,6 +1373,7 @@ module.exports = {
   hasClosingModeratorMessage,
   isFinalSummaryExpected,
   buildModeratorBriefingMessage,
+  buildMeetingRequirementSections,
   buildPriorTopicsSection,
   extractMeetingFinalSummaryText,
   extractJsonFromText,

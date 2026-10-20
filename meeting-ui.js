@@ -254,9 +254,9 @@
 
   function openPresetMenu() {
     if (!presetMenu || !presetPickerBtn) return;
-    renderPresetMenu();
     presetMenu.hidden = false;
     presetPickerBtn.setAttribute('aria-expanded', 'true');
+    void renderPresetMenu();
   }
 
   function togglePresetMenu() {
@@ -265,14 +265,13 @@
     else closePresetMenu();
   }
 
-  function renderPresetMenu() {
-    if (!presetMenu || !presetStore) return;
+  function renderPresetOptions(presets, emptyText) {
+    if (!presetMenu) return;
     presetMenu.innerHTML = '';
-    const presets = presetStore.listPresets();
     if (!presets.length) {
       const empty = document.createElement('div');
       empty.className = 'meeting-preset-menu-empty';
-      empty.textContent = '暂无已保存的会议';
+      empty.textContent = emptyText || '暂无已保存的会议';
       presetMenu.appendChild(empty);
       return;
     }
@@ -299,7 +298,19 @@
     }
   }
 
-  function savePreset() {
+  async function renderPresetMenu() {
+    if (!presetMenu || !presetStore) return;
+    renderPresetOptions([], '正在读取已保存的会议…');
+    const result = await presetStore.refresh();
+    if (presetMenu.hidden) return;
+    if (!result?.ok) {
+      renderPresetOptions([], result?.error || '读取失败');
+      return;
+    }
+    renderPresetOptions(result.presets || presetStore.listPresets());
+  }
+
+  async function savePreset() {
     if (!presetStore) return;
     const payload = collectPresetPayload();
     if (!payload.topic) {
@@ -314,32 +325,42 @@
       alert('请至少选择一名议事 Agent');
       return;
     }
+    const loaded = await presetStore.refresh();
+    if (!loaded?.ok) {
+      alert(loaded?.error || '未连接 Gateway，无法保存');
+      return;
+    }
     if (presetStore.hasPreset(payload.topic)) {
       const ok = confirm(`已存在议题「${payload.topic}」，是否覆盖保存？`);
       if (!ok) return;
     }
-    const result = presetStore.savePreset(payload);
+    const result = await presetStore.savePreset(payload);
     if (!result.ok) {
       alert(result.error || '保存失败');
       return;
     }
-    renderPresetMenu();
+    if (!presetMenu.hidden) renderPresetOptions(presetStore.listPresets());
     showToast('会议已保存');
   }
 
-  function deletePreset() {
+  async function deletePreset() {
     if (!presetStore) return;
     const topic = topicInput?.value?.trim() || '';
     if (!topic) {
       alert('请填写议题');
       return;
     }
-    const result = presetStore.removePreset(topic);
+    const loaded = await presetStore.refresh();
+    if (!loaded?.ok) {
+      alert(loaded?.error || '未连接 Gateway，无法删除');
+      return;
+    }
+    const result = await presetStore.removePreset(topic);
     if (!result.ok) {
       alert(result.error || '未找到已保存的会议');
       return;
     }
-    renderPresetMenu();
+    if (!presetMenu.hidden) renderPresetOptions(presetStore.listPresets());
     clearForm();
     showToast('已删除');
   }
@@ -356,7 +377,6 @@
     if (options?.draft != null && draftInput) {
       draftInput.value = String(options.draft);
     }
-    renderPresetMenu();
     closePresetMenu();
     hideToast();
     schedulePriorStatus();
@@ -451,8 +471,8 @@
   if (startBtn) startBtn.addEventListener('click', () => { void startMeeting(); });
   if (cancelBtn) cancelBtn.addEventListener('click', () => { void cancelSetup(); });
   if (closeBtn) closeBtn.addEventListener('click', () => { void cancelSetup(); });
-  if (savePresetBtn) savePresetBtn.addEventListener('click', savePreset);
-  if (deletePresetBtn) deletePresetBtn.addEventListener('click', deletePreset);
+  if (savePresetBtn) savePresetBtn.addEventListener('click', () => { void savePreset(); });
+  if (deletePresetBtn) deletePresetBtn.addEventListener('click', () => { void deletePreset(); });
   if (presetPickerBtn) presetPickerBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     togglePresetMenu();

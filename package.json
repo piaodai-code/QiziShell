@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.0-6",
+  "version": "0.2.0-7",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -37,6 +37,10 @@
       "about.html",
       "about.js",
       "about.css",
+      "meeting-help.html",
+      "meeting-help.js",
+      "meeting-help.css",
+      "meeting-help-preload.js",
       "update.html",
       "update.js",
       "update.css",

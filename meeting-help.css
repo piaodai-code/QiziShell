@@ -1,0 +1,125 @@
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #f7f7f5;
+  color: #1c1c1c;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.help-doc {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 28px 32px 20px;
+  box-sizing: border-box;
+}
+
+.help-doc h1 {
+  margin: 0 0 14px;
+  font-size: 20px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.help-doc h2 {
+  margin: 22px 0 8px;
+  font-size: 15px;
+  line-height: 1.4;
+  font-weight: 650;
+}
+
+.help-doc p,
+.help-doc li {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.help-doc ol,
+.help-doc ul {
+  margin: 0 0 10px;
+  padding-left: 1.3em;
+}
+
+.help-doc code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: #eceae4;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.help-doc pre {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  overflow: auto;
+  background: #1e2422;
+  color: #f4f1ea;
+  border-radius: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.help-doc pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.help-copy {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 16px 14px;
+  border-top: 1px solid #e4e1da;
+  background: #fff;
+}
+
+.help-copy-status {
+  min-height: 18px;
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: #2e7d32;
+}
+
+.help-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.help-copy-btn:hover {
+  background: #f3f0ff;
+}
+
+.help-copy-btn:active {
+  background: #e7e0ff;
+}
+
+.help-copy-btn img {
+  width: 48px;
+  height: 48px;
+  display: block;
+  object-fit: contain;
+}

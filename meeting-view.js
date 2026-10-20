@@ -15,6 +15,7 @@
   const historyMenuEl = document.getElementById('meeting-history-menu');
   const toolbarStatusEl = document.getElementById('meeting-toolbar-status');
   const newMeetingBtn = document.getElementById('meeting-new-btn');
+  const helpBtn = document.getElementById('meeting-help-btn');
   const leaveHubBtn = document.getElementById('meeting-leave-hub-btn');
   const composerToggleEl = document.getElementById('meeting-composer-toggle');
   const composerDockEl = document.getElementById('meeting-composer-dock');
@@ -920,6 +921,9 @@
 
   if (newMeetingBtn) {
     newMeetingBtn.addEventListener('click', () => { void openNewMeetingSetup(); });
+  }
+  if (helpBtn) {
+    helpBtn.addEventListener('click', () => { void window.qizi.openMeetingHelp?.(); });
   }
 
   if (leaveHubBtn) {

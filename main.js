@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell, Tray, Menu, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, shell, Tray, Menu, nativeImage, dialog } = require('electron');
 const { spawn } = require('child_process');
 
 const openLinksExternally = !process.argv.includes('--open-links-in-shell');
@@ -10,6 +10,13 @@ const { startMeetingGroupRelay } = require('./meeting-group');
 const { saveMeetingRecord, listMeetingRecords, loadMeetingRecordFile, loadMeetingRecordById } = require('./meeting-store');
 const { listPriorTopicSummaries, recordMeetingDecision, priorTopicExcerpt } = require('./meeting-topic-ledger');
 const { isMeetingA2ASessionKey, isModeratorPostCloseStub } = require('./meeting-protocol');
+const {
+  PRESET_ID_RE,
+  meetingPresetId,
+  buildMeetingPresetMarkdown,
+  presetFromMarkdown,
+  parseMeetingRequirementSections,
+} = require('./meeting-preset-doc');
 const {
   findModeratorFinalMessage,
   buildMeetingForwardPayload,
@@ -360,6 +367,7 @@ function isAllowedSttAudioPath(audioPath) {
   return allowedRoots.some((root) => resolved.startsWith(root));
 }
 let aboutWindow = null;
+let meetingHelpWindow = null;
 let historyWindow = null;
 let historyWindowContext = null;
 let updateWindow = null;
@@ -1203,6 +1211,13 @@ function createAuxiliaryModalWindow(options) {
   return win;
 }
 
+function getAuthorizedMeetingHelpWindow(event) {
+  if (!meetingHelpWindow || meetingHelpWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== meetingHelpWindow) return null;
+  return meetingHelpWindow;
+}
+
 function getAuthorizedHistoryWindow(event) {
   if (!historyWindow || historyWindow.isDestroyed()) return null;
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -1288,6 +1303,31 @@ function openHistoryWindow(context) {
   historyWindow.on('closed', () => {
     historyWindow = null;
     historyWindowContext = null;
+  });
+}
+
+function openMeetingHelp() {
+  if (meetingHelpWindow && !meetingHelpWindow.isDestroyed()) {
+    showMainWindow();
+    meetingHelpWindow.focus();
+    return;
+  }
+  meetingHelpWindow = createAuxiliaryModalWindow({
+    width: 680,
+    height: 780,
+    minWidth: 460,
+    minHeight: 520,
+    resizable: true,
+    maximizable: true,
+    title: '会议模式配置',
+    backgroundColor: '#f7f7f5',
+    webPreferences: {
+      preload: path.join(__dirname, 'meeting-help-preload.js'),
+    },
+  });
+  meetingHelpWindow.loadFile(path.join(__dirname, 'meeting-help.html'));
+  meetingHelpWindow.on('closed', () => {
+    meetingHelpWindow = null;
   });
 }
 
@@ -4235,6 +4275,18 @@ ipcMain.handle('openclaw:open-about', (event) => {
   return { ok: true };
 });
 
+ipcMain.handle('qizi-meeting:open-help', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  openMeetingHelp();
+  return { ok: true };
+});
+
+ipcMain.handle('qizi-meeting:help:copy', (event, text) => {
+  if (!getAuthorizedMeetingHelpWindow(event)) return forbiddenSenderResult();
+  clipboard.writeText(String(text || ''));
+  return { ok: true };
+});
+
 ipcMain.handle('openclaw:open-update', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   openUpdate();
@@ -4277,13 +4329,138 @@ ipcMain.handle('qizi-update:install', async (event) => {
   }
 });
 
+function normalizeMeetingPresetInput(raw) {
+  const topic = String(raw?.topic || '').trim();
+  if (!topic) return { ok: false, error: '请填写议题' };
+  const moderatorAgentId = String(raw?.moderatorAgentId || '').trim();
+  if (!moderatorAgentId) return { ok: false, error: '请选择主持 Agent' };
+  const participantAgentIds = Array.isArray(raw?.participantAgentIds)
+    ? raw.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (!participantAgentIds.length) return { ok: false, error: '请至少选择一名议事 Agent' };
+  const roundCount = Number(raw?.roundCount);
+  return {
+    ok: true,
+    preset: {
+      topic,
+      goal: String(raw?.goal || '').trim(),
+      postMeetingExecAgentId: String(raw?.postMeetingExecAgentId || '').trim(),
+      moderatorAgentId,
+      moderatorLabel: String(raw?.moderatorLabel || '').trim(),
+      participantAgentIds,
+      roundCount: roundCount === 1 || roundCount === 3 ? roundCount : 2,
+      noRepeatPastTopics: Boolean(raw?.noRepeatPastTopics),
+      savedAtMs: Date.now(),
+    },
+  };
+}
+
+async function withMeetingPresetClient() {
+  const client = ensureGateway();
+  await client.waitForConnect();
+  return client;
+}
+
+async function listMeetingPresets() {
+  try {
+    const client = await withMeetingPresetClient();
+    const listed = await client.request('qizi.meetings.list', {});
+    const meetings = Array.isArray(listed?.meetings) ? listed.meetings : [];
+    const loaded = await Promise.all(meetings.map(async (entry) => {
+      const id = String(entry?.id || '').trim();
+      if (!PRESET_ID_RE.test(id)) return null;
+      try {
+        const got = await client.request('qizi.meetings.get', { id });
+        return presetFromMarkdown(got?.markdown || '', id);
+      } catch (err) {
+        console.warn('[qizi] 读取会议参数失败', id, err.message);
+        return null;
+      }
+    }));
+    const presets = loaded.filter(Boolean);
+    presets.sort((a, b) => b.savedAtMs - a.savedAtMs);
+    return { ok: true, presets };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err), presets: [] };
+  }
+}
+
+async function saveMeetingPreset(raw) {
+  const normalized = normalizeMeetingPresetInput(raw);
+  if (!normalized.ok) return normalized;
+  const preset = normalized.preset;
+  const id = meetingPresetId(preset.topic);
+  const markdown = buildMeetingPresetMarkdown({ ...preset, id });
+  try {
+    const client = await withMeetingPresetClient();
+    const result = await client.request('qizi.meetings.put', { id, markdown });
+    return { ok: true, preset: { ...preset, id }, bytes: result?.bytes };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
+async function loadMeetingRequirements(topic) {
+  const key = String(topic || '').trim();
+  if (!key) return { ok: false, error: '请填写议题' };
+  const id = meetingPresetId(key);
+  try {
+    const client = await withMeetingPresetClient();
+    const got = await client.request('qizi.meetings.get', { id });
+    const parsed = parseMeetingRequirementSections(got?.markdown || '');
+    if (!parsed.ok) return { ok: false, error: parsed.error || '读取会议要求失败' };
+    return { ok: true, sections: parsed.sections };
+  } catch (err) {
+    const message = formatGatewayError(err);
+    if (/not found|no such|enoent|missing|不存在|未找到/i.test(message)) {
+      return { ok: false, error: '未找到已保存的会议，请先保存再开始' };
+    }
+    return { ok: false, error: message ? `读取会议要求失败：${message}` : '读取会议要求失败' };
+  }
+}
+
+async function deleteMeetingPreset(raw) {
+  const topic = String(raw?.topic || '').trim();
+  const givenId = String(raw?.id || '').trim();
+  const id = PRESET_ID_RE.test(givenId) ? givenId : meetingPresetId(topic);
+  if (!PRESET_ID_RE.test(id)) return { ok: false, error: '请填写议题' };
+  try {
+    const client = await withMeetingPresetClient();
+    const result = await client.request('qizi.meetings.delete', { id });
+    if (result?.deleted === false) return { ok: false, error: '未找到已保存的会议' };
+    return { ok: true, id, topic, deleted: true };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
+ipcMain.handle('qizi-meeting:presets:list', async (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return listMeetingPresets();
+});
+
+ipcMain.handle('qizi-meeting:presets:save', async (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return saveMeetingPreset(payload || {});
+});
+
+ipcMain.handle('qizi-meeting:presets:delete', async (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return deleteMeetingPreset(payload || {});
+});
+
 ipcMain.handle('qizi-meeting:start', async (event, config) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     if (meetingBriefingRunning || (meetingEngine && meetingEngine.running)) {
       return { ok: false, error: '已有会议在进行中' };
     }
-    void runMeetingBriefingFlow(config || {});
+    const loaded = await loadMeetingRequirements(config?.topic);
+    if (!loaded.ok) return loaded;
+    void runMeetingBriefingFlow({
+      ...(config || {}),
+      meetingRequirements: loaded.sections,
+    });
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message || '无法启动会议' };
