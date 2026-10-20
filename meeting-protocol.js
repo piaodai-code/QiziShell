@@ -607,7 +607,6 @@ function buildMeetingRequirementSections() {
     '- 上一条没有可识别的 @ 时，按建议补上 @agentId，不要就此结束。',
     '',
     '## 当轮总结',
-    moderatorSummaryRules({ final: false }),
     meetingSummaryGuidance(
       MEETING_MODERATOR_SUMMARY_SOFT_CHARS,
       MEETING_MODERATOR_SUMMARY_HARD_CHARS,
@@ -615,7 +614,6 @@ function buildMeetingRequirementSections() {
     ),
     '',
     '## 最终总结',
-    moderatorSummaryRules({ final: true }),
     meetingSummaryGuidance(
       MEETING_MODERATOR_FINAL_SOFT_CHARS,
       MEETING_MODERATOR_FINAL_HARD_CHARS,

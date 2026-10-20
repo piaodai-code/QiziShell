@@ -7,7 +7,11 @@
  * 验证 findNextMention：最终总结阶段不应因派活里的 @ 再 relay 议事 Agent。
  */
 const { findNextMention } = require('../meeting-group');
-const { hasClosingModeratorMessage, extractMeetingFinalSummaryText } = require('../meeting-protocol');
+const {
+  hasClosingModeratorMessage,
+  extractMeetingFinalSummaryText,
+  buildMeetingRequirementSections,
+} = require('../meeting-protocol');
 
 const MOD = 'qi_zi';
 const roster = [
@@ -251,6 +255,17 @@ runCase('最终总结原文取收尾，不取第一轮共识', () => {
   });
   if (!text.includes('莱文')) throw new Error(`missing final pick: ${text}`);
   if (text.includes('银轨')) throw new Error(`picked round summary: ${text}`);
+});
+
+runCase('会议要求：当轮总结与最终总结各写一遍', () => {
+  const body = buildMeetingRequirementSections();
+  const ban = (body.match(/逐人复述谁说了什么/g) || []).length;
+  if (ban !== 2) throw new Error(`禁止行出现 ${ban} 次，应为 2`);
+  const roundHeading = (body.match(/\*\*当轮总结 = 只写结论/g) || []).length;
+  const finalHeading = (body.match(/\*\*最终总结 = 只写结论/g) || []).length;
+  if (roundHeading !== 1 || finalHeading !== 1) {
+    throw new Error(`总结块重复：当轮 ${roundHeading}，最终 ${finalHeading}`);
+  }
 });
 
 if (process.exitCode) {
