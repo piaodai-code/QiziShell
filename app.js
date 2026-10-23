@@ -57,6 +57,9 @@ const settingsWsUrlInput = document.getElementById('settings-ws-url');
 const settingsTokenInput = document.getElementById('settings-token');
 const settingsTokenToggle = document.getElementById('settings-token-toggle');
 const settingsTokenNote = document.getElementById('settings-token-note');
+const settingsTokenField = settingsTokenInput?.closest('.settings-field');
+const settingsTokenlessInput = document.getElementById('settings-tokenless');
+let settingsFormSnapshot = null;
 const settingsSourceHint = document.getElementById('settings-source-hint');
 const settingsStatusEl = document.getElementById('settings-status');
 const settingsTestBtn = document.getElementById('settings-test-btn');
@@ -6812,10 +6815,29 @@ function formatConnectionStatusMessage(kind, detail) {
 }
 
 function syncSettingsTestStatusLayout() {
-  const row = settingsTestBtn?.parentElement;
-  if (!row || !settingsTestBtn) return;
+  const cluster = settingsTestBtn?.closest('.settings-test-cluster');
+  const row = cluster?.parentElement;
+  if (!row || !cluster) return;
   const gap = 10;
-  row.style.setProperty('--settings-test-btn-offset', `${settingsTestBtn.offsetWidth + gap}px`);
+  row.style.setProperty('--settings-test-btn-offset', `${cluster.offsetWidth + gap}px`);
+}
+
+function applyTokenlessSettingsUi(tokenless, snapshot) {
+  const on = tokenless === true;
+  if (settingsTokenlessInput) settingsTokenlessInput.checked = on;
+  if (settingsTokenField) settingsTokenField.classList.toggle('is-tokenless', on);
+  if (settingsTokenInput) settingsTokenInput.disabled = on;
+  if (settingsTokenToggle) settingsTokenToggle.disabled = on;
+  if (!settingsTokenNote) return;
+  if (on) {
+    settingsTokenNote.textContent = snapshot?.tokenSet
+      ? '已勾选无需 Token，连接时不会发送。已保存的 Token 仍保留，取消勾选后恢复使用。'
+      : '已勾选无需 Token，连接时不会发送 Token。';
+    return;
+  }
+  settingsTokenNote.textContent = snapshot?.tokenSet
+    ? 'Token 已保存。若要更换请输入新值；测试连接时留空则用已保存值。'
+    : '请向管理员索取 Gateway Token 后手动填写。';
 }
 
 function setSettingsStatus(text, kind, fullText) {
@@ -7437,16 +7459,13 @@ function switchSettingsTab(tabId) {
 async function populateSettingsForm() {
   if (!window.qizi?.getSettings) return;
   const snapshot = await window.qizi.getSettings();
+  settingsFormSnapshot = snapshot;
   if (settingsWsUrlInput) settingsWsUrlInput.value = snapshot.wsUrl || '';
   if (settingsTokenInput) {
     settingsTokenInput.value = '';
     settingsTokenInput.placeholder = snapshot.tokenSet ? '已保存，留空表示不修改' : 'Gateway 认证 Token';
   }
-  if (settingsTokenNote) {
-    settingsTokenNote.textContent = snapshot.tokenSet
-      ? 'Token 已保存。若要更换请输入新值；测试连接时留空则用已保存值。'
-      : '请向管理员索取 Gateway Token 后手动填写。';
-  }
+  applyTokenlessSettingsUi(snapshot.tokenless === true, snapshot);
   if (settingsWsUrlInput && !settingsWsUrlInput.value) {
     settingsWsUrlInput.placeholder = '向管理员索取，如 wss://host:18789 或 ws://host:18789';
   }
@@ -7504,6 +7523,7 @@ async function saveSettingsFromForm() {
     const result = await window.qizi.saveSettings({
       wsUrl: settingsWsUrlInput?.value || '',
       token: settingsTokenInput?.value || '',
+      tokenless: settingsTokenlessInput?.checked === true,
       launchAtLogin: settingsLaunchAtLogin?.checked === true,
       showMainOnLaunch: settingsShowMainOnLaunch?.checked !== false,
       messageSoundEnabled: settingsMessageSound?.checked === true,
@@ -7528,9 +7548,11 @@ async function testSettingsConnection() {
   setSettingsStatus('测试中…', 'pending');
   if (settingsTestBtn) settingsTestBtn.disabled = true;
   try {
+    const tokenless = settingsTokenlessInput?.checked === true;
     const result = await window.qizi.testGatewaySettings({
       wsUrl: settingsWsUrlInput?.value || '',
-      token: settingsTokenInput?.value || '',
+      token: tokenless ? '' : (settingsTokenInput?.value || ''),
+      tokenless,
     });
     if (result?.ok) {
       const full = `连接成功：${result.wsUrl || settingsWsUrlInput?.value || ''}`;
@@ -7628,6 +7650,11 @@ if (settingsTabSttBtn) {
   settingsTabSttBtn.addEventListener('click', () => switchSettingsTab('stt'));
 }
 window.addEventListener('resize', syncSettingsTestStatusLayout);
+if (settingsTokenlessInput) {
+  settingsTokenlessInput.addEventListener('change', () => {
+    applyTokenlessSettingsUi(settingsTokenlessInput.checked, settingsFormSnapshot);
+  });
+}
 if (settingsTokenToggle && settingsTokenInput) {
   settingsTokenToggle.addEventListener('click', () => {
     const show = settingsTokenInput.type === 'password';

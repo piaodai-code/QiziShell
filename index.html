@@ -321,7 +321,13 @@
             <span class="settings-field-note" id="settings-token-note"></span>
           </label>
           <div class="settings-row-actions">
-            <button type="button" class="settings-secondary-btn" id="settings-test-btn">测试连接</button>
+            <div class="settings-test-cluster" id="settings-test-cluster">
+              <label class="settings-check settings-tokenless" for="settings-tokenless">
+                <input type="checkbox" id="settings-tokenless">
+                <span>无需 Token</span>
+              </label>
+              <button type="button" class="settings-secondary-btn" id="settings-test-btn">测试连接</button>
+            </div>
             <span class="settings-status" id="settings-status" hidden></span>
           </div>
         </section>
@@ -350,7 +356,7 @@
         <section class="settings-section settings-section-muted">
           <h3 class="settings-section-title">说明</h3>
           <ul class="settings-tips">
-            <li>WSS/WS 地址与 Token 均需向 Gateway 管理员索取；</li>
+            <li>WSS/WS 地址需向 Gateway 管理员索取；Tailscale 等无需 Token 的地址可勾选「无需 Token」。</li>
             <li>首次连接新设备需配对，管理员在 Gateway 批准；</li>
             <li>Agent、模型可在聊天界面内切换，无需在此配置。</li>
           </ul>

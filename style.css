@@ -2337,6 +2337,12 @@ body.drag-over .composer-pending {
   align-items: center;
 }
 .settings-token-row .settings-input { flex: 1; }
+.settings-field.is-tokenless .settings-label { opacity: 0.45; }
+.settings-input:disabled {
+  background: #f3f3f3;
+  color: #9a9a9a;
+  cursor: not-allowed;
+}
 .settings-field-note {
   font-size: 11px;
   color: var(--meta-text);
@@ -2350,7 +2356,44 @@ body.drag-over .composer-pending {
   margin-top: 4px;
   --settings-test-btn-offset: 92px;
 }
-.settings-row-actions .settings-secondary-btn {
+.settings-test-cluster {
+  grid-area: 1 / 1;
+  justify-self: start;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 34px;
+  position: relative;
+  z-index: 1;
+}
+.settings-test-cluster .settings-tokenless {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  height: 34px;
+  margin: 0;
+  padding: 0;
+  line-height: 1;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.settings-test-cluster .settings-tokenless input {
+  margin: 0;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+}
+.settings-test-cluster .settings-secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  height: 34px;
+  margin: 0;
+  padding: 0 14px;
+  line-height: 1;
+}
+.settings-row-actions > .settings-secondary-btn {
   grid-area: 1 / 1;
   justify-self: start;
   position: relative;
@@ -2459,6 +2502,12 @@ body.drag-over .composer-pending {
 }
 .settings-secondary-btn:hover,
 .settings-inline-btn:hover { background: #e8e8e8; }
+.settings-inline-btn:disabled,
+.settings-inline-btn:disabled:hover {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: #f2f2f2;
+}
 .settings-inline-btn {
   padding: 8px 10px;
   flex-shrink: 0;

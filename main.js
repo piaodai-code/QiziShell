@@ -1035,6 +1035,7 @@ function loadShellSettings() {
       showMainOnLaunch: parsed.showMainOnLaunch !== false,
       messageSoundEnabled: parsed.messageSoundEnabled === true,
       messageSoundId: normalizeMessageSoundId(parsed.messageSoundId),
+      tokenless: parsed.tokenless === true,
       debugMode: normalizeDebugMode(parsed.debugMode),
     };
   } catch {
@@ -1059,10 +1060,12 @@ function saveShellSettings(next) {
     messageSoundId: next.messageSoundId == null
       ? normalizeMessageSoundId(current.messageSoundId)
       : normalizeMessageSoundId(next.messageSoundId),
+    tokenless: next.tokenless == null ? current.tokenless === true : next.tokenless === true,
     debugMode: normalizeDebugMode(nextDebugMode),
   };
   if (!merged.wsUrl) delete merged.wsUrl;
   if (!merged.token) delete merged.token;
+  if (!merged.tokenless) delete merged.tokenless;
   if (!merged.debugMode) delete merged.debugMode;
   fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true, mode: 0o700 });
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(merged, null, 2), { encoding: 'utf8', mode: 0o600 });
@@ -1098,24 +1101,31 @@ function initRuntimeDebugMode() {
   runtimeDebugMode = normalizeDebugMode(shell.debugMode);
 }
 
-function resolveGatewayConfigSource() {
-  if (process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN) {
+function resolveGatewayConfigSource(shell = loadShellSettings()) {
+  const tokenless = shell.tokenless === true;
+  if (process.env.OPENCLAW_GATEWAY_URL || (!tokenless && process.env.OPENCLAW_GATEWAY_TOKEN)) {
     return 'environment';
   }
-  const shell = loadShellSettings();
-  if (shell.wsUrl || shell.token) return 'shell';
+  if (shell.wsUrl || shell.token || tokenless) return 'shell';
   return 'unset';
 }
 
 function loadOpenClawConfig() {
   const shell = loadShellSettings();
-  const cacheKey = `${shell.wsUrl || ''}\0${shell.token || ''}`;
+  const tokenless = shell.tokenless === true;
+  const cacheKey = `${shell.wsUrl || ''}\0${shell.token || ''}\0${tokenless ? '1' : '0'}`;
   if (openClawConfigCache && openClawConfigCache.__cacheKey === cacheKey) {
     return openClawConfigCache;
   }
   const wsUrl = (process.env.OPENCLAW_GATEWAY_URL || shell.wsUrl || '').trim().replace(/\/$/, '');
-  const token = process.env.OPENCLAW_GATEWAY_TOKEN || shell.token;
-  openClawConfigCache = { token, wsUrl, source: resolveGatewayConfigSource(), __cacheKey: cacheKey };
+  const token = tokenless ? undefined : (process.env.OPENCLAW_GATEWAY_TOKEN || shell.token);
+  openClawConfigCache = {
+    token,
+    wsUrl,
+    tokenless,
+    source: resolveGatewayConfigSource(shell),
+    __cacheKey: cacheKey,
+  };
   return openClawConfigCache;
 }
 
@@ -1124,7 +1134,8 @@ function getSettingsSnapshot() {
   const effective = loadOpenClawConfig();
   return {
     wsUrl: shell.wsUrl || '',
-    tokenSet: Boolean(effective.token),
+    tokenSet: Boolean(shell.token || process.env.OPENCLAW_GATEWAY_TOKEN),
+    tokenless: shell.tokenless === true,
     source: effective.source,
     shellSettingsPath: SETTINGS_PATH,
     launchAtLogin: shell.launchAtLogin === true,
@@ -1133,22 +1144,29 @@ function getSettingsSnapshot() {
     messageSoundId: normalizeMessageSoundId(shell.messageSoundId),
     debugMode: getRuntimeDebugMode(),
     debugModeSource: ENV_DEBUG_MODE ? 'env' : 'settings',
-    envOverrides: Boolean(process.env.OPENCLAW_GATEWAY_URL || process.env.OPENCLAW_GATEWAY_TOKEN),
+    envOverrides: Boolean(
+      process.env.OPENCLAW_GATEWAY_URL
+      || (!shell.tokenless && process.env.OPENCLAW_GATEWAY_TOKEN),
+    ),
   };
 }
 
-async function testGatewaySettings({ wsUrl, token }) {
+async function testGatewaySettings({ wsUrl, token, tokenless }) {
   const url = (wsUrl || '').trim().replace(/\/$/, '');
   if (!url) {
     return { ok: false, error: 'Gateway地址错误' };
   }
-  const authToken = token || loadOpenClawConfig().token;
-  if (!authToken) {
+  const skipToken = tokenless === true;
+  const shell = loadShellSettings();
+  const authToken = skipToken
+    ? ''
+    : (token || process.env.OPENCLAW_GATEWAY_TOKEN || shell.token);
+  if (!skipToken && !authToken) {
     return { ok: false, error: 'Gateway可访问，但Token错误' };
   }
   const client = new GatewayWsClient({
     url,
-    token: authToken,
+    token: skipToken ? undefined : authToken,
     clientVersion: '0.1.0',
   });
   try {
@@ -1452,14 +1470,14 @@ function attachGatewayTlsSessionPolicy(session) {
 }
 
 function openOpenClawControl() {
-  const { wsUrl, token } = loadOpenClawConfig();
+  const { wsUrl, token, tokenless } = loadOpenClawConfig();
   if (!wsUrl) {
     return { ok: false, error: '未配置 Gateway 地址，请先在设置中填写 WSS/WS 地址' };
   }
-  if (!token) {
+  if (!tokenless && !token) {
     return { ok: false, error: '未配置 Gateway Token，请先在设置中填写' };
   }
-  const controlUrl = buildOpenClawControlLaunchUrl(wsUrl, token);
+  const controlUrl = buildOpenClawControlLaunchUrl(wsUrl, tokenless ? '' : token);
   if (!controlUrl) {
     return { ok: false, error: 'Gateway 地址格式无效' };
   }
@@ -3093,10 +3111,13 @@ function attachGatewayHandlers(client) {
 
 function ensureGateway() {
   const config = loadOpenClawConfig();
-  if (!config.wsUrl || !config.token) {
+  if (!config.wsUrl) {
+    throw new Error('未配置 Gateway，请在设置中填写管理员提供的 WSS 地址');
+  }
+  if (!config.tokenless && !config.token) {
     throw new Error('未配置 Gateway，请在设置中填写管理员提供的 WSS 地址与 Token');
   }
-  const nextKey = `${config.wsUrl}\0${config.token || ''}`;
+  const nextKey = `${config.wsUrl}\0${config.tokenless ? '' : (config.token || '')}`;
   if (!gateway || gatewayConfigKey !== nextKey) {
     if (gateway) {
       failAllActiveRuns('Gateway 配置已变更');
@@ -3107,7 +3128,7 @@ function ensureGateway() {
     modelListRefreshPromise = null;
     gateway = new GatewayWsClient({
       url: config.wsUrl,
-      token: config.token,
+      token: config.tokenless ? undefined : config.token,
       clientVersion: '0.1.0',
     });
     attachGatewayHandlers(gateway);
@@ -3295,8 +3316,11 @@ function createTray() {
 }
 
 async function checkConnection() {
-  const { token, wsUrl } = loadOpenClawConfig();
-  if (!wsUrl || !token) {
+  const { token, wsUrl, tokenless } = loadOpenClawConfig();
+  if (!wsUrl) {
+    return { ok: false, error: '未配置 Gateway，请在设置中填写管理员提供的 WSS 地址' };
+  }
+  if (!tokenless && !token) {
     return { ok: false, error: '未配置 Gateway，请在设置中填写管理员提供的 WSS 地址与 Token' };
   }
   try {
@@ -4249,11 +4273,13 @@ ipcMain.handle('openclaw:settings:save', (event, payload) => {
     const wsUrl = typeof payload?.wsUrl === 'string' ? payload.wsUrl.trim() : current.wsUrl;
     const tokenInput = typeof payload?.token === 'string' ? payload.token.trim() : '';
     const token = tokenInput || current.token;
+    const tokenless = payload?.tokenless === true;
     if (!wsUrl) return { ok: false, error: '请填写 WSS 地址' };
-    if (!token) return { ok: false, error: '请填写 Gateway Token' };
+    if (!tokenless && !token) return { ok: false, error: '请填写 Gateway Token' };
     saveShellSettings({
       wsUrl,
       token,
+      tokenless,
       launchAtLogin: payload?.launchAtLogin === true,
       showMainOnLaunch: payload?.showMainOnLaunch !== false,
       messageSoundEnabled: payload?.messageSoundEnabled === true,
