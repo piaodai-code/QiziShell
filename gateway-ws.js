@@ -41,12 +41,33 @@ function isSecureGatewayUrl(url) {
   return /^wss:\/\//i.test(String(url || ''));
 }
 
+const DEFAULT_TICK_INTERVAL_MS = 30_000;
+const MIN_TICK_INTERVAL_MS = 1_000;
+const MAX_TICK_INTERVAL_MS = 60_000;
+const SOCKET_HANDSHAKE_TIMEOUT_MS = 15_000;
+const SOCKET_CLOSE_TIMEOUT_MS = 1_000;
+const FORCE_STOP_TERMINATE_GRACE_MS = 250;
+
 function buildGatewayWsOptions(url) {
-  const options = { maxPayload: 25 * 1024 * 1024 };
+  const options = {
+    maxPayload: 25 * 1024 * 1024,
+    // 握手挂死（网关进程已死、中间代理仍接受 TCP）时不要一直停在 CONNECTING。
+    handshakeTimeout: SOCKET_HANDSHAKE_TIMEOUT_MS,
+    // 对端不回 close 帧时，ws 默认要等 30s 才销毁。缩短后，主动断开能更快进入重连。
+    closeTimeout: SOCKET_CLOSE_TIMEOUT_MS,
+  };
   if (isSecureGatewayUrl(url)) {
     options.rejectUnauthorized = rejectUnauthorizedForUrl(url);
   }
   return options;
+}
+
+function resolveTickIntervalMs(advertised) {
+  const value = Number(advertised);
+  if (!Number.isFinite(value) || value < MIN_TICK_INTERVAL_MS) {
+    return DEFAULT_TICK_INTERVAL_MS;
+  }
+  return Math.min(value, MAX_TICK_INTERVAL_MS);
 }
 
 class GatewayWsClient extends EventEmitter {
@@ -75,15 +96,37 @@ class GatewayWsClient extends EventEmitter {
     this.hello = null;
     this.connectPromise = null;
     this.lastRxAt = 0;
+    this.lastTick = null;
+    this.tickIntervalMs = DEFAULT_TICK_INTERVAL_MS;
+    this.livenessTimer = null;
+    this.pingSentAt = 0;
+    this.socketRetiring = false;
+    this.attemptTimer = null;
+    // 平时没有人等连接。error 事件若没有监听者，Node 会直接抛错，后面的重连就排不下去。
+    this.on('error', () => {});
+  }
+
+  safeEmit(event, payload) {
+    try {
+      this.emit(event, payload);
+    } catch (err) {
+      console.warn(`[qizi] gateway ${event} listener failed:`, err?.message || err);
+    }
   }
 
   start() {
     if (this.closed) return;
     this.clearReconnectTimer();
     this.clearConnectTimer();
+    this.clearAttemptTimer();
+    this.clearLivenessWatch();
     this.connectNonce = null;
     this.connectSent = false;
     this.connected = false;
+    this.lastTick = null;
+    this.pingSentAt = 0;
+    this.socketRetiring = false;
+    this.tickIntervalMs = DEFAULT_TICK_INTERVAL_MS;
 
     const previous = this.ws;
     const ws = new WebSocket(this.url, buildGatewayWsOptions(this.url));
@@ -92,15 +135,17 @@ class GatewayWsClient extends EventEmitter {
       previous.removeAllListeners();
       try { previous.terminate(); } catch {}
     }
+    this.armAttemptTimeout(ws);
 
     ws.on('open', () => {
       if (this.ws !== ws) return;
-      this.lastRxAt = Date.now();
+      this.noteInbound();
       this.armConnectChallengeTimeout();
     });
     ws.on('message', (data) => {
       if (this.ws !== ws) return;
-      this.lastRxAt = Date.now();
+      // 只把网关应用帧算作存活。代理自己回复的 ping/pong 不能证明 OpenClaw 进程还在。
+      this.noteInbound();
       this.handleMessage(String(data));
     });
     ws.on('close', (code, reason) => {
@@ -108,8 +153,16 @@ class GatewayWsClient extends EventEmitter {
       this.handleClose(code, String(reason));
     });
     ws.on('error', (err) => {
-      if (this.ws !== ws || this.connectSent) return;
-      this.emit('error', err);
+      if (this.ws !== ws) return;
+      // 先安排强制断开，再通知监听者。监听者抛错也不能把这次重连卡住。
+      const timer = setTimeout(() => {
+        if (this.ws !== ws) return;
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          try { ws.terminate(); } catch {}
+        }
+      }, SOCKET_CLOSE_TIMEOUT_MS);
+      if (typeof timer.unref === 'function') timer.unref();
+      if (!this.connectSent) this.safeEmit('error', err);
     });
   }
 
@@ -117,12 +170,13 @@ class GatewayWsClient extends EventEmitter {
     this.closed = true;
     this.clearReconnectTimer();
     this.clearConnectTimer();
+    this.clearAttemptTimer();
+    this.clearLivenessWatch();
     this.flushPending(new Error('gateway client stopped'));
-    if (this.ws) {
-      try { this.ws.close(); } catch {}
-      this.ws = null;
-    }
+    const ws = this.ws;
+    this.ws = null;
     this.connected = false;
+    if (ws) this.retireSocket(ws);
   }
 
   scheduleReconnect() {
@@ -152,13 +206,101 @@ class GatewayWsClient extends EventEmitter {
     }
   }
 
+  clearAttemptTimer() {
+    if (this.attemptTimer) {
+      clearTimeout(this.attemptTimer);
+      this.attemptTimer = null;
+    }
+  }
+
+  // 这一轮握手若既没连上、也没走到 close，重连定时器不会再排。到点强制拆掉。
+  armAttemptTimeout(ws) {
+    this.clearAttemptTimer();
+    const limit = this.connectChallengeTimeoutMs + this.requestTimeoutMs + 5_000;
+    this.attemptTimer = setTimeout(() => {
+      this.attemptTimer = null;
+      if (this.closed || this.connected || this.ws !== ws) return;
+      this.retireSocket(ws, 4000, 'connect attempt timeout');
+    }, limit);
+  }
+
+  clearLivenessWatch() {
+    if (this.livenessTimer) {
+      clearInterval(this.livenessTimer);
+      this.livenessTimer = null;
+    }
+  }
+
+  noteInbound() {
+    const now = Date.now();
+    this.lastRxAt = now;
+    this.lastTick = now;
+  }
+
+  // 网关进程重启后，Tailscale / 反向代理经常不把 TCP 关闭交给客户端。
+  // readyState 会一直停在 OPEN，现有重连逻辑根本不会跑，只能退出应用再开。
+  // 协议约定：入站静默超过 policy.tickIntervalMs 的两倍就用 4000 拆掉这条连接。
+  startLivenessWatch() {
+    this.clearLivenessWatch();
+    const every = Math.min(5_000, Math.max(MIN_TICK_INTERVAL_MS, this.tickIntervalMs));
+    this.livenessTimer = setInterval(() => this.checkLiveness(), every);
+  }
+
+  checkLiveness() {
+    if (this.closed || this.socketRetiring || !this.connected || !this.ws || !this.lastTick) return;
+    if (this.ws.readyState !== WebSocket.OPEN) return;
+    this.maybePing();
+    // 进行中的请求有自己的超时，并由超时路径拆掉完全无入站的半开连接。
+    if (this.pending.size > 0) return;
+    const gap = Date.now() - this.lastTick;
+    if (gap > this.tickIntervalMs * 2) {
+      this.dropSilentSocket('tick timeout');
+    }
+  }
+
+  maybePing() {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || this.socketRetiring) return;
+    const interval = Math.min(this.tickIntervalMs, 15_000);
+    const now = Date.now();
+    if (this.pingSentAt && now - this.pingSentAt < interval) return;
+    this.pingSentAt = now;
+    try {
+      ws.ping();
+    } catch {
+      this.dropSilentSocket('heartbeat ping failed');
+    }
+  }
+
+  dropSilentSocket(reason) {
+    if (this.socketRetiring || !this.ws) return;
+    this.socketRetiring = true;
+    this.connected = false;
+    this.retireSocket(this.ws, 4000, reason);
+  }
+
+  // close() 在对端已死时要等关闭握手。250ms 内没结束就 terminate，让 close 事件马上出现并进入重连。
+  retireSocket(ws, code, reason) {
+    if (!ws || ws.readyState === WebSocket.CLOSED) return;
+    if (ws.readyState === WebSocket.CONNECTING) {
+      try { ws.terminate(); } catch {}
+      return;
+    }
+    try { ws.close(code, reason); } catch {}
+    const timer = setTimeout(() => {
+      if (ws.readyState === WebSocket.CLOSED) return;
+      try { ws.terminate(); } catch {}
+    }, FORCE_STOP_TERMINATE_GRACE_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+  }
+
   armConnectChallengeTimeout() {
     this.clearConnectTimer();
     this.connectTimer = setTimeout(() => {
       if (!this.connectSent && this.ws?.readyState === WebSocket.OPEN) {
         const err = new Error('gateway connect challenge timeout');
-        this.emit('error', err);
-        this.ws.close(1008, 'connect challenge timeout');
+        this.retireSocket(this.ws, 1008, 'connect challenge timeout');
+        this.safeEmit('error', err);
       }
     }, this.connectChallengeTimeoutMs);
   }
@@ -168,7 +310,12 @@ class GatewayWsClient extends EventEmitter {
     this.connected = false;
     this.connectSent = false;
     this.connectPromise = null;
+    this.socketRetiring = false;
+    this.lastTick = null;
+    this.pingSentAt = 0;
     this.clearConnectTimer();
+    this.clearAttemptTimer();
+    this.clearLivenessWatch();
     const failure = this.pendingConnectError;
     this.pendingConnectError = null;
     const detailCode = failure?.detailCode || null;
@@ -178,15 +325,14 @@ class GatewayWsClient extends EventEmitter {
       this.backoffMs = waitMs;
     }
     this.flushPending(new Error(`gateway closed (${code}): ${reason}`));
-    this.emit('close', {
+    // 先排下一次重连，再通知界面。界面处理抛错时，不能把循环停在这一轮。
+    if (reconnecting) this.scheduleReconnect();
+    this.safeEmit('close', {
       code,
       reason,
       reconnecting,
       errorMessage: describeGatewayClose(detailCode),
     });
-    if (reconnecting) {
-      this.scheduleReconnect();
-    }
   }
 
   flushPending(err) {
@@ -209,8 +355,8 @@ class GatewayWsClient extends EventEmitter {
       if (parsed.event === 'connect.challenge') {
         const nonce = parsed.payload?.nonce;
         if (typeof nonce !== 'string' || !nonce.trim()) {
-          this.emit('error', new Error('gateway connect challenge missing nonce'));
-          this.ws?.close(1008, 'connect challenge missing nonce');
+          this.retireSocket(this.ws, 1008, 'connect challenge missing nonce');
+          this.safeEmit('error', new Error('gateway connect challenge missing nonce'));
           return;
         }
         this.connectNonce = nonce.trim();
@@ -340,6 +486,11 @@ class GatewayWsClient extends EventEmitter {
         this.backoffMs = 1000;
         this.hello = hello;
         this.connected = true;
+        this.tickIntervalMs = resolveTickIntervalMs(hello?.policy?.tickIntervalMs);
+        this.noteInbound();
+        this.pingSentAt = 0;
+        this.clearAttemptTimer();
+        this.startLivenessWatch();
         if (hello?.auth?.deviceToken) {
           storeDeviceAuthToken({
             deviceId: this.deviceIdentity.deviceId,
@@ -376,16 +527,17 @@ class GatewayWsClient extends EventEmitter {
           this.pendingDeviceTokenRetry = true;
           this.deviceTokenRetryBudgetUsed = true;
           this.connectSent = false;
-          this.ws?.close(1008, 'connect retry');
+          this.retireSocket(this.ws, 1008, 'connect retry');
           return;
         }
-        this.emit('error', err);
-        this.ws?.close(1008, 'connect failed');
+        console.warn('[qizi] gateway connect failed, retrying:', err?.message || err);
+        this.retireSocket(this.ws, 1008, 'connect failed');
+        this.safeEmit('error', err);
       });
   }
 
   request(method, params, opts = {}) {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+    if (!this.ws || this.socketRetiring || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error('gateway not connected'));
     }
     const id = crypto.randomUUID();
@@ -414,7 +566,7 @@ class GatewayWsClient extends EventEmitter {
                 && this.ws.readyState === WebSocket.OPEN
                 && this.lastRxAt === silentSince
               ) {
-                try { this.ws.terminate(); } catch {}
+                this.dropSilentSocket('request timeout');
               }
             }, timeoutMs);
       this.pending.set(id, { resolve, reject, expectFinal, timeout });
@@ -423,7 +575,9 @@ class GatewayWsClient extends EventEmitter {
   }
 
   waitForConnect(timeoutMs = 15_000) {
-    if (this.connected) return Promise.resolve(this.hello);
+    if (this.connected && !this.socketRetiring && this.ws?.readyState === WebSocket.OPEN) {
+      return Promise.resolve(this.hello);
+    }
     if (this.connectPromise) return this.connectPromise;
 
     this.connectPromise = new Promise((resolve, reject) => {
@@ -448,7 +602,7 @@ class GatewayWsClient extends EventEmitter {
       };
       this.on('connected', onConnected);
       this.on('error', onError);
-      if (!this.ws && !this.closed) this.start();
+      if (!this.ws && !this.closed && !this.reconnectTimer) this.start();
     }).finally(() => {
       if (this.connected) {
         this.connectPromise = null;
