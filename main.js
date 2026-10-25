@@ -82,6 +82,9 @@ let mainWindow = null;
 const FORWARD_DEDUP_MS = 120_000;
 const FORWARD_REGISTRY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 const FORWARD_REGISTRY_MAX_ENTRIES = 8000;
+// Gateway chat.history 不传 maxChars 时默认只回 8000 字，并在末尾加 ...(truncated)...
+// 该参数的协议上限是 50 万；网页端按单条消息另取全文，这里对齐到上限。
+const CHAT_HISTORY_TEXT_MAX_CHARS = 500_000;
 const FORWARD_REGISTRY_PATH = () => path.join(app.getPath('userData'), 'forward-sent-registry.json');
 function normalizeDebugMode(input) {
   const mode = String(input || '').trim().toLowerCase();
@@ -2010,6 +2013,7 @@ async function fetchMeetingHistory(sessionKey, meta) {
   const result = await client.request('chat.history', {
     sessionKey,
     limit: 200,
+    maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
   });
   return convertMeetingHistoryMessages(result?.messages || [], meta);
 }
@@ -2261,6 +2265,7 @@ async function fetchLatestAssistantText() {
   const result = await client.request('chat.history', {
     sessionKey: getSessionKey(),
     limit: 80,
+    maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
   });
   const msgs = convertHistoryMessages(result?.messages || []);
   return [...msgs].reverse().find((m) => m.who === 'them')?.text || null;
@@ -3851,6 +3856,7 @@ async function loadChatHistoryForSession(sessionKey) {
     const result = await client.request('chat.history', {
       sessionKey: key,
       limit: 500,
+      maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
     });
     return {
       ok: true,
@@ -3870,6 +3876,7 @@ async function loadChatHistory() {
     const result = await client.request('chat.history', {
       sessionKey,
       limit: 500,
+      maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
     });
     return {
       ok: true,
