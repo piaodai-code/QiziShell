@@ -380,6 +380,8 @@ const BATCH_FORWARD_HARD_MAX_BYTES = 2 * 1024 * 1024;
 const STORAGE_PREFIX = 'qizi-shell-messages:';
 const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
 const DEFAULT_SESSION_KEY = 'agent:main:main';
+/** 打开某个 Agent 时实际进入的会话后缀。cron / telegram / a2a 不在这个对话里。 */
+let shellMainKey = 'main';
 const STREAM_RENDER_MIN_MS = 48;
 /** 本地归档保留时长（历史窗口与本地存储） */
 const MESSAGE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
@@ -2000,6 +2002,7 @@ async function openForwardModalWithSnapshot(snapshot, previewLabel, options = {}
       return;
     }
     const agents = Array.isArray(result.agents) ? result.agents : [];
+    rememberShellMainKey(result);
     applyAgentCatalog(agents);
     renderForwardAgentList(agents);
     scheduleForwardPreviewEllipsisCheck();
@@ -2120,6 +2123,7 @@ async function openMeetingFromMessage(index) {
     try {
       const result = await window.qizi.listAgents();
       if (result?.ok) {
+        rememberShellMainKey(result);
         applyAgentCatalog(result.agents);
         agents = result.agents || [];
       }
@@ -3322,17 +3326,42 @@ function sessionChatHasVisibleText(payload) {
   return Boolean(String(payload?.text || payload?.delta || '').trim());
 }
 
+function rememberShellMainKey(result) {
+  const key = String(result?.mainKey || '').trim();
+  if (key && !key.includes(':')) shellMainKey = key;
+}
+
+/** 只有打开 Agent 会看到的主会话才算未读。cron、telegram、a2a、subagent 不会出现在那个对话里。 */
+function visibleUnreadAgentId(sessionKey) {
+  const match = /^agent:([^:]+):([^:]+)$/.exec(String(sessionKey || '').trim());
+  if (!match || match[2] !== shellMainKey) return '';
+  return match[1];
+}
+
 function noteUnreadAgentFromSessionChat(payload) {
   if (!payload || !sessionChatHasVisibleText(payload)) return;
   const state = payload.state;
   if (state !== 'delta' && state !== 'final' && state !== 'aborted' && state !== 'error') return;
-  const sessionKey = String(payload.sessionKey || '').trim();
-  const match = /^agent:([^:]+):/.exec(sessionKey);
-  if (!match) return;
-  const agentId = match[1];
-  if (!agentId || agentId === currentAgentId) return;
+  const agentId = visibleUnreadAgentId(payload.sessionKey);
+  if (!isTrackableUnreadAgent(agentId)) return;
   maybePlayNewMessageSound(payload);
   markAgentUnread(agentId);
+}
+
+/** 未读只认对话列表里的 Agent。目录未到之前先记下，目录到达后再丢掉列表外的 id。 */
+function isTrackableUnreadAgent(agentId) {
+  const id = String(agentId || '').trim();
+  if (!id || id === currentAgentId) return false;
+  if (agentCatalog.size === 0) return true;
+  return agentCatalog.has(id);
+}
+
+function pruneUnreadAgentsToCatalog() {
+  if (agentCatalog.size === 0) return;
+  const next = unreadAgentIds.filter((id) => agentCatalog.has(id));
+  if (next.length === unreadAgentIds.length) return;
+  unreadAgentIds = next;
+  saveUnreadAgentIds();
 }
 
 function normalizeMessageSoundId(value) {
@@ -3373,7 +3402,7 @@ function maybePlayNewMessageSound(payload) {
 
 function markAgentUnread(agentId) {
   const id = String(agentId || '').trim();
-  if (!id || id === currentAgentId || unreadAgentIds.includes(id)) return;
+  if (!isTrackableUnreadAgent(id) || unreadAgentIds.includes(id)) return;
   unreadAgentIds.push(id);
   saveUnreadAgentIds();
   renderUnreadAgentStack();
@@ -3400,7 +3429,8 @@ function refreshOpenAgentPopup() {
 
 function renderUnreadAgentStack() {
   if (!unreadAgentStackEl) return;
-  const ids = unreadAgentIds.filter((id) => id && id !== currentAgentId);
+  pruneUnreadAgentsToCatalog();
+  const ids = unreadAgentIds.filter((id) => id && id !== currentAgentId && agentCatalog.has(id));
   unreadAgentStackEl.innerHTML = '';
   if (!ids.length) {
     unreadAgentStackEl.hidden = true;
@@ -3408,7 +3438,8 @@ function renderUnreadAgentStack() {
   }
   unreadAgentStackEl.hidden = false;
   ids.forEach((agentId, index) => {
-    const agent = agentCatalog.get(agentId) || { id: agentId, label: formatAgentLabel({ id: agentId }) };
+    const agent = agentCatalog.get(agentId);
+    if (!agent) return;
     const label = formatAgentLabel(agent);
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -3478,6 +3509,7 @@ function getAgentCatalogList() {
 
 function handleAgentsCatalogUpdated(result) {
   if (!result?.ok || !Array.isArray(result.agents)) return;
+  rememberShellMainKey(result);
   applyAgentCatalog(result.agents);
   const activeAgent = result.agents.find((entry) => entry.id === currentAgentId);
   if (activeAgent) updateAgentTitleLabel(activeAgent);
@@ -3534,6 +3566,7 @@ async function loadAgentCatalog() {
   try {
     const result = await window.qizi.listAgents();
     if (!result?.ok) return result;
+    rememberShellMainKey(result);
     applyAgentCatalog(result.agents);
     const agent = result.agents.find((entry) => entry.id === currentAgentId);
     if (agent) updateAgentTitleLabel(agent);
@@ -4526,6 +4559,7 @@ async function showAgentPopup() {
       return;
     }
     const agents = Array.isArray(result.agents) ? result.agents : [];
+    rememberShellMainKey(result);
     applyAgentCatalog(agents);
     renderAgentPopup(agents);
   } catch (err) {
