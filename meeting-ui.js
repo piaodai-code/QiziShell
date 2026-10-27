@@ -3,6 +3,7 @@
   const topicInput = document.getElementById('meeting-topic');
   const draftInput = document.getElementById('meeting-draft');
   const goalInput = document.getElementById('meeting-goal');
+  const readingReportInput = document.getElementById('meeting-reading-report');
   const execAgentSelect = document.getElementById('meeting-exec-agent');
   const moderatorSelect = document.getElementById('meeting-moderator');
   const participantsEl = document.getElementById('meeting-participants');
@@ -117,6 +118,7 @@
   function collectPresetPayload() {
     const topic = topicInput?.value?.trim() || '';
     const goal = goalInput?.value?.trim() || '';
+    const readingReport = readingReportInput?.value?.trim() || '';
     const postMeetingExecAgentId = execAgentSelect?.value?.trim() || '';
     const moderatorAgentId = moderatorSelect?.value?.trim() || '';
     const participantAgentIds = collectParticipants();
@@ -125,6 +127,7 @@
     return {
       topic,
       goal,
+      readingReport,
       postMeetingExecAgentId,
       moderatorAgentId,
       moderatorLabel: agentLabel(moderator),
@@ -189,6 +192,7 @@
     if (!preset) return;
     if (topicInput) topicInput.value = preset.topic || '';
     if (goalInput) goalInput.value = preset.goal || '';
+    if (readingReportInput) readingReportInput.value = preset.readingReport || '';
     if (execAgentSelect) {
       const execId = preset.postMeetingExecAgentId || '';
       if ([...execAgentSelect.options].some((opt) => opt.value === execId)) {
@@ -213,6 +217,7 @@
     if (topicInput) topicInput.value = '';
     if (draftInput) draftInput.value = '';
     if (goalInput) goalInput.value = '';
+    if (readingReportInput) readingReportInput.value = '';
     if (execAgentSelect) execAgentSelect.value = '';
     if (moderatorSelect && moderatorSelect.options.length) {
       moderatorSelect.selectedIndex = 0;
@@ -310,6 +315,21 @@
     renderPresetOptions(result.presets || presetStore.listPresets());
   }
 
+  async function ensureReadingReport(readingReport) {
+    const raw = String(readingReport || '').trim();
+    if (!raw) return { ok: true, path: '' };
+    if (!window.qizi?.checkReadingReport) {
+      return { ok: false, error: '暂时无法检查阅读报告是否存在' };
+    }
+    const result = await window.qizi.checkReadingReport(raw);
+    if (!result?.ok) {
+      return { ok: false, error: result?.error || '阅读报告不存在' };
+    }
+    const resolved = String(result.path || raw).trim();
+    if (readingReportInput && resolved) readingReportInput.value = resolved;
+    return { ok: true, path: resolved };
+  }
+
   async function savePreset() {
     if (!presetStore) return;
     const payload = collectPresetPayload();
@@ -317,6 +337,12 @@
       alert('请填写议题');
       return;
     }
+    const report = await ensureReadingReport(payload.readingReport);
+    if (!report.ok) {
+      alert(report.error);
+      return;
+    }
+    payload.readingReport = report.path;
     if (!payload.moderatorAgentId) {
       alert('请选择主持 Agent');
       return;
@@ -397,6 +423,7 @@
     const topic = topicInput?.value?.trim();
     const draft = draftInput?.value?.trim();
     const goal = goalInput?.value?.trim() || '';
+    const readingReport = readingReportInput?.value?.trim() || '';
     const postMeetingExecAgentId = execAgentSelect?.value?.trim() || '';
     const moderatorAgentId = moderatorSelect?.value;
     const participantAgentIds = collectParticipants();
@@ -417,6 +444,11 @@
       alert('请至少选择一名议事 Agent');
       return;
     }
+    const report = await ensureReadingReport(readingReport);
+    if (!report.ok) {
+      alert(report.error);
+      return;
+    }
     const moderator = catalogAgents.find((a) => a.id === moderatorAgentId);
     const agentCatalog = catalogAgents.map((a) => ({
       id: a.id,
@@ -433,6 +465,7 @@
       topic,
       draft,
       goal,
+      readingReport: report.path,
       postMeetingExecAgentId,
       moderatorAgentId,
       moderatorLabel: agentLabel(moderator),

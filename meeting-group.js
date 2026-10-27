@@ -100,6 +100,7 @@ async function startMeetingGroupRelay(config, deps) {
     topic: config.topic,
     draft: config.draft,
     goal: config.goal,
+    readingReport: config.readingReport,
     roundCount,
     moderator: {
       agentId: config.moderatorAgentId,
@@ -451,6 +452,7 @@ async function startMeetingGroupRelay(config, deps) {
         noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
         priorTopicSummaries: noRepeatActive ? priorTopicSummaries : [],
         requirements: config.meetingRequirements,
+        readingReport: config.readingReport,
       });
 
       let replyText = '';
@@ -640,6 +642,7 @@ async function startMeetingGroupRelay(config, deps) {
     topic: config.topic,
     draft: config.draft,
     goal: config.goal || '',
+    readingReport: config.readingReport || '',
     postMeetingExecAgentId: config.postMeetingExecAgentId || '',
     noRepeatPastTopics: Boolean(config.noRepeatPastTopics),
     roundCount,

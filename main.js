@@ -23,6 +23,7 @@ const {
   presetFromMarkdown,
   parseMeetingRequirementSections,
 } = require('./meeting-preset-doc');
+const { prepareReadingReportPath, isMissingGatewayMethod } = require('./meeting-report-file');
 const {
   findModeratorFinalMessage,
   buildMeetingForwardPayload,
@@ -4397,6 +4398,7 @@ function normalizeMeetingPresetInput(raw) {
     preset: {
       topic,
       goal: String(raw?.goal || '').trim(),
+      readingReport: String(raw?.readingReport || '').trim(),
       postMeetingExecAgentId: String(raw?.postMeetingExecAgentId || '').trim(),
       moderatorAgentId,
       moderatorLabel: String(raw?.moderatorLabel || '').trim(),
@@ -4443,10 +4445,35 @@ async function listMeetingPresets() {
   }
 }
 
+async function checkReadingReportOnGateway(readingReport) {
+  const prepared = prepareReadingReportPath(readingReport);
+  if (!prepared.ok || !prepared.path) return prepared;
+  try {
+    const result = await requestMeetingGateway('qizi.files.stat', { path: prepared.path });
+    const resolved = String(result?.path || '').trim();
+    if (!resolved.startsWith('/')) {
+      return { ok: false, error: '网关没有返回阅读报告的绝对路径' };
+    }
+    return { ok: true, path: resolved };
+  } catch (err) {
+    if (isMissingGatewayMethod(err)) {
+      return {
+        ok: false,
+        error: '网关还不能检查服务器上的文件。请在 OpenClaw 网关的 qizi-meetings 插件里补上 qizi.files.stat，然后重启网关。',
+      };
+    }
+    const message = formatGatewayError(err);
+    return { ok: false, error: message || `无法在网关上确认阅读报告：${prepared.path}` };
+  }
+}
+
 async function saveMeetingPreset(raw) {
   const normalized = normalizeMeetingPresetInput(raw);
   if (!normalized.ok) return normalized;
   const preset = normalized.preset;
+  const report = await checkReadingReportOnGateway(preset.readingReport);
+  if (!report.ok) return report;
+  preset.readingReport = report.path;
   const id = meetingPresetId(preset.topic);
   const markdown = buildMeetingPresetMarkdown({ ...preset, id });
   try {
@@ -4502,6 +4529,11 @@ ipcMain.handle('qizi-meeting:presets:save', async (event, payload) => {
   return saveMeetingPreset(payload || {});
 });
 
+ipcMain.handle('qizi-meeting:check-reading-report', async (event, filePath) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return checkReadingReportOnGateway(filePath);
+});
+
 ipcMain.handle('qizi-meeting:presets:delete', async (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return deleteMeetingPreset(payload || {});
@@ -4513,10 +4545,13 @@ ipcMain.handle('qizi-meeting:start', async (event, config) => {
     if (meetingBriefingRunning || (meetingEngine && meetingEngine.running)) {
       return { ok: false, error: '已有会议在进行中' };
     }
+    const report = await checkReadingReportOnGateway(config?.readingReport);
+    if (!report.ok) return report;
     const loaded = await loadMeetingRequirements(config?.topic);
     if (!loaded.ok) return loaded;
     void runMeetingBriefingFlow({
       ...(config || {}),
+      readingReport: report.path,
       meetingRequirements: loaded.sections,
     });
     return { ok: true };

@@ -67,6 +67,19 @@ api.registerGatewayMethod("qizi.meetings.delete", handler, { scope: "operator.wr
       <li><code>qizi.meetings.delete</code> 参数 <code>{"id"}</code>。返回 <code>{"id","deleted":true}</code>。文件本来就不存在时返回成功，<code>deleted</code> 为 <code>false</code>。</li>
     </ul>
 
+    <h2>阅读报告：确认网关上的文件</h2>
+    <p>会议里的「阅读报告」是<strong>这台 Gateway 机器上的绝对路径</strong>，不是 QiziShell 那台电脑上的路径。保存或开始会议时，QiziShell 会调用下面这个方法。方法不存在时，客户端会提示先补上再重启网关。不要把它做成读文件正文的接口，不要返回文件内容。</p>
+    <pre>api.registerGatewayMethod("qizi.files.stat", handler, { scope: "operator.read" });</pre>
+    <ul>
+      <li>参数 <code>{"path":"..."}</code>。<code>path</code> 必须是非空字符串。允许以 <code>/</code> 或 <code>~/</code> 开头。<code>~/</code> 用<strong>跑 Gateway 的这个系统用户</strong>的家目录展开，不要用客户端传来的家目录。</li>
+      <li>展开并规范化之后必须仍是绝对路径。拒绝空字符串、相对路径、<code>\0</code>。</li>
+      <li>用 <code>stat</code> 看它是不是普通文件，并且当前用户能读。目录、不存在、不能读，都要失败。</li>
+      <li>成功返回 <code>{"path":"/展开后的绝对路径","bytes":123}</code>。<code>path</code> 是规范化之后的绝对路径。不要返回正文，日志里也不要打正文。</li>
+      <li>失败信息要让人看懂：不存在写成「阅读报告不存在：路径」，是目录写成「阅读报告不是文件：路径」，不能读写成「阅读报告无法读取：路径」。</li>
+    </ul>
+    <p>验收时挑一个这台机器上真实存在的小文件，调用成功且 <code>path</code> 是绝对路径。再对一个不存在的绝对路径调用，必须失败。不要为了验收去改 Agent 工具。</p>
+    <pre>openclaw gateway call qizi.files.stat --params '{"path":"/etc/hosts"}'</pre>
+
     <h2>已开完的会议全文</h2>
     <p>这是另一份文件，不要写进 <code>meeting-presets</code>。一场已保存会议对应一篇参数；每场开完的会各有一份全文，同一议题会有很多份。</p>
     <p>目录：<code>&lt;Gateway 状态目录&gt;/qizi/meeting-records/</code>。目录权限 <code>0700</code>，文件权限 <code>0600</code>。文件名 <code>&lt;id&gt;.json</code>。<code>id</code> 规则与上面相同。写入先写同目录临时文件，再改名替换。</p>
@@ -104,7 +117,7 @@ openclaw plugins enable qizi-meetings</pre>
       <li><code>## 议事发言要求</code></li>
       <li><code>## 往期主题</code></li>
     </ul>
-    <p>文首字段是：<code>topic</code>、<code>goal</code>、<code>moderatorAgentId</code>、<code>moderatorLabel</code>、<code>participantAgentIds</code>、<code>postMeetingExecAgentId</code>、<code>roundCount</code>（1、2 或 3）、<code>noRepeatPastTopics</code>、<code>savedAt</code>。讨论底稿不在文件里，每次开会时另填。</p>
+    <p>文首字段是：<code>topic</code>、<code>goal</code>、<code>readingReport</code>、<code>moderatorAgentId</code>、<code>moderatorLabel</code>、<code>participantAgentIds</code>、<code>postMeetingExecAgentId</code>、<code>roundCount</code>（1、2 或 3）、<code>noRepeatPastTopics</code>、<code>savedAt</code>。<code>readingReport</code> 是网关这台机器上的绝对路径，留空表示没有。讨论底稿不在文件里，每次开会时另填。</p>
     <p>还没保存过的议题不能直接开始。客户端会提示先保存再开始。</p>
 
     <h2>不要做的事</h2>

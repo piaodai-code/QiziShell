@@ -5617,16 +5617,81 @@ function hideCommandPopup() {
   if (cmdPopup) cmdPopup.hidden = true;
 }
 
+const CARET_MIRROR_STYLE_PROPS = [
+  'boxSizing',
+  'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+  'borderTopStyle', 'borderRightStyle', 'borderBottomStyle', 'borderLeftStyle',
+  'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+  'fontStyle', 'fontVariant', 'fontWeight', 'fontStretch', 'fontSize', 'fontFamily', 'lineHeight',
+  'letterSpacing', 'wordSpacing', 'textIndent', 'textAlign', 'textTransform', 'tabSize',
+];
+
+// 与 textarea 同一套折行宽度，量出光标所在视觉行的 offsetTop。
+function measureCaretLineTops(el, positions) {
+  const cs = getComputedStyle(el);
+  const mirror = document.createElement('div');
+  const style = mirror.style;
+  style.position = 'fixed';
+  style.visibility = 'hidden';
+  style.pointerEvents = 'none';
+  style.left = '0';
+  style.top = '0';
+  style.height = 'auto';
+  style.minHeight = '0';
+  style.maxHeight = 'none';
+  style.overflow = 'hidden';
+  style.whiteSpace = cs.whiteSpace || 'pre-wrap';
+  style.overflowWrap = cs.overflowWrap;
+  style.wordWrap = cs.wordWrap || 'break-word';
+  style.wordBreak = cs.wordBreak;
+  style.lineBreak = cs.lineBreak;
+  for (const prop of CARET_MIRROR_STYLE_PROPS) style[prop] = cs[prop];
+
+  const borderLeft = parseFloat(cs.borderLeftWidth) || 0;
+  const borderRight = parseFloat(cs.borderRightWidth) || 0;
+  // clientWidth 不含滚动条，和输入框里真正用来折行的宽度一致。
+  style.width = `${Math.max(0, el.clientWidth + borderLeft + borderRight)}px`;
+
+  document.body.appendChild(mirror);
+  try {
+    const value = String(el.value || '');
+    return positions.map((position) => {
+      const pos = Math.max(0, Math.min(position, value.length));
+      const marker = document.createElement('span');
+      marker.textContent = value.slice(pos, pos + 1) || '\u200b';
+      mirror.replaceChildren(document.createTextNode(value.slice(0, pos)), marker);
+      return marker.offsetTop;
+    });
+  } finally {
+    mirror.remove();
+  }
+}
+
+function caretLineThreshold(el) {
+  const lineHeight = parseFloat(getComputedStyle(el).lineHeight);
+  return (Number.isFinite(lineHeight) && lineHeight > 0 ? lineHeight : 20) * 0.6;
+}
+
 function isCaretOnFirstLine(el) {
   if (!el) return true;
   const pos = el.selectionStart ?? 0;
-  return !String(el.value || '').slice(0, pos).includes('\n');
+  if (pos <= 0) return true;
+  const value = String(el.value || '');
+  if (/[\r\n]/.test(value.slice(0, pos))) return false;
+  if (el.clientWidth <= 0) return true;
+  const [topAtCaret, topAtStart] = measureCaretLineTops(el, [pos, 0]);
+  return Math.abs(topAtCaret - topAtStart) < caretLineThreshold(el);
 }
 
 function isCaretOnLastLine(el) {
   if (!el) return true;
+  const value = String(el.value || '');
   const pos = el.selectionStart ?? 0;
-  return !String(el.value || '').slice(pos).includes('\n');
+  if (pos >= value.length) return true;
+  if (/[\r\n]/.test(value.slice(pos))) return false;
+  if (el.clientWidth <= 0) return true;
+  const [topAtCaret, topAtEnd] = measureCaretLineTops(el, [pos, value.length]);
+  return Math.abs(topAtCaret - topAtEnd) < caretLineThreshold(el);
 }
 
 function rememberSentInput(text) {

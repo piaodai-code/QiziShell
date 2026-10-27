@@ -111,6 +111,7 @@ contextBridge.exposeInMainWorld('qizi', {
   listPriorTopics: (topic) => ipcRenderer.invoke('qizi-meeting:prior-topics', topic),
   listMeetingPresets: () => ipcRenderer.invoke('qizi-meeting:presets:list'),
   saveMeetingPreset: (payload) => ipcRenderer.invoke('qizi-meeting:presets:save', payload),
+  checkReadingReport: (filePath) => ipcRenderer.invoke('qizi-meeting:check-reading-report', filePath),
   deleteMeetingPreset: (payload) => ipcRenderer.invoke('qizi-meeting:presets:delete', payload),
   openMeetingHelp: () => ipcRenderer.invoke('qizi-meeting:open-help'),
   loadMeetingRecord: (payload) => ipcRenderer.invoke('qizi-meeting:load-record', payload),

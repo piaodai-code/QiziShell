@@ -35,6 +35,7 @@
       id: String(raw?.id || '').trim(),
       topic,
       goal: String(raw?.goal || '').trim(),
+      readingReport: String(raw?.readingReport || '').trim(),
       postMeetingExecAgentId: String(raw?.postMeetingExecAgentId || '').trim(),
       moderatorAgentId: String(raw?.moderatorAgentId || '').trim(),
       moderatorLabel: String(raw?.moderatorLabel || '').trim(),

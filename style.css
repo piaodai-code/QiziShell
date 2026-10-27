@@ -2665,6 +2665,7 @@ body.drag-over .composer-pending {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex: 0 0 auto;
   padding: 14px 18px 12px;
   border-bottom: 1px solid var(--border);
 }
@@ -2678,8 +2679,16 @@ body.drag-over .composer-pending {
   color: #666;
 }
 .meeting-setup {
-  padding: 16px 18px 18px;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 16px 18px 12px;
   overflow-y: auto;
+}
+.meeting-footer {
+  flex: 0 0 auto;
+  padding: 12px 18px 14px;
+  border-top: 1px solid var(--border);
+  background: #fff;
 }
 .meeting-hint {
   font-size: 12px;
@@ -3104,7 +3113,6 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 12px;
 }
 .meeting-actions-left,
 .meeting-actions-right {
@@ -3225,7 +3233,7 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
   white-space: nowrap;
 }
 .meeting-toast {
-  margin-top: 10px;
+  margin-bottom: 10px;
   padding: 8px 12px;
   border-radius: 8px;
   font-size: 12px;

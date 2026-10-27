@@ -39,6 +39,7 @@ function buildMeetingPresetMarkdown(preset) {
     ? participants.map((id) => `  - ${yamlScalar(id)}`).join('\n')
     : '  []';
   const goal = String(preset.goal || '').trim();
+  const readingReport = String(preset.readingReport || '').trim();
   const moderatorLabel = String(preset.moderatorLabel || '').trim();
   const moderatorAgentId = String(preset.moderatorAgentId || '').trim();
   const execId = String(preset.postMeetingExecAgentId || '').trim();
@@ -47,6 +48,7 @@ function buildMeetingPresetMarkdown(preset) {
     '---',
     `topic: ${yamlScalar(topic)}`,
     `goal: ${yamlScalar(goal)}`,
+    `readingReport: ${yamlScalar(readingReport)}`,
     `moderatorAgentId: ${yamlScalar(moderatorAgentId)}`,
     `moderatorLabel: ${yamlScalar(moderatorLabel)}`,
     'participantAgentIds:',
@@ -60,6 +62,7 @@ function buildMeetingPresetMarkdown(preset) {
     `# ${topic}`,
     '',
     goal ? `期望结论方向：${goal}` : '期望结论方向：',
+    readingReport ? `阅读报告：${readingReport}` : '阅读报告：',
     '',
     `- 主持：${moderatorLabel || moderatorAgentId}（${moderatorAgentId}）`,
     `- 议事：${participants.join('、') || '无'}`,
@@ -116,6 +119,7 @@ function presetFromMarkdown(markdown, id) {
     id: PRESET_ID_RE.test(String(id || '')) ? String(id) : meetingPresetId(topic),
     topic,
     goal: String(data.goal || '').trim(),
+    readingReport: String(data.readingReport || '').trim(),
     moderatorAgentId: String(data.moderatorAgentId || '').trim(),
     moderatorLabel: String(data.moderatorLabel || '').trim(),
     participantAgentIds: Array.isArray(data.participantAgentIds)

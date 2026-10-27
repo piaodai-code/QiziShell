@@ -381,6 +381,7 @@ function buildParticipantGroupPrompt({
   softChars = MEETING_PARTICIPANT_SOFT_CHARS,
   hardChars = MEETING_PARTICIPANT_HARD_CHARS,
   requirements = null,
+  readingReport = '',
 }) {
   const priorBlock = buildPriorTopicsSection(priorTopicSummaries, { emptyNote: false });
   const fileRules = requirements
@@ -407,6 +408,7 @@ function buildParticipantGroupPrompt({
     `本次会议隔离 session：\`${groupSessionKey}\`（不是你的 main 私聊）`,
     `你的 agentId：\`${agentId}\`（${agentLabel}）`,
     '',
+    buildReadingReportBlock(readingReport),
     `## 议题\n${topic.trim()}`,
     '',
     '## 讨论底稿',
@@ -1098,10 +1100,22 @@ function extractMeetingFinalSummaryText(record) {
   return '';
 }
 
+function buildReadingReportBlock(readingReport) {
+  const path = String(readingReport || '').trim();
+  if (!path) return '';
+  return [
+    '## 阅读报告',
+    path,
+    '该路径在 OpenClaw 网关所在机器上，不是开会的人自己电脑上的路径。',
+    '硬约束：所有 Agent（主持与全体议事）在开始发言前，务必先读取并仔细阅读该文件的全文。未读完全文不得发言。不得只看文件名、摘要或片段。主持每次派发时，也要明确要求对方先读完该文件再发言。',
+  ].join('\n');
+}
+
 function buildModeratorBriefingMessage({
   topic,
   draft,
   goal,
+  readingReport = '',
   moderator,
   participants,
   roundCount = 2,
@@ -1152,6 +1166,7 @@ function buildModeratorBriefingMessage({
     '## 讨论底稿（原始素材）',
     draft.trim(),
     goal ? `\n## 期望结论方向\n${goal.trim()}\n（这是结论要落到的方向，写进「结论」即可。不要据此给任何人派活。）` : '',
+    buildReadingReportBlock(readingReport),
     noRepeatPastTopics ? `\n${buildPriorTopicsSection(priorTopicSummaries)}` : '',
     !fileRules && noRepeatPastTopics && listPriorTopicEntries(priorTopicSummaries).length
       ? `\n${moderatorNoRepeatRules()}`
@@ -1165,6 +1180,9 @@ function buildModeratorBriefingMessage({
     '',
     '---',
     '请阅读以上任务书后：',
+    String(readingReport || '').trim()
+      ? '0. **先读报告**：在开场和任何派发之前，读取并读完「阅读报告」里的文件全文；每次 @ 议事 Agent 时，要求其同样先读完再发言。'
+      : '',
     '1. 用简短开场向「老大」宣布议题与参与名单；',
     '2. 立即开始 **第 1 轮**：按名单顺序 @ 第一位议事 Agent 的 agentId（如 @mo_bao），要求其只基于底稿回答本次议题要决定的那一件事，一次说完；',
     `3. 按议程推进，直到 ${rounds} 轮结束或达成结论。`,

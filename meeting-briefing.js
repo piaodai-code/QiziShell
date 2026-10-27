@@ -29,6 +29,7 @@ async function startMeetingBriefing(config, deps) {
     topic: config.topic,
     draft: config.draft,
     goal: config.goal,
+    readingReport: config.readingReport,
     moderator: {
       agentId: config.moderatorAgentId,
       label: config.moderatorLabel || moderatorMeta?.label || config.moderatorAgentId,
@@ -71,6 +72,7 @@ async function startMeetingBriefing(config, deps) {
     topic: config.topic,
     draft: config.draft,
     goal: config.goal || '',
+    readingReport: config.readingReport || '',
     moderatorAgentId: config.moderatorAgentId,
     participantAgentIds: [...config.participantAgentIds],
     sessionKey,
