@@ -368,9 +368,20 @@ function moderatorRequirementBlock(requirements, speechKind, noRepeatPastTopics)
   return titles.map((title) => meetingRequirementText(requirements, title)).join('\n\n');
 }
 
+function draftAttachmentBlocks(draft, savedDraft) {
+  const current = String(draft || '').trim();
+  const saved = String(savedDraft || '').trim();
+  const blocks = ['## 本次讨论底稿', current || '无'];
+  if (saved && saved !== current) {
+    blocks.push('', '## 已保存的讨论底稿', saved);
+  }
+  return blocks.join('\n');
+}
+
 function buildParticipantGroupPrompt({
   topic,
   draft,
+  savedDraft = '',
   agentId,
   agentLabel,
   instruction,
@@ -408,11 +419,10 @@ function buildParticipantGroupPrompt({
     `本次会议隔离 session：\`${groupSessionKey}\`（不是你的 main 私聊）`,
     `你的 agentId：\`${agentId}\`（${agentLabel}）`,
     '',
-    buildReadingReportBlock(readingReport),
+    savedReadingReportSection(requirements),
     `## 议题\n${topic.trim()}`,
     '',
-    '## 讨论底稿',
-    draft.trim(),
+    draftAttachmentBlocks(draft, savedDraft),
     priorBlock ? `\n${priorBlock}` : '',
     '',
     '## 当前群聊记录',
@@ -573,7 +583,25 @@ function markModeratorMessageMentionsProcessed(messageIndex, text, roster, moder
   }
 }
 
-function buildMeetingRequirementSections() {
+function readingReportRuleLines(readingReport) {
+  const path = String(readingReport || '').trim();
+  if (!path) return [];
+  return [
+    `- **先读报告（硬约束）**：文件路径 \`${path}\`。该路径在 OpenClaw 网关所在机器上，不是开会的人自己电脑上的路径。`,
+    '- 所有 Agent（主持与全体议事）在开始发言前，务必先读取并仔细阅读该文件的全文。未读完全文不得发言。不得只看文件名、摘要或片段。',
+    '- 主持每次 @ 派发时，必须在同一条派发里明确要求对方先读完该文件再发言。',
+  ];
+}
+
+function savedReadingReportSection(requirements) {
+  const text = String(requirements?.['阅读报告'] || '').trim();
+  if (!text) return '';
+  return `## 阅读报告\n${text}`;
+}
+
+function buildMeetingRequirementSections(readingReport = '') {
+  const ruleBlock = readingReportRuleLines(readingReport);
+  const readingRules = ruleBlock.length ? [...ruleBlock, ''] : [];
   return [
     '## 篇幅与收尾',
     `- 议事建议 ${MEETING_PARTICIPANT_SOFT_CHARS} 字，硬上限 ${MEETING_PARTICIPANT_HARD_CHARS}`,
@@ -584,6 +612,7 @@ function buildMeetingRequirementSections() {
     '- 轮次以本文开头的 roundCount 为准（1、2 或 3）。',
     '',
     '## 主持启动任务书',
+    ...readingRules,
     '你现在是本次会议 **主持 Agent**。硬约束：',
     '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
     '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
@@ -598,6 +627,7 @@ function buildMeetingRequirementSections() {
     '- **禁止派活**：最终总结只写决定了什么。不要安排写稿、剪辑、配音、发布、排期。若会前选了接收人，只转给这个系统指定的 agent 去执行。',
     '',
     '## 主持过程中的要求',
+    ...readingRules,
     '继续主持、空闲提醒、没有识别到 @、强制收尾时都遵守：',
     '- **每条发言只 @ 一位** agentId；纠正派发时**不要**写 @（写纯文字 agentId 即可）；',
     '- 驳回往期主题时，`@agentId` 和「往期主题重复」必须在同一行，才会转发重选；',
@@ -623,6 +653,7 @@ function buildMeetingRequirementSections() {
     ),
     '',
     '## 议事发言要求',
+    ...readingRules,
     '你正在一场 **会议群聊** 中发言。硬约束：',
     '- 只回答本次议题要决定的那一件事。判断理由可以带上，但不要展开议题没要求的工序（写稿、剪辑、配音、发布、排期）；',
     meetingSpeechGuidance(MEETING_PARTICIPANT_SOFT_CHARS, MEETING_PARTICIPANT_HARD_CHARS),
@@ -634,6 +665,7 @@ function buildMeetingRequirementSections() {
     '',
     '## 往期主题',
     moderatorNoRepeatRules(),
+    ...(ruleBlock.length ? ['', buildReadingReportBlock(readingReport)] : []),
   ].join('\n');
 }
 
@@ -1114,6 +1146,7 @@ function buildReadingReportBlock(readingReport) {
 function buildModeratorBriefingMessage({
   topic,
   draft,
+  savedDraft = '',
   goal,
   readingReport = '',
   moderator,
@@ -1163,10 +1196,9 @@ function buildModeratorBriefingMessage({
     '',
     `## 议题\n${topic.trim()}`,
     '',
-    '## 讨论底稿（原始素材）',
-    draft.trim(),
+    draftAttachmentBlocks(draft, savedDraft),
     goal ? `\n## 期望结论方向\n${goal.trim()}\n（这是结论要落到的方向，写进「结论」即可。不要据此给任何人派活。）` : '',
-    buildReadingReportBlock(readingReport),
+    savedReadingReportSection(requirements),
     noRepeatPastTopics ? `\n${buildPriorTopicsSection(priorTopicSummaries)}` : '',
     !fileRules && noRepeatPastTopics && listPriorTopicEntries(priorTopicSummaries).length
       ? `\n${moderatorNoRepeatRules()}`
@@ -1180,9 +1212,6 @@ function buildModeratorBriefingMessage({
     '',
     '---',
     '请阅读以上任务书后：',
-    String(readingReport || '').trim()
-      ? '0. **先读报告**：在开场和任何派发之前，读取并读完「阅读报告」里的文件全文；每次 @ 议事 Agent 时，要求其同样先读完再发言。'
-      : '',
     '1. 用简短开场向「老大」宣布议题与参与名单；',
     '2. 立即开始 **第 1 轮**：按名单顺序 @ 第一位议事 Agent 的 agentId（如 @mo_bao），要求其只基于底稿回答本次议题要决定的那一件事，一次说完；',
     `3. 按议程推进，直到 ${rounds} 轮结束或达成结论。`,

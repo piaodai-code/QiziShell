@@ -35,12 +35,17 @@
       id: String(raw?.id || '').trim(),
       topic,
       goal: String(raw?.goal || '').trim(),
+      draft: raw?.draft == null ? null : String(raw.draft),
       readingReport: String(raw?.readingReport || '').trim(),
       postMeetingExecAgentId: String(raw?.postMeetingExecAgentId || '').trim(),
+      postMeetingExecLabel: String(raw?.postMeetingExecLabel || '').trim(),
       moderatorAgentId: String(raw?.moderatorAgentId || '').trim(),
       moderatorLabel: String(raw?.moderatorLabel || '').trim(),
       participantAgentIds: Array.isArray(raw?.participantAgentIds)
         ? raw.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
+        : [],
+      participantLabels: Array.isArray(raw?.participantLabels)
+        ? raw.participantLabels.map((label) => String(label || '').trim())
         : [],
       roundCount: roundCount === 1 || roundCount === 3 ? roundCount : 2,
       noRepeatPastTopics: Boolean(raw?.noRepeatPastTopics),

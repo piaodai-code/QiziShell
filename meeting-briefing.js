@@ -28,6 +28,7 @@ async function startMeetingBriefing(config, deps) {
   const briefingMessage = buildModeratorBriefingMessage({
     topic: config.topic,
     draft: config.draft,
+    savedDraft: config.savedDraft,
     goal: config.goal,
     readingReport: config.readingReport,
     moderator: {

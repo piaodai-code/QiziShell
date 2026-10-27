@@ -4398,11 +4398,17 @@ function normalizeMeetingPresetInput(raw) {
     preset: {
       topic,
       goal: String(raw?.goal || '').trim(),
+      draft: String(raw?.draft || '').trim(),
       readingReport: String(raw?.readingReport || '').trim(),
       postMeetingExecAgentId: String(raw?.postMeetingExecAgentId || '').trim(),
+      postMeetingExecLabel: String(raw?.postMeetingExecLabel || '').trim(),
       moderatorAgentId,
       moderatorLabel: String(raw?.moderatorLabel || '').trim(),
       participantAgentIds,
+      participantLabels: participantAgentIds.map((id, index) => {
+        const label = Array.isArray(raw?.participantLabels) ? raw.participantLabels[index] : '';
+        return String(label || '').trim() || id;
+      }),
       roundCount: roundCount === 1 || roundCount === 3 ? roundCount : 2,
       noRepeatPastTopics: Boolean(raw?.noRepeatPastTopics),
       savedAtMs: Date.now(),
@@ -4485,6 +4491,28 @@ async function saveMeetingPreset(raw) {
   }
 }
 
+function unsavedMeetingParameters(config, preset) {
+  const drifted = [];
+  const same = (label, left, right) => {
+    if (String(left || '').trim() !== String(right || '').trim()) drifted.push(label);
+  };
+  same('期望结论方向', config?.goal, preset.goal);
+  same('阅读报告', config?.readingReport, preset.readingReport);
+  same('主持', config?.moderatorAgentId, preset.moderatorAgentId);
+  same('会后接收', config?.postMeetingExecAgentId, preset.postMeetingExecAgentId);
+  const formRounds = Number(config?.roundCount);
+  const savedRounds = Number(preset.roundCount);
+  if ((formRounds === 1 || formRounds === 3 ? formRounds : 2) !== savedRounds) drifted.push('讨论轮次');
+  if (Boolean(config?.noRepeatPastTopics) !== Boolean(preset.noRepeatPastTopics)) {
+    drifted.push('不可与往日主题重复');
+  }
+  const formIds = Array.isArray(config?.participantAgentIds)
+    ? config.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (formIds.join('\n') !== (preset.participantAgentIds || []).join('\n')) drifted.push('议事 Agent');
+  return drifted;
+}
+
 async function loadMeetingRequirements(topic) {
   const key = String(topic || '').trim();
   if (!key) return { ok: false, error: '请填写议题' };
@@ -4492,9 +4520,12 @@ async function loadMeetingRequirements(topic) {
   try {
     const client = await withMeetingPresetClient();
     const got = await client.request('qizi.meetings.get', { id });
-    const parsed = parseMeetingRequirementSections(got?.markdown || '');
+    const markdown = got?.markdown || '';
+    const parsed = parseMeetingRequirementSections(markdown);
     if (!parsed.ok) return { ok: false, error: parsed.error || '读取会议要求失败' };
-    return { ok: true, sections: parsed.sections };
+    const preset = presetFromMarkdown(markdown, id);
+    if (!preset) return { ok: false, error: '已保存的会议参数不完整' };
+    return { ok: true, sections: parsed.sections, preset };
   } catch (err) {
     const message = formatGatewayError(err);
     if (/not found|no such|enoent|missing|不存在|未找到/i.test(message)) {
@@ -4545,13 +4576,33 @@ ipcMain.handle('qizi-meeting:start', async (event, config) => {
     if (meetingBriefingRunning || (meetingEngine && meetingEngine.running)) {
       return { ok: false, error: '已有会议在进行中' };
     }
-    const report = await checkReadingReportOnGateway(config?.readingReport);
-    if (!report.ok) return report;
     const loaded = await loadMeetingRequirements(config?.topic);
     if (!loaded.ok) return loaded;
+    const preset = loaded.preset;
+    const drifted = unsavedMeetingParameters(config, preset);
+    if (drifted.length) {
+      return {
+        ok: false,
+        error: `还没保存到 OpenClaw：${drifted.join('、')}。请先保存会议。Agent 读的是服务器上的这份文件，缺一项就会用错。`,
+      };
+    }
+    const report = await checkReadingReportOnGateway(preset.readingReport);
+    if (!report.ok) return report;
     void runMeetingBriefingFlow({
       ...(config || {}),
+      topic: preset.topic,
+      draft: String(config?.draft || '').trim(),
+      savedDraft: preset.draft == null ? '' : preset.draft,
+      goal: preset.goal,
       readingReport: report.path,
+      participantLabels: preset.participantLabels,
+      postMeetingExecLabel: preset.postMeetingExecLabel,
+      postMeetingExecAgentId: preset.postMeetingExecAgentId,
+      moderatorAgentId: preset.moderatorAgentId,
+      moderatorLabel: preset.moderatorLabel || config?.moderatorLabel,
+      participantAgentIds: preset.participantAgentIds,
+      roundCount: preset.roundCount,
+      noRepeatPastTopics: preset.noRepeatPastTopics,
       meetingRequirements: loaded.sections,
     });
     return { ok: true };

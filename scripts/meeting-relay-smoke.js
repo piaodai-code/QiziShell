@@ -11,7 +11,14 @@ const {
   hasClosingModeratorMessage,
   extractMeetingFinalSummaryText,
   buildMeetingRequirementSections,
+  buildModeratorBriefingMessage,
+  buildParticipantGroupPrompt,
 } = require('../meeting-protocol');
+const {
+  parseMeetingRequirementSections,
+  buildMeetingPresetMarkdown,
+  presetFromMarkdown,
+} = require('../meeting-preset-doc');
 
 const MOD = 'qi_zi';
 const roster = [
@@ -266,6 +273,149 @@ runCase('会议要求：当轮总结与最终总结各写一遍', () => {
   if (roundHeading !== 1 || finalHeading !== 1) {
     throw new Error(`总结块重复：当轮 ${roundHeading}，最终 ${finalHeading}`);
   }
+  if (body.includes('先读报告')) throw new Error('未填阅读报告时不应要求先读');
+});
+
+runCase('阅读报告写进主持与议事要求', () => {
+  const path = '/srv/reports/weekly.md';
+  const body = buildMeetingRequirementSections(path);
+  for (const title of ['主持启动任务书', '主持过程中的要求', '议事发言要求']) {
+    const chunk = (body.split(`## ${title}\n`)[1] || '').split('\n## ')[0];
+    if (!chunk.includes('先读报告（硬约束）')) throw new Error(`${title} 缺少强制阅读`);
+    if (!chunk.includes(path)) throw new Error(`${title} 缺少路径`);
+    if (!chunk.includes('未读完全文不得发言')) throw new Error(`${title} 缺少未读完不得发言`);
+  }
+  if (!body.includes('## 阅读报告')) throw new Error('缺少阅读报告章节');
+  const parsed = parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${body}`);
+  if (!parsed.ok) throw new Error(parsed.error || '解析失败');
+  const count = (parsed.sections['主持启动任务书'].match(/先读报告（硬约束）/g) || []).length;
+  if (count !== 1) throw new Error(`强制阅读被写了 ${count} 次`);
+});
+
+runCase('开会时不把文件里没有的阅读报告临时补上', () => {
+  const body = buildMeetingRequirementSections();
+  const parsed = parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${body}`);
+  if (!parsed.ok) throw new Error(parsed.error || '解析失败');
+  const path = '/srv/reports/old.md';
+  const message = buildModeratorBriefingMessage({
+    topic: 't',
+    draft: '底稿',
+    goal: '',
+    readingReport: path,
+    moderator: { agentId: 'qi_zi', label: '启孜' },
+    participants: [{ agentId: 'mo_bao', label: '墨宝' }],
+    requirements: parsed.sections,
+  });
+  if (message.includes('先读报告') || message.includes(path)) {
+    throw new Error('未写入文件的阅读报告被临时拼进了任务书');
+  }
+  const savedBody = buildMeetingRequirementSections(path);
+  const saved = parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${savedBody}`);
+  if (!saved.ok) throw new Error(saved.error || '解析失败');
+  const fromFile = buildModeratorBriefingMessage({
+    topic: 't',
+    draft: '底稿',
+    readingReport: '',
+    moderator: { agentId: 'qi_zi', label: '启孜' },
+    participants: [{ agentId: 'mo_bao', label: '墨宝' }],
+    requirements: saved.sections,
+  });
+  if (!fromFile.includes('未读完全文不得发言') || !fromFile.includes(path)) {
+    throw new Error('已保存的强制阅读没有随任务书原文发出');
+  }
+  const participant = buildParticipantGroupPrompt({
+    topic: 't',
+    draft: '底稿',
+    agentId: 'mo_bao',
+    agentLabel: '墨宝',
+    instruction: '请发言',
+    transcript: '',
+    groupSessionKey: 'agent:mo_bao:a2a:qizi-x',
+    readingReport: '',
+    requirements: saved.sections,
+  });
+  if (!participant.includes('未读完全文不得发言') || !participant.includes(path)) {
+    throw new Error('已保存的强制阅读没有随议事要求原文发出');
+  }
+});
+
+runCase('会议参数完整写入 OpenClaw 文件并可读回', () => {
+  const draft = '## 素材标题\n## 篇幅与收尾\n这是底稿里的标题，不是会议要求';
+  const markdown = buildMeetingPresetMarkdown({
+    topic: '口播',
+    goal: '改口径',
+    draft,
+    readingReport: '/srv/reports/weekly.md',
+    moderatorAgentId: 'qi_zi',
+    moderatorLabel: '启孜',
+    participantAgentIds: ['mo_bao'],
+    participantLabels: ['墨宝'],
+    postMeetingExecAgentId: 'nai_pang',
+    postMeetingExecLabel: '奶胖',
+    roundCount: 2,
+    noRepeatPastTopics: true,
+    savedAtMs: Date.parse('2026-10-27T00:00:00.000Z'),
+  });
+  for (const line of [
+    '议题：口播',
+    '期望结论方向：改口径',
+    '阅读报告：/srv/reports/weekly.md',
+    '主持：启孜（qi_zi）',
+    '墨宝（mo_bao），派发时写 @mo_bao，不要写 @墨宝',
+    '会后接收：奶胖（nai_pang）',
+    '讨论轮次：2',
+    '不可与近 7 天旧题重复：是',
+    '未读完全文不得发言',
+    draft,
+  ]) {
+    if (!markdown.includes(line)) throw new Error(`文件缺少：${line}`);
+  }
+  const preset = presetFromMarkdown(markdown, 'mtest');
+  if (!preset) throw new Error('文件无法读回');
+  if (preset.draft !== draft) throw new Error('讨论底稿没有原样读回');
+  if (preset.participantLabels[0] !== '墨宝') throw new Error('议事名字没有读回');
+  if (preset.postMeetingExecLabel !== '奶胖') throw new Error('会后接收人名字没有读回');
+  if (preset.readingReport !== '/srv/reports/weekly.md') throw new Error('阅读报告没有读回');
+  const parsed = parseMeetingRequirementSections(markdown);
+  if (!parsed.ok) throw new Error(parsed.error || '底稿里的标题冲掉了会议要求');
+  if (parsed.sections['篇幅与收尾'].includes('这是底稿里的标题')) {
+    throw new Error('底稿标题覆盖了正式的篇幅与收尾');
+  }
+  const empty = buildMeetingPresetMarkdown({
+    topic: '空参数',
+    moderatorAgentId: 'qi_zi',
+    participantAgentIds: ['mo_bao'],
+    roundCount: 2,
+  });
+  if (!empty.includes('阅读报告：无') || !empty.includes('期望结论方向：无') || !empty.includes('会后接收：无')) {
+    throw new Error('空参数被省略了');
+  }
+});
+
+runCase('开始会议临时附上本次底稿和已保存底稿', () => {
+  const message = buildModeratorBriefingMessage({
+    topic: 't',
+    draft: '今天的新素材',
+    savedDraft: '上次保存的底稿',
+    moderator: { agentId: 'qi_zi', label: '启孜' },
+    participants: [{ agentId: 'mo_bao', label: '墨宝' }],
+    requirements: parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${buildMeetingRequirementSections()}`).sections,
+  });
+  if (!message.includes('## 本次讨论底稿') || !message.includes('今天的新素材')) {
+    throw new Error('本次底稿没有附上');
+  }
+  if (!message.includes('## 已保存的讨论底稿') || !message.includes('上次保存的底稿')) {
+    throw new Error('已保存的底稿没有附上');
+  }
+  const same = buildModeratorBriefingMessage({
+    topic: 't',
+    draft: '同一份',
+    savedDraft: '同一份',
+    moderator: { agentId: 'qi_zi', label: '启孜' },
+    participants: [{ agentId: 'mo_bao', label: '墨宝' }],
+    requirements: parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${buildMeetingRequirementSections()}`).sections,
+  });
+  if (same.includes('## 已保存的讨论底稿')) throw new Error('相同底稿被附了两遍');
 });
 
 if (process.exitCode) {

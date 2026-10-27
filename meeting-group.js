@@ -99,6 +99,7 @@ async function startMeetingGroupRelay(config, deps) {
   const briefingMessage = buildModeratorBriefingMessage({
     topic: config.topic,
     draft: config.draft,
+    savedDraft: config.savedDraft,
     goal: config.goal,
     readingReport: config.readingReport,
     roundCount,
@@ -444,6 +445,7 @@ async function startMeetingGroupRelay(config, deps) {
       const prompt = buildParticipantGroupPrompt({
         topic: config.topic,
         draft: config.draft,
+        savedDraft: config.savedDraft,
         agentId: pending.agentId,
         agentLabel: pending.label,
         instruction: pending.instruction,
@@ -685,11 +687,13 @@ async function startMeetingGroupRelay(config, deps) {
 }
 
 function buildRoster(config) {
-  return config.participantAgentIds.map((agentId) => {
+  const savedLabels = Array.isArray(config.participantLabels) ? config.participantLabels : [];
+  return config.participantAgentIds.map((agentId, index) => {
+    const saved = String(savedLabels[index] || '').trim();
     const entry = (config.agentCatalog || []).find((a) => a.id === agentId);
     return {
       agentId,
-      label: entry?.label || entry?.name || agentId,
+      label: saved || entry?.label || entry?.name || agentId,
     };
   });
 }

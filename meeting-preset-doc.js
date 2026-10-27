@@ -31,29 +31,54 @@ function parseYamlScalar(raw) {
   return text;
 }
 
+function yamlList(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '  []';
+  return list.map((item) => `  - ${yamlScalar(item)}`).join('\n');
+}
+
+function shownOrNone(value) {
+  const text = String(value || '').trim();
+  return text || '无';
+}
+
 function buildMeetingPresetMarkdown(preset) {
   const topic = String(preset.topic || '').trim();
   const participants = Array.isArray(preset.participantAgentIds) ? preset.participantAgentIds : [];
+  const participantLabels = participants.map((id, index) => {
+    const label = Array.isArray(preset.participantLabels) ? preset.participantLabels[index] : '';
+    return String(label || '').trim() || id;
+  });
   const savedAt = new Date(preset.savedAtMs || Date.now()).toISOString();
-  const participantLines = participants.length
-    ? participants.map((id) => `  - ${yamlScalar(id)}`).join('\n')
-    : '  []';
   const goal = String(preset.goal || '').trim();
+  const draft = String(preset.draft || '').trim();
   const readingReport = String(preset.readingReport || '').trim();
   const moderatorLabel = String(preset.moderatorLabel || '').trim();
   const moderatorAgentId = String(preset.moderatorAgentId || '').trim();
   const execId = String(preset.postMeetingExecAgentId || '').trim();
+  const execLabel = String(preset.postMeetingExecLabel || '').trim();
   const roundCount = preset.roundCount === 1 || preset.roundCount === 3 ? preset.roundCount : 2;
+  const roster = participants.length
+    ? participants.map((id, index) => {
+      const label = participantLabels[index] || id;
+      const avoid = label === id ? '' : `，不要写 @${label}`;
+      return `  - ${label}（${id}），派发时写 @${id}${avoid}`;
+    })
+    : ['  - 无'];
   return [
     '---',
     `topic: ${yamlScalar(topic)}`,
     `goal: ${yamlScalar(goal)}`,
+    `draft: ${yamlScalar(draft)}`,
     `readingReport: ${yamlScalar(readingReport)}`,
     `moderatorAgentId: ${yamlScalar(moderatorAgentId)}`,
     `moderatorLabel: ${yamlScalar(moderatorLabel)}`,
     'participantAgentIds:',
-    participantLines,
+    yamlList(participants),
+    'participantLabels:',
+    yamlList(participantLabels),
     `postMeetingExecAgentId: ${yamlScalar(execId)}`,
+    `postMeetingExecLabel: ${yamlScalar(execLabel)}`,
     `roundCount: ${roundCount}`,
     `noRepeatPastTopics: ${preset.noRepeatPastTopics ? 'true' : 'false'}`,
     `savedAt: ${yamlScalar(savedAt)}`,
@@ -61,16 +86,24 @@ function buildMeetingPresetMarkdown(preset) {
     '',
     `# ${topic}`,
     '',
-    goal ? `期望结论方向：${goal}` : '期望结论方向：',
-    readingReport ? `阅读报告：${readingReport}` : '阅读报告：',
+    '## 会议参数',
     '',
-    `- 主持：${moderatorLabel || moderatorAgentId}（${moderatorAgentId}）`,
-    `- 议事：${participants.join('、') || '无'}`,
-    `- 会后接收：${execId || '无'}`,
-    `- 轮次：${roundCount}`,
+    `- 议题：${topic}`,
+    `- 期望结论方向：${shownOrNone(goal)}`,
+    `- 阅读报告：${shownOrNone(readingReport)}`,
+    `- 讨论底稿：${draft ? '见下一节「讨论底稿」全文' : '无'}`,
+    `- 主持：${shownOrNone(moderatorLabel)}（${moderatorAgentId}）`,
+    '- 议事：',
+    ...roster,
+    `- 会后接收：${execId ? `${execLabel || execId}（${execId}）` : '无'}`,
+    `- 讨论轮次：${roundCount}`,
     `- 不可与近 7 天旧题重复：${preset.noRepeatPastTopics ? '是' : '否'}`,
     '',
-    buildMeetingRequirementSections(),
+    '## 讨论底稿',
+    '',
+    draft || '无',
+    '',
+    buildMeetingRequirementSections(readingReport),
     '',
   ].join('\n');
 }
@@ -90,7 +123,7 @@ function parseFrontMatter(markdown) {
     }
     const key = found[1];
     const rest = found[2];
-    if (!rest && (key === 'participantAgentIds')) {
+    if (!rest && (key === 'participantAgentIds' || key === 'participantLabels')) {
       const items = [];
       i += 1;
       while (i < lines.length && /^\s+-\s+/.test(lines[i])) {
@@ -120,12 +153,17 @@ function presetFromMarkdown(markdown, id) {
     topic,
     goal: String(data.goal || '').trim(),
     readingReport: String(data.readingReport || '').trim(),
+    draft: Object.prototype.hasOwnProperty.call(data, 'draft') ? String(data.draft ?? '') : null,
     moderatorAgentId: String(data.moderatorAgentId || '').trim(),
     moderatorLabel: String(data.moderatorLabel || '').trim(),
     participantAgentIds: Array.isArray(data.participantAgentIds)
       ? data.participantAgentIds.map((item) => String(item || '').trim()).filter(Boolean)
       : [],
+    participantLabels: Array.isArray(data.participantLabels)
+      ? data.participantLabels.map((item) => String(item || '').trim())
+      : [],
     postMeetingExecAgentId: String(data.postMeetingExecAgentId || '').trim(),
+    postMeetingExecLabel: String(data.postMeetingExecLabel || '').trim(),
     roundCount: roundCount === 1 || roundCount === 3 ? roundCount : 2,
     noRepeatPastTopics: data.noRepeatPastTopics === true,
     savedAtMs: Number.isFinite(savedAtMs) ? savedAtMs : Date.now(),

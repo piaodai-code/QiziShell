@@ -124,14 +124,21 @@
     const participantAgentIds = collectParticipants();
     const roundCount = collectRoundCount();
     const moderator = catalogAgents.find((a) => a.id === moderatorAgentId);
+    const execAgent = catalogAgents.find((a) => a.id === postMeetingExecAgentId);
     return {
       topic,
       goal,
+      draft: draftInput?.value?.trim() || '',
       readingReport,
       postMeetingExecAgentId,
+      postMeetingExecLabel: postMeetingExecAgentId ? agentLabel(execAgent) : '',
       moderatorAgentId,
       moderatorLabel: agentLabel(moderator),
       participantAgentIds,
+      participantLabels: participantAgentIds.map((id) => {
+        const agent = catalogAgents.find((item) => item.id === id);
+        return agentLabel(agent);
+      }),
       roundCount,
       noRepeatPastTopics: Boolean(noRepeatInput?.checked),
     };
@@ -191,6 +198,7 @@
   function applyPreset(preset) {
     if (!preset) return;
     if (topicInput) topicInput.value = preset.topic || '';
+    if (draftInput && preset.draft != null) draftInput.value = preset.draft;
     if (goalInput) goalInput.value = preset.goal || '';
     if (readingReportInput) readingReportInput.value = preset.readingReport || '';
     if (execAgentSelect) {
@@ -444,11 +452,6 @@
       alert('请至少选择一名议事 Agent');
       return;
     }
-    const report = await ensureReadingReport(readingReport);
-    if (!report.ok) {
-      alert(report.error);
-      return;
-    }
     const moderator = catalogAgents.find((a) => a.id === moderatorAgentId);
     const agentCatalog = catalogAgents.map((a) => ({
       id: a.id,
@@ -465,7 +468,7 @@
       topic,
       draft,
       goal,
-      readingReport: report.path,
+      readingReport,
       postMeetingExecAgentId,
       moderatorAgentId,
       moderatorLabel: agentLabel(moderator),
