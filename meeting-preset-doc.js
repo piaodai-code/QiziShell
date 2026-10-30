@@ -201,6 +201,28 @@ function parseMeetingRequirementSections(markdown) {
   return { ok: true, sections };
 }
 
+function unsavedMeetingParameters(config, preset) {
+  const drifted = [];
+  const same = (label, left, right) => {
+    if (String(left || '').trim() !== String(right || '').trim()) drifted.push(label);
+  };
+  same('期望结论方向', config?.goal, preset?.goal);
+  same('阅读报告', config?.readingReport, preset?.readingReport);
+  same('主持', config?.moderatorAgentId, preset?.moderatorAgentId);
+  same('会后接收', config?.postMeetingExecAgentId, preset?.postMeetingExecAgentId);
+  const formRounds = Number(config?.roundCount);
+  const savedRounds = Number(preset?.roundCount);
+  if ((formRounds === 1 || formRounds === 3 ? formRounds : 2) !== savedRounds) drifted.push('讨论轮次');
+  if (Boolean(config?.noRepeatPastTopics) !== Boolean(preset?.noRepeatPastTopics)) {
+    drifted.push('不可与往日主题重复');
+  }
+  const formIds = Array.isArray(config?.participantAgentIds)
+    ? config.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  if (formIds.join('\n') !== (preset?.participantAgentIds || []).join('\n')) drifted.push('议事 Agent');
+  return drifted;
+}
+
 module.exports = {
   PRESET_ID_RE,
   REQUIRED_MEETING_SECTIONS,
@@ -208,4 +230,5 @@ module.exports = {
   buildMeetingPresetMarkdown,
   presetFromMarkdown,
   parseMeetingRequirementSections,
+  unsavedMeetingParameters,
 };

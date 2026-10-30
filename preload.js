@@ -8,6 +8,11 @@ contextBridge.exposeInMainWorld('qizi', {
     return () => ipcRenderer.removeListener('openclaw:side-result', handler);
   },
   openHistory: (context) => ipcRenderer.invoke('openclaw:history:open', context),
+  onHistoryMessageAction: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:history:message-action', handler);
+    return () => ipcRenderer.removeListener('openclaw:history:message-action', handler);
+  },
   checkConnection: () => ipcRenderer.invoke('openclaw:check'),
   loadHistory: () => ipcRenderer.invoke('openclaw:history'),
   loadHistoryForSession: (payload) => ipcRenderer.invoke('openclaw:history:session', payload),
@@ -83,6 +88,8 @@ contextBridge.exposeInMainWorld('qizi', {
   },
   exportMessagesWord: (entries) => ipcRenderer.invoke('openclaw:export:word', { entries }),
   switchAgent: (agentId) => ipcRenderer.invoke('openclaw:session:switch', agentId),
+  getPrivateChannel: (agentId) => ipcRenderer.invoke('openclaw:private-channel:get', agentId),
+  setPrivateChannel: (payload) => ipcRenderer.invoke('openclaw:private-channel:set', payload),
   listModels: () => ipcRenderer.invoke('openclaw:models:list'),
   getCurrentModel: () => ipcRenderer.invoke('openclaw:models:current'),
   getSessionInfo: () => ipcRenderer.invoke('openclaw:session:info'),

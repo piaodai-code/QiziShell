@@ -97,6 +97,12 @@
             <img src="assets/icons/history-inline.png" alt="" aria-hidden="true">
           </button>
           <span class="composer-tools-separator" aria-hidden="true">|</span>
+          <div class="channel-picker-wrap">
+            <button type="button" class="icon-btn icon-btn-img channel-picker-btn" id="channel-picker-btn" title="哪一通道" aria-label="哪一通道" aria-haspopup="menu" aria-expanded="false">
+              <img id="channel-picker-glyph" src="assets/icons/channel-line.png" alt="" aria-hidden="true">
+            </button>
+            <div class="perm-popup channel-popup" id="channel-popup" hidden role="menu" aria-label="哪一通道"></div>
+          </div>
           <div class="perm-picker-wrap">
             <button type="button" class="icon-btn icon-btn-img perm-picker-btn" id="perm-picker-btn" title="执行权限" aria-label="执行权限" aria-haspopup="menu" aria-expanded="false">
               <img id="perm-picker-glyph" src="assets/icons/perm-default.png" alt="" aria-hidden="true">
@@ -433,7 +439,7 @@
         </div>
         <label class="meeting-field">
           <span class="meeting-label">讨论底稿</span>
-          <span class="meeting-field-hint">每次开会都可以改。开始时会临时附上这次填写的底稿；文件里已经保存过的底稿也会一并附上，不会被这次的内容覆盖</span>
+          <span class="meeting-field-hint">没点「保存会议」也可以直接开始，这一场只用界面上的参数，结束时不写入会议文件。已保存的会议仍按网关上的文件开会；底稿可以每次不同，和文件里不一样时两份都会交给主持，且不会覆盖文件</span>
           <textarea class="meeting-textarea meeting-textarea-markdown" id="meeting-draft" rows="10" placeholder="粘贴原始素材、背景资料、备选方案等（Markdown 会原样交给主持 Agent）"></textarea>
         </label>
         <label class="meeting-field">

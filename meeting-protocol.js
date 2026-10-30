@@ -613,6 +613,10 @@ function buildMeetingRequirementSections(readingReport = '') {
     '',
     '## 主持启动任务书',
     ...readingRules,
+    '硬约束（先看这里）：',
+    '- 立刻用文字回复。不要调用 exec、read、sessions_list、sessions_history，也不要排查会议程序、插件或数据库。',
+    '- 议题、底稿、名单和规则都已经写在这条消息里。不要再去打开别的文件。',
+    '- 只有这条消息写明了必须阅读的文件路径时，才可以读取那一个文件，读完马上开场。没写路径时，一个工具都不要用。',
     '你现在是本次会议 **主持 Agent**。硬约束：',
     '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
     '- **不要**发表你自己的议事观点，也不要替其他 Agent 代笔；',
@@ -1175,6 +1179,11 @@ function buildModeratorBriefingMessage({
   return [
     '【QiziShell 会议模式 · 启动任务书】',
     '',
+    '硬约束（先看这里）：',
+    '- 立刻用文字回复。不要调用 exec、read、sessions_list、sessions_history，也不要排查会议程序、插件或数据库。',
+    '- 议题、底稿、名单和规则都已经写在这条消息里。不要再去打开别的文件。',
+    '- 只有这条消息写明了必须阅读的文件路径时，才可以读取那一个文件，读完马上开场。没写路径时，一个工具都不要用。',
+    '',
     fileRules || [
       '你现在是本次会议 **主持 Agent**。硬约束：',
       '- 你只负责主持：派发（@ 指定议事 Agent 发言）、轮次总结、最终收尾。不要派活；若会前选了接收人，只转给这个系统指定的 agent 去执行；',
@@ -1211,6 +1220,7 @@ function buildModeratorBriefingMessage({
     `主持：${moderator.label || moderator.agentId} (\`${moderator.agentId}\`) — 仅主持，不参与议事。`,
     '',
     '---',
+    '现在就用文字回复，不要先调用工具。',
     '请阅读以上任务书后：',
     '1. 用简短开场向「老大」宣布议题与参与名单；',
     '2. 立即开始 **第 1 轮**：按名单顺序 @ 第一位议事 Agent 的 agentId（如 @mo_bao），要求其只基于底稿回答本次议题要决定的那一件事，一次说完；',
@@ -1218,6 +1228,19 @@ function buildModeratorBriefingMessage({
     '',
     '（本消息由 QiziShell 代老大发送；老大当前仅观察，不插话。）',
   ].filter(Boolean).join('\n');
+}
+
+function buildModeratorSpeakNowMessage(participants) {
+  const first = Array.isArray(participants) ? participants[0] : null;
+  const mention = first?.agentId ? `@${first.agentId}` : '第一位议事 Agent 的 agentId';
+  return [
+    '停。不要再调用任何工具，不要 exec，不要读文件，不要排查系统。',
+    '上一条任务书里的议题、底稿、名单和规则已经足够。',
+    '现在只用一段文字回复：',
+    '1. 向老大简短宣布议题和参与名单；',
+    `2. 立刻 ${mention}，请对方只回答本次议题要决定的那一件事。`,
+    '不要输出工具调用。',
+  ].join('\n');
 }
 
 function buildModeratorInitPrompt({ topic, goal, deliberants, moderatorLabel }) {
@@ -1418,6 +1441,7 @@ module.exports = {
   hasClosingModeratorMessage,
   isFinalSummaryExpected,
   buildModeratorBriefingMessage,
+  buildModeratorSpeakNowMessage,
   buildMeetingRequirementSections,
   buildPriorTopicsSection,
   extractMeetingFinalSummaryText,

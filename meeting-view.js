@@ -811,10 +811,20 @@
         startedAt: meetingConfig?.startedAt || new Date().toISOString(),
       };
       populateHistorySelect();
-      setStatus('任务书已发送');
+      if (event.payload.ephemeral) {
+        meetingConfig = { ...meetingConfig, ephemeral: true };
+      }
+      setStatus(event.payload.ephemeral
+        ? '临时会议 · 任务书已发送（这套参数不会写入已保存的会议）'
+        : '任务书已发送');
     }
     if (event.type === 'briefing_sending') {
-      setStatus('主持 Agent 正在接收任务书…');
+      setStatus(meetingConfig?.ephemeral
+        ? '临时会议 · 主持正在接收任务书…'
+        : '主持 Agent 正在接收任务书…');
+    }
+    if (event.type === 'briefing_redirect') {
+      setStatus('主持在调用工具，已要求它直接开口…');
     }
     if (event.type === 'transcript') {
       applyTranscript(event.payload?.messages);

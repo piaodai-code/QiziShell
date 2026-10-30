@@ -3,6 +3,7 @@ const { createMeetingTranscript } = require('./meeting-transcript');
 const {
   buildMeetingSessionKey,
   buildModeratorBriefingMessage,
+  buildModeratorSpeakNowMessage,
   parseMeetingMentions,
   pickRelayMention,
   isRepickMention,
@@ -134,22 +135,60 @@ async function startMeetingGroupRelay(config, deps) {
 
   onEvent?.({ type: 'briefing_sending', payload: { sessionKey: moderatorSessionKey } });
 
-  let moderatorReply = '';
-  if (typeof chatTurnStream === 'function') {
-    const streamResult = await chatTurnStream(moderatorSessionKey, briefingMessage, {
-      onDelta: (text) => {
-        transcript.upsertModeratorStream(text, { streaming: true });
-        emitTranscript();
-        onEvent?.({ type: 'moderator_delta', payload: { text } });
-      },
+  const mustReadReport = Boolean(String(config.meetingRequirements?.['阅读报告'] || '').trim());
+
+  async function streamModerator(message, turnOpts = {}) {
+    if (typeof chatTurnStream === 'function') {
+      return chatTurnStream(moderatorSessionKey, message, {
+        ...turnOpts,
+        onDelta: (text) => {
+          transcript.upsertModeratorStream(text, { streaming: true });
+          emitTranscript();
+          onEvent?.({ type: 'moderator_delta', payload: { text } });
+        },
+      });
+    }
+    const result = await chatTurn(moderatorSessionKey, message, turnOpts);
+    const text = result?.text || '';
+    if (text) {
+      transcript.appendModerator(text);
+      emitTranscript();
+      onEvent?.({ type: 'moderator_delta', payload: { text } });
+    }
+    return result;
+  }
+
+  async function streamModeratorOrEmpty(message, turnOpts) {
+    try {
+      return await streamModerator(message, turnOpts);
+    } catch (err) {
+      if (isCancelled?.()) throw err;
+      const messageText = err?.message || String(err);
+      if (/超时|中止|aborted/i.test(messageText)) return { text: '', timedOut: true };
+      throw err;
+    }
+  }
+
+  let streamResult = await streamModeratorOrEmpty(briefingMessage, {
+    timeoutMs: 180_000,
+    absoluteTimeoutMs: mustReadReport ? 8 * 60 * 1000 : 180_000,
+    stopOnTools: !mustReadReport,
+  });
+  let moderatorReply = chatTurnText(streamResult);
+  if (!moderatorReply) {
+    onEvent?.({ type: 'briefing_redirect', payload: {} });
+    transcript.finalizeStreaming();
+    streamResult = await streamModeratorOrEmpty(buildModeratorSpeakNowMessage(roster), {
+      timeoutMs: 180_000,
+      absoluteTimeoutMs: 180_000,
+      stopOnTools: true,
     });
     moderatorReply = chatTurnText(streamResult);
-  } else {
-    const result = await chatTurn(moderatorSessionKey, briefingMessage);
-    moderatorReply = result.text || '';
-    transcript.appendModerator(moderatorReply);
-    emitTranscript();
-    onEvent?.({ type: 'moderator_delta', payload: { text: moderatorReply } });
+  }
+  if (!moderatorReply) {
+    throw new Error(streamResult?.stoppedForTools
+      ? '主持没有开口，仍在调用工具。请换一个只负责主持、不跑命令的 Agent。'
+      : '主持没有在时限内开口');
   }
 
   transcript.finalizeStreaming();

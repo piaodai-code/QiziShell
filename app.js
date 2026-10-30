@@ -34,6 +34,8 @@ const modelPopup = document.getElementById('model-popup');
 const sessionControlsBtn = document.getElementById('session-controls-btn');
 const sessionControlsPopup = document.getElementById('session-controls-popup');
 const sessionControlsBadge = document.getElementById('session-controls-badge');
+const channelPickerBtn = document.getElementById('channel-picker-btn');
+const channelPopup = document.getElementById('channel-popup');
 const permPickerBtn = document.getElementById('perm-picker-btn');
 const permPickerGlyph = document.getElementById('perm-picker-glyph');
 const permPopup = document.getElementById('perm-popup');
@@ -382,6 +384,8 @@ const LEGACY_STORAGE_KEY = 'qizi-shell-messages';
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 /** 打开某个 Agent 时实际进入的会话后缀。cron / telegram / a2a 不在这个对话里。 */
 let shellMainKey = 'main';
+/** @type {Map<string, string>} */
+const shellSessionKeyByAgent = new Map();
 const STREAM_RENDER_MIN_MS = 48;
 /** 本地归档保留时长（历史窗口与本地存储） */
 const MESSAGE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
@@ -2109,8 +2113,7 @@ async function submitForward() {
   }
 }
 
-async function openMeetingFromMessage(index) {
-  const msg = getActiveMessages()[index];
+async function openMeetingSetupForMessage(msg) {
   if (!msg) return;
   const draft = getMessageSelectableText(msg);
   if (!draft) {
@@ -2133,6 +2136,79 @@ async function openMeetingFromMessage(index) {
   }
   if (window.MeetingUI?.openSetup) {
     window.MeetingUI.openSetup(agents, { draft });
+  }
+}
+
+async function openMeetingFromMessage(index) {
+  await openMeetingSetupForMessage(getActiveMessages()[index]);
+}
+
+function findLiveMessageIndex(snapshot) {
+  if (!snapshot) return -1;
+  let loose = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (!msg || msg.streaming || msg.who !== snapshot.who) continue;
+    const sameText = String(msg.text || '').trim() === String(snapshot.text || '').trim();
+    const sameMs = snapshot.sentAtMs != null && msg.sentAtMs != null && msg.sentAtMs === snapshot.sentAtMs;
+    if (sameMs && sameText) return i;
+    if (sameText && snapshot.runId != null && msg.runId === snapshot.runId) return i;
+    if (historyMessagesMatch(msg, snapshot) && loose < 0) loose = i;
+  }
+  return loose;
+}
+
+function scrollLiveMessageIntoView(index) {
+  const row = messagesEl?.querySelectorAll('.msg')[index];
+  row?.scrollIntoView({ block: 'center' });
+}
+
+async function applyHistoryMessageAction(action, snapshot) {
+  contextMenuSource = 'chat';
+  const index = findLiveMessageIndex(snapshot);
+  const msg = index >= 0 ? messages[index] : snapshot;
+  if (!msg) return;
+  if (action === 'copy') {
+    if (index >= 0) {
+      await copyMessageAtIndex(index);
+      return;
+    }
+    const text = buildMessageCopyText(msg);
+    if (!text) {
+      setStatus('该消息没有可复制的内容', 'error');
+      return;
+    }
+    const ok = await copyTextToClipboard(text);
+    setStatus(ok ? '已复制' : '复制失败', ok ? 'ok' : 'error');
+    return;
+  }
+  if (action === 'quote') {
+    setPendingQuoteFromMessage(msg);
+    return;
+  }
+  if (action === 'forward') {
+    await openForwardModal(msg);
+    return;
+  }
+  if (action === 'multiselect') {
+    if (index < 0 || !isMessageSelectable(messages[index])) {
+      setStatus('这条消息不在当前会话里，无法多选', 'error');
+      return;
+    }
+    enterMultiSelectMode(index);
+    scrollLiveMessageIntoView(index);
+    return;
+  }
+  if (action === 'export') {
+    if (!isMessageSelectable(msg)) {
+      setStatus('该消息没有可保存的文字', 'error');
+      return;
+    }
+    await exportMessagesToWord([buildExportEntryForMessage(msg)]);
+    return;
+  }
+  if (action === 'start-meeting') {
+    await openMeetingSetupForMessage(msg);
   }
 }
 
@@ -3329,13 +3405,27 @@ function sessionChatHasVisibleText(payload) {
 function rememberShellMainKey(result) {
   const key = String(result?.mainKey || '').trim();
   if (key && !key.includes(':')) shellMainKey = key;
+  const keys = result?.shellSessionKeys;
+  if (!keys || typeof keys !== 'object') return;
+  for (const [agentId, sessionKey] of Object.entries(keys)) {
+    const id = String(agentId || '').trim();
+    const stored = String(sessionKey || '').trim();
+    if (id && stored) shellSessionKeyByAgent.set(id, stored);
+  }
 }
 
-/** 只有打开 Agent 会看到的主会话才算未读。cron、telegram、a2a、subagent 不会出现在那个对话里。 */
+function shellSessionKeyForAgent(agentId) {
+  const id = String(agentId || '').trim();
+  if (id && shellSessionKeyByAgent.has(id)) return shellSessionKeyByAgent.get(id);
+  return `agent:${id || 'main'}:${shellMainKey}`;
+}
+
+/** 只有这个 Agent 当前打开的那一本私聊才算未读。会议、定时任务和别的通道不算。 */
 function visibleUnreadAgentId(sessionKey) {
-  const match = /^agent:([^:]+):([^:]+)$/.exec(String(sessionKey || '').trim());
-  if (!match || match[2] !== shellMainKey) return '';
-  return match[1];
+  const key = String(sessionKey || '').trim();
+  const agentId = parseAgentIdFromSessionKey(key);
+  if (!agentId || key !== shellSessionKeyForAgent(agentId)) return '';
+  return agentId;
 }
 
 function noteUnreadAgentFromSessionChat(payload) {
@@ -4531,6 +4621,7 @@ async function showAgentPopup() {
   hideModelPopup();
   hideCommandPopup();
   hidePermissionPopup();
+  hideChannelPopup();
   hideAttachPopup();
   agentPopup.hidden = false;
   titlebarAgentBtn.classList.add('open');
@@ -4906,6 +4997,7 @@ function showAttachPopup() {
   hideModelPopup();
   hideSessionControlsPopup();
   hidePermissionPopup();
+  hideChannelPopup();
   hideEmojiPicker();
   attachPopup.hidden = false;
   attachPickerBtn.classList.add('open');
@@ -4958,6 +5050,7 @@ async function showPermissionPopup() {
   hideModelPopup();
   hideSessionControlsPopup();
   hideAttachPopup();
+  hideChannelPopup();
   permissionPopupError = '';
   permPopup.hidden = false;
   permPickerBtn.classList.add('open');
@@ -5221,6 +5314,7 @@ async function showSessionControlsPopup() {
   hideCommandPopup();
   hideModelPopup();
   hidePermissionPopup();
+  hideChannelPopup();
   hideAttachPopup();
   sessionControlsPopup.hidden = false;
   sessionControlsBtn.classList.add('open');
@@ -5322,6 +5416,7 @@ async function showModelPopup() {
   hideCommandPopup();
   hideSessionControlsPopup();
   hidePermissionPopup();
+  hideChannelPopup();
   hideAttachPopup();
   modelPopup.hidden = false;
   modelPickerBtn.classList.add('open');
@@ -5583,6 +5678,7 @@ function selectActiveCommandPopupItem() {
 
 function showCommandPopup(filter) {
   hidePermissionPopup();
+  hideChannelPopup();
   hideAttachPopup();
   if (!cmdPopup) return;
   const q = (filter || '').toLowerCase();
@@ -5997,6 +6093,12 @@ if (window.qizi.onToolEvent) {
 if (window.qizi.onChatSegment) {
   window.qizi.onChatSegment((payload) => {
     applyChatSegment(payload);
+  });
+}
+
+if (window.qizi.onHistoryMessageAction) {
+  window.qizi.onHistoryMessageAction((payload) => {
+    void applyHistoryMessageAction(payload?.action, payload?.message);
   });
 }
 
@@ -6535,6 +6637,7 @@ function showEmojiPicker() {
   if (!emojiPickerEl) return;
   hideModelPopup();
   hidePermissionPopup();
+  hideChannelPopup();
   hideAttachPopup();
   emojiPickerEl.hidden = false;
   positionEmojiPicker();
@@ -6752,6 +6855,13 @@ if (sessionControlsBtn) {
   });
 }
 
+if (channelPickerBtn) {
+  channelPickerBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    void showChannelPopup();
+  });
+}
+
 if (permPickerBtn) {
   permPickerBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -6781,6 +6891,9 @@ document.addEventListener('click', (e) => {
   }
   if (permPopup && !permPopup.hidden) {
     if (!e.target.closest('.perm-picker-wrap')) hidePermissionPopup();
+  }
+  if (channelPopup && !channelPopup.hidden) {
+    if (!e.target.closest('.channel-picker-wrap')) hideChannelPopup();
   }
   if (attachPopup && !attachPopup.hidden) {
     if (!e.target.closest('.attach-picker-wrap')) hideAttachPopup();
@@ -6815,6 +6928,10 @@ document.addEventListener('keydown', (e) => {
     }
     if (forwardModal && !forwardModal.hidden) {
       closeForwardModal();
+      return;
+    }
+    if (channelPopup && !channelPopup.hidden) {
+      hideChannelPopup();
       return;
     }
     if (settingsModal && !settingsModal.hidden) {
@@ -7672,6 +7789,210 @@ async function testSettingsConnection() {
   }
 }
 
+let channelPopupCatalog = null;
+let channelPopupBusy = false;
+
+function hideChannelPopup() {
+  if (!channelPopup) return;
+  channelPopup.hidden = true;
+  channelPopup.innerHTML = '';
+  channelPopupCatalog = null;
+  if (channelPickerBtn) {
+    channelPickerBtn.classList.remove('open');
+    channelPickerBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function renderChannelPopup(catalog, errorText) {
+  if (!channelPopup) return;
+  channelPopup.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'perm-popup-head';
+  const title = document.createElement('div');
+  title.className = 'perm-popup-title';
+  title.textContent = '哪一通道';
+  head.appendChild(title);
+  channelPopup.appendChild(head);
+
+  const options = Array.isArray(catalog?.options) ? catalog.options : [];
+  if (!options.length && !errorText) {
+    const empty = document.createElement('div');
+    empty.className = 'channel-popup-note';
+    empty.textContent = '还没有可选的通道。';
+    channelPopup.appendChild(empty);
+  }
+  for (const option of options) {
+    const selected = option.selectable === true && option.id === catalog?.selectedId;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `perm-item${selected ? ' active' : ''}${option.selectable ? '' : ' is-disabled'}`;
+    btn.setAttribute('role', 'menuitemradio');
+    btn.setAttribute('aria-checked', selected ? 'true' : 'false');
+    if (option.selectable !== true) btn.setAttribute('aria-disabled', 'true');
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (option.selectable !== true) return;
+      void selectPrivateChannel(option);
+    });
+
+    const copy = document.createElement('span');
+    copy.className = 'perm-item-copy';
+    const name = document.createElement('span');
+    name.className = 'perm-item-name';
+    name.textContent = option.label || '';
+    copy.appendChild(name);
+    if (option.detail) {
+      const desc = document.createElement('span');
+      desc.className = 'perm-item-desc';
+      desc.textContent = option.detail;
+      copy.appendChild(desc);
+    }
+
+    const mark = document.createElement('span');
+    mark.className = 'perm-item-mark';
+    if (selected) mark.innerHTML = permissionCheckSvg();
+    btn.appendChild(copy);
+    btn.appendChild(mark);
+    channelPopup.appendChild(btn);
+  }
+
+  const note = document.createElement('div');
+  note.className = 'channel-popup-note';
+  note.textContent = '以前混在一起的旧消息仍留在「只在这台 Mac 上」。';
+  channelPopup.appendChild(note);
+
+  if (errorText) {
+    const err = document.createElement('div');
+    err.className = 'perm-popup-error';
+    err.textContent = errorText;
+    channelPopup.appendChild(err);
+  }
+}
+
+async function showChannelPopup() {
+  if (!channelPopup || !channelPickerBtn) return;
+  if (!channelPopup.hidden) {
+    hideChannelPopup();
+    return;
+  }
+  hideAgentPopup();
+  hideCommandPopup();
+  hideModelPopup();
+  hideSessionControlsPopup();
+  hidePermissionPopup();
+  hideAttachPopup();
+  hideEmojiPicker();
+  hideAppMenu();
+  channelPopupCatalog = null;
+  channelPopup.hidden = false;
+  channelPickerBtn.classList.add('open');
+  channelPickerBtn.setAttribute('aria-expanded', 'true');
+  renderChannelPopup({ options: [] });
+  const loading = channelPopup.querySelector('.channel-popup-note');
+  if (loading) loading.textContent = '正在读取已接上的聊天软件…';
+  if (!window.qizi?.getPrivateChannel) {
+    renderChannelPopup(null, '当前版本还不能读取私聊通道');
+    return;
+  }
+  try {
+    const result = await window.qizi.getPrivateChannel(currentAgentId);
+    if (channelPopup.hidden) return;
+    if (!result?.ok) {
+      renderChannelPopup(null, result?.error || '读取失败');
+      return;
+    }
+    channelPopupCatalog = result;
+    renderChannelPopup(result);
+  } catch (err) {
+    if (channelPopup.hidden) return;
+    renderChannelPopup(null, err.message || '读取失败');
+  }
+}
+
+async function adoptShellSession(nextSessionKey) {
+  if (!nextSessionKey || nextSessionKey === currentSessionKey) return;
+  if (multiSelectMode) exitMultiSelectMode();
+  dismissBtwSideCard();
+  clearPendingOutbound();
+  chatScopeEpoch += 1;
+  resetChatTimeline();
+  messages = [];
+  pendingImages = [];
+  pendingFiles = [];
+  activeRunId = null;
+  userAborted = false;
+  currentSessionKey = nextSessionKey;
+  currentAgentId = parseAgentIdFromSessionKey(nextSessionKey);
+  loadMessages();
+  messages = finalizeHistoryMessages(messages);
+  syncCurrentRunIdFromMessages();
+  render({ scrollToBottom: true });
+  if (ENABLE_GATEWAY_HISTORY_SYNC) {
+    lastSyncedHistorySignature = '';
+    lastSessionSyncAt = 0;
+    await syncHistoryFromGateway();
+    const sessionInfo = await window.qizi.getSessionInfo();
+    if (sessionInfo?.ok && sessionInfo.hasActiveRun && !window.MeetingView?.isVisible?.()) {
+      await resumeInterruptedSession();
+    } else {
+      clearStaleStreamingState({ force: true });
+    }
+  } else {
+    clearStaleStreamingState({ force: true });
+  }
+  resetOutboundChatState({ clearQueue: true });
+  await refreshCurrentModelBadge();
+  await refreshSessionInfo();
+}
+
+async function selectPrivateChannel(option) {
+  if (!option || option.selectable !== true || channelPopupBusy) return;
+  if (option.id === (channelPopupCatalog?.selectedId || 'mac')) {
+    hideChannelPopup();
+    return;
+  }
+  if (!window.qizi?.setPrivateChannel) return;
+  channelPopupBusy = true;
+  if (channelPickerBtn) channelPickerBtn.classList.add('is-pending');
+  const meetingOpen = Boolean(window.MeetingView?.isVisible?.());
+  if (!meetingOpen && busy) {
+    userAborted = true;
+    try {
+      await window.qizi.abortChat();
+    } catch {
+      // 旧的这一轮停不掉也不挡住切换
+    }
+    stopStreamHistoryPoll();
+    setBusy(false);
+    activeRunId = null;
+  }
+  try {
+    const result = await window.qizi.setPrivateChannel({
+      agentId: currentAgentId,
+      choiceId: option.id,
+    });
+    if (!result?.ok) {
+      renderChannelPopup(channelPopupCatalog, result?.error || '切换失败');
+      return;
+    }
+    if (result.shellSessionKeys) rememberShellMainKey({ shellSessionKeys: result.shellSessionKeys });
+    if (result.appliedToOpenChat && result.sessionKey) {
+      await adoptShellSession(result.sessionKey);
+    }
+    hideChannelPopup();
+    const phrase = result.label === '只在这台 Mac 上'
+      ? '已改成只在这台 Mac 上'
+      : `已改成${result.label || '这条通道'}`;
+    const extra = result.scopeChanged ? '之后各聊天软件的新私聊会分开。' : '';
+    setStatus(`${phrase}。${extra}`, 'ok');
+  } catch (err) {
+    renderChannelPopup(channelPopupCatalog, err.message || '切换失败');
+  } finally {
+    channelPopupBusy = false;
+    if (channelPickerBtn) channelPickerBtn.classList.remove('is-pending');
+  }
+}
+
 function hideAppMenu() {
   if (!appMenuPopup) return;
   appMenuPopup.hidden = true;
@@ -7690,6 +8011,7 @@ function toggleAppMenu() {
   hideAgentPopup();
   hideModelPopup();
   hideCommandPopup();
+  hideChannelPopup();
   appMenuPopup.hidden = false;
   settingsBtn.classList.add('open');
   settingsBtn.setAttribute('aria-expanded', 'true');

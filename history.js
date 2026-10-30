@@ -5,9 +5,13 @@ const historySearchPrev = document.getElementById('history-search-prev');
 const historySearchNext = document.getElementById('history-search-next');
 const historySearchClear = document.getElementById('history-search-clear');
 
+const historyContextMenuEl = document.getElementById('msg-context-menu');
+
 let currentSearchMarks = [];
 let currentSearchIndex = -1;
 let renderGeneration = 0;
+let displayedMessages = [];
+let historyMenuIndex = -1;
 
 function isStreamingPlaceholderText(text) {
   const trimmed = String(text || '').trim();
@@ -51,7 +55,9 @@ function renderHeader(context) {
 
 function renderHistoryMessages(context, messages) {
   renderHeader(context);
-  window.MessageView.renderMessageList(messagesEl, messages, {
+  displayedMessages = Array.isArray(messages) ? messages : [];
+  hideHistoryContextMenu();
+  window.MessageView.renderMessageList(messagesEl, displayedMessages, {
     agent: context?.agent,
     showAvatars: false,
   });
@@ -62,6 +68,8 @@ async function renderHistory(context) {
   const generation = ++renderGeneration;
   const sessionKey = context?.sessionKey || '';
   if (!sessionKey) {
+    displayedMessages = [];
+    hideHistoryContextMenu();
     if (messagesEl) {
       messagesEl.innerHTML = '<div class="msg-hint">无法读取会话信息</div>';
     }
@@ -77,6 +85,8 @@ async function renderHistory(context) {
 
   const messages = prepareMessagesForDisplay(saved);
   if (!messages.length && messagesEl) {
+    displayedMessages = [];
+    hideHistoryContextMenu();
     messagesEl.innerHTML = '<div class="msg-hint">暂无历史消息</div>';
     applySearch('');
     return;
@@ -193,6 +203,81 @@ function stepSearch(delta) {
   setActiveSearchMark(currentSearchIndex + delta);
 }
 
+function hideHistoryContextMenu() {
+  historyMenuIndex = -1;
+  if (historyContextMenuEl) historyContextMenuEl.hidden = true;
+}
+
+function showHistoryContextMenu(x, y, index) {
+  if (!historyContextMenuEl) return;
+  historyMenuIndex = index;
+  historyContextMenuEl.hidden = false;
+  const menuRect = historyContextMenuEl.getBoundingClientRect();
+  const maxX = window.innerWidth - menuRect.width - 8;
+  const maxY = window.innerHeight - menuRect.height - 8;
+  historyContextMenuEl.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
+  historyContextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+}
+
+function historyActionSnapshot(msg) {
+  const images = Array.isArray(msg?.images) ? msg.images : [];
+  const files = Array.isArray(msg?.files) ? msg.files : [];
+  return {
+    who: msg?.who,
+    text: msg?.text || '',
+    quote: msg?.quote || undefined,
+    forward: msg?.forward || undefined,
+    sentTime: msg?.sentTime,
+    sentAtMs: msg?.sentAtMs,
+    time: msg?.time,
+    runId: msg?.runId,
+    images: images.length ? images.map(() => ({})) : undefined,
+    files: files.length
+      ? files.map((file) => ({ name: file?.name, mimeType: file?.mimeType, size: file?.size }))
+      : undefined,
+  };
+}
+
+async function runHistoryMenuAction(action) {
+  const msg = displayedMessages[historyMenuIndex];
+  hideHistoryContextMenu();
+  if (!msg || !window.qiziHistory?.runMessageAction) return;
+  const result = await window.qiziHistory.runMessageAction({
+    action,
+    message: historyActionSnapshot(msg),
+  });
+  if (result?.ok) window.close();
+}
+
+function bindHistoryContextMenu() {
+  if (!messagesEl || messagesEl.dataset.historyMenuBound) return;
+  messagesEl.dataset.historyMenuBound = '1';
+  messagesEl.addEventListener('contextmenu', (e) => {
+    const row = e.target.closest('.msg');
+    if (!row || !messagesEl.contains(row)) return;
+    e.preventDefault();
+    const rows = [...messagesEl.querySelectorAll('.msg')];
+    const index = rows.indexOf(row);
+    if (index < 0 || index >= displayedMessages.length) return;
+    showHistoryContextMenu(e.clientX, e.clientY, index);
+  });
+  messagesEl.addEventListener('scroll', hideHistoryContextMenu);
+  if (historyContextMenuEl) {
+    historyContextMenuEl.addEventListener('click', (e) => {
+      const item = e.target.closest('[data-action]');
+      if (!item || item.disabled) return;
+      void runHistoryMenuAction(item.dataset.action);
+    });
+  }
+  document.addEventListener('click', (e) => {
+    if (!historyContextMenuEl || historyContextMenuEl.hidden) return;
+    if (!e.target.closest('#msg-context-menu')) hideHistoryContextMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideHistoryContextMenu();
+  });
+}
+
 function bindSearchEvents() {
   if (!historySearchInput) return;
   historySearchInput.addEventListener('input', () => {
@@ -231,6 +316,7 @@ async function boot(initialContext) {
 }
 
 window.MessageView.bindQuoteToggles(messagesEl);
+bindHistoryContextMenu();
 bindSearchEvents();
 void boot();
 

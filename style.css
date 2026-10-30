@@ -1806,9 +1806,45 @@ body.meeting-mode .composer {
 .icon-btn-mic.is-recording img {
   opacity: 1;
 }
+.channel-picker-wrap,
 .perm-picker-wrap {
   position: relative;
   flex-shrink: 0;
+}
+.channel-picker-btn img {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  display: block;
+  opacity: 1;
+}
+.channel-picker-btn.open {
+  background: #ececec;
+}
+.channel-picker-btn.is-pending { opacity: 0.72; }
+.channel-popup {
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.channel-popup .perm-popup-head {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.channel-popup .perm-item {
+  grid-template-columns: minmax(0, 1fr) 18px;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+.channel-popup .perm-item.is-disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.channel-popup .perm-item.is-disabled:hover { background: transparent; }
+.channel-popup-note {
+  padding: 4px 12px 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #8a8a8a;
 }
 .perm-picker-btn {
   color: #4a4a4a;

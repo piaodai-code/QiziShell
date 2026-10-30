@@ -12,12 +12,14 @@ const {
   extractMeetingFinalSummaryText,
   buildMeetingRequirementSections,
   buildModeratorBriefingMessage,
+  buildModeratorSpeakNowMessage,
   buildParticipantGroupPrompt,
 } = require('../meeting-protocol');
 const {
   parseMeetingRequirementSections,
   buildMeetingPresetMarkdown,
   presetFromMarkdown,
+  unsavedMeetingParameters,
 } = require('../meeting-preset-doc');
 
 const MOD = 'qi_zi';
@@ -416,6 +418,50 @@ runCase('开始会议临时附上本次底稿和已保存底稿', () => {
     requirements: parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${buildMeetingRequirementSections()}`).sections,
   });
   if (same.includes('## 已保存的讨论底稿')) throw new Error('相同底稿被附了两遍');
+});
+
+runCase('任务书要求主持立刻开口，不要先查系统', () => {
+  const message = buildModeratorBriefingMessage({
+    topic: 't',
+    draft: '底稿',
+    moderator: { agentId: 'qi_zi', label: '启孜' },
+    participants: [{ agentId: 'mo_bao', label: '墨宝' }],
+    requirements: parseMeetingRequirementSections(`---\ntopic: "t"\n---\n${buildMeetingRequirementSections()}`).sections,
+  });
+  if (!message.includes('不要调用 exec')) throw new Error('任务书没有禁止工具');
+  if (!message.includes('不要先调用工具')) throw new Error('任务书结尾没有要求立刻开口');
+  if (message.includes('先读报告')) throw new Error('没填阅读报告时不应出现先读报告');
+  const nudge = buildModeratorSpeakNowMessage([{ agentId: 'mo_bao', label: '墨宝' }]);
+  if (!nudge.includes('@mo_bao') || !nudge.includes('不要再调用任何工具')) {
+    throw new Error('口头提醒没有指向第一位议事');
+  }
+});
+
+runCase('只有和已保存文件不一致时才算临时会议', () => {
+  const preset = {
+    goal: '改口径',
+    readingReport: '',
+    moderatorAgentId: 'qi_zi',
+    postMeetingExecAgentId: '',
+    roundCount: 2,
+    noRepeatPastTopics: false,
+    participantAgentIds: ['mo_bao'],
+  };
+  const form = {
+    goal: '改口径',
+    readingReport: '',
+    moderatorAgentId: 'qi_zi',
+    postMeetingExecAgentId: '',
+    roundCount: 2,
+    noRepeatPastTopics: false,
+    participantAgentIds: ['mo_bao'],
+    draft: '这次的新底稿',
+  };
+  if (unsavedMeetingParameters(form, preset).length !== 0) {
+    throw new Error('底稿不同不应要求重存');
+  }
+  const drifted = unsavedMeetingParameters({ ...form, goal: '另一方向' }, preset);
+  if (!drifted.includes('期望结论方向')) throw new Error(`未发现改过的参数：${drifted.join(',')}`);
 });
 
 if (process.exitCode) {

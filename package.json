@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.0-7i",
+  "version": "0.2.0-8",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -8,7 +8,8 @@
     "build": "electron-builder --mac --publish never",
     "ship": "bash scripts/ship.sh",
     "release": "bash scripts/release-mac.sh",
-    "test:meeting-relay": "node scripts/meeting-relay-smoke.js"
+    "test:meeting-relay": "node scripts/meeting-relay-smoke.js",
+    "test:private-channel": "node scripts/private-channel-smoke.js"
   },
   "build": {
     "appId": "com.qizi.shell",
@@ -47,6 +48,7 @@
       "update-preload.js",
       "update-checker.js",
       "forward-format.js",
+      "private-channel.js",
       "meeting-forward.js",
       "meeting-*.js",
       "style.css",

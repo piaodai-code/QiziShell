@@ -15,13 +15,18 @@ const {
   loadFinishedMeeting,
   listPriorSummaries,
 } = require('./meeting-record-remote');
-const { isMeetingA2ASessionKey, isModeratorPostCloseStub } = require('./meeting-protocol');
+const {
+  isMeetingA2ASessionKey,
+  isModeratorPostCloseStub,
+  buildMeetingRequirementSections,
+} = require('./meeting-protocol');
 const {
   PRESET_ID_RE,
   meetingPresetId,
   buildMeetingPresetMarkdown,
   presetFromMarkdown,
   parseMeetingRequirementSections,
+  unsavedMeetingParameters,
 } = require('./meeting-preset-doc');
 const { prepareReadingReportPath, isMissingGatewayMethod } = require('./meeting-report-file');
 const {
@@ -29,6 +34,13 @@ const {
   buildMeetingForwardPayload,
   isMeetingClosingStub,
 } = require('./meeting-forward');
+const {
+  createPrivateChannelStore,
+  buildPrivateChannelCatalog,
+  publicChannelOption,
+  normalizeDmScope,
+  dmScopeRank,
+} = require('./private-channel');
 
 function isSafeExternalHttpUrl(url) {
   if (typeof url !== 'string') return false;
@@ -421,16 +433,9 @@ const BTW_TIMEOUT_MS = 2 * 60 * 1000;
 const pendingBtwRuns = new Map();
 let openClawConfigCache = null;
 let sessionKey = null;
+let privateChannelStore = null;
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 const SHELL_SESSION_MAIN_KEY = 'main';
-/** 定时任务/后台会话后缀；Shell 不应自动跟到这些 session */
-const SYSTEM_SESSION_SUFFIXES = new Set([
-  'dreaming',
-  'cron',
-  'memory',
-  'review',
-  'recap',
-]);
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 const MESSAGE_SOUND_IDS = ['日历铃声.mp3', '明亮音调.mp3', '水滴音.mp3'];
@@ -555,11 +560,11 @@ async function fetchAgentMainSessionModels(client, mainKey = 'main') {
   const map = new Map();
   try {
     const result = await client.request('sessions.list', { limit: 200 });
-    const suffix = `:${mainKey}`;
     for (const session of result?.sessions || []) {
-      if (!session?.key || !session.key.endsWith(suffix)) continue;
+      if (!session?.key) continue;
       const match = /^agent:([^:]+):/.exec(session.key);
       if (!match) continue;
+      if (session.key !== shellSessionKeyForAgent(match[1], mainKey)) continue;
       const modelProvider = session.modelProvider ?? null;
       const model = session.model ?? null;
       map.set(match[1], {
@@ -600,26 +605,31 @@ function parseAgentIdFromSessionKey(sessionKey) {
   return match ? match[1] : 'main';
 }
 
-function extractSessionSuffix(sessionKey, agentId) {
-  const prefix = `agent:${agentId}:`;
-  if (!sessionKey || !sessionKey.startsWith(prefix)) return null;
-  return sessionKey.slice(prefix.length);
-}
-
 function pinnedSessionKeyForAgent(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
   return buildAgentSessionKey(agentId, mainKey);
 }
 
+function getPrivateChannels() {
+  if (!privateChannelStore) {
+    privateChannelStore = createPrivateChannelStore(
+      path.join(app.getPath('userData'), 'private-channel.json'),
+    );
+  }
+  return privateChannelStore;
+}
+
+function shellSessionKeyForAgent(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
+  return getPrivateChannels().shellSessionKey(agentId, mainKey);
+}
+
+function sendFieldsForSession(sessionKey) {
+  return getPrivateChannels().sendFieldsForSession(sessionKey);
+}
+
 function sanitizeSessionKeyForShell(sessionKey, mainKey = SHELL_SESSION_MAIN_KEY) {
   const trimmed = String(sessionKey || '').trim();
-  if (!trimmed) return DEFAULT_SESSION_KEY;
-  const agentId = parseAgentIdFromSessionKey(trimmed);
-  const suffix = extractSessionSuffix(trimmed, agentId);
-  const pinned = pinnedSessionKeyForAgent(agentId, mainKey);
-  if (!suffix || suffix !== mainKey || SYSTEM_SESSION_SUFFIXES.has(suffix)) {
-    return pinned;
-  }
-  return trimmed;
+  const agentId = parseAgentIdFromSessionKey(trimmed || DEFAULT_SESSION_KEY);
+  return shellSessionKeyForAgent(agentId, mainKey);
 }
 
 /** @type {Map<string, string>} */
@@ -2418,10 +2428,12 @@ function handleGatewayAgentLifecycleEvent(payload) {
 function handleGatewayAgentEvent(payload) {
   if (!payload || typeof payload !== 'object') return;
   if (payload.stream === 'tool') {
+    noteMeetingRunActivity(payload, { tool: true });
     handleGatewayToolEvent(payload);
     return;
   }
   if (payload.stream === 'lifecycle') {
+    noteMeetingRunActivity(payload, { tool: false });
     handleGatewayAgentLifecycleEvent(payload);
   }
 }
@@ -2524,9 +2536,18 @@ function broadcastMeetingEvent(event) {
 
 function finishMeetingRun(gatewayRunId, outcome) {
   const run = pendingMeetingRuns.get(gatewayRunId);
-  if (!run) return;
+  if (!run || run.settled) return;
+  run.settled = true;
   if (run.timeout) clearTimeout(run.timeout);
   pendingMeetingRuns.delete(gatewayRunId);
+  if (run.stoppingForTools && (outcome.stoppedForTools || outcome.aborted)) {
+    run.resolve({ text: outcome.text || run.fullText || '', stoppedForTools: true });
+    return;
+  }
+  if (outcome.stoppedForTools) {
+    run.resolve({ text: outcome.text || run.fullText || '', stoppedForTools: true });
+    return;
+  }
   if (outcome.error) {
     run.reject(new Error(formatGatewayError(new Error(outcome.error))));
     return;
@@ -2539,9 +2560,11 @@ function finishMeetingRun(gatewayRunId, outcome) {
 }
 
 function handleMeetingGatewayChatEvent(payload) {
-  const run = pendingMeetingRuns.get(payload.runId);
-  if (!run) return false;
+  const found = findPendingMeetingRun(payload);
+  if (!found) return false;
+  const { id, run } = found;
   run.lastEventAt = Date.now();
+  if (typeof run.armIdle === 'function') run.armIdle();
   if (payload.state === 'delta') {
     run.fullText = resolveDeltaText(run.fullText, payload);
     if (typeof run.onDelta === 'function') {
@@ -2554,51 +2577,150 @@ function handleMeetingGatewayChatEvent(payload) {
     if (finalText && finalText.length >= run.fullText.length && !looksLikeLeakedToolPayloadText(finalText)) {
       run.fullText = finalText;
     }
-    finishMeetingRun(payload.runId, { ok: true, text: run.fullText });
+    finishMeetingRun(id, { ok: true, text: run.fullText });
     return true;
   }
   if (payload.state === 'aborted') {
-    finishMeetingRun(payload.runId, { aborted: true, text: run.fullText });
+    finishMeetingRun(id, { aborted: true, text: run.fullText });
     return true;
   }
   if (payload.state === 'error') {
-    finishMeetingRun(payload.runId, { error: payload.errorMessage || 'chat error' });
+    finishMeetingRun(id, { error: payload.errorMessage || 'chat error' });
     return true;
   }
   return true;
 }
 
-function runMeetingChatTurn(sessionKey, message, { timeoutMs = 120000, onDelta } = {}) {
-  return new Promise(async (resolve, reject) => {
-    let gatewayRunId;
-    try {
-      const client = ensureGateway();
-      await client.waitForConnect();
-      const idempotencyKey = `qizi-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const ack = await client.request('chat.send', {
+function findPendingMeetingRun(payload) {
+  const runId = payload?.runId == null ? '' : String(payload.runId);
+  if (runId && pendingMeetingRuns.has(runId)) {
+    return { id: runId, run: pendingMeetingRuns.get(runId) };
+  }
+  const sessionKey = typeof payload?.sessionKey === 'string' ? payload.sessionKey.trim() : '';
+  if (!sessionKey) return null;
+  const matches = [];
+  for (const [id, run] of pendingMeetingRuns.entries()) {
+    if (run.sessionKey === sessionKey) matches.push({ id, run });
+  }
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function noteMeetingRunActivity(payload, { tool = false } = {}) {
+  const found = findPendingMeetingRun(payload);
+  if (!found || found.run.settled) return;
+  const { id, run } = found;
+  run.lastEventAt = Date.now();
+  if (typeof run.armIdle === 'function') run.armIdle();
+  if (tool && run.stopOnTools && !String(run.fullText || '').trim() && !run.stoppingForTools) {
+    run.stoppingForTools = true;
+    void (async () => {
+      await abortMeetingChatRun(run.sessionKey, id);
+      finishMeetingRun(id, { stoppedForTools: true, text: '' });
+    })();
+  }
+}
+
+async function abortMeetingChatRun(sessionKey, runId) {
+  try {
+    const client = ensureGateway();
+    if (!client?.connected) return;
+    await client.request('chat.abort', { sessionKey, runId });
+  } catch (err) {
+    console.warn('[qizi] meeting chat.abort failed:', err?.message || err);
+  }
+}
+
+async function subscribeMeetingSession(client, sessionKey) {
+  try {
+    await client.request('sessions.messages.subscribe', { key: sessionKey });
+  } catch (err) {
+    console.warn('[qizi] meeting session subscribe failed:', err?.message || err);
+  }
+}
+
+function runMeetingChatTurn(sessionKey, message, {
+  timeoutMs = 180000,
+  absoluteTimeoutMs,
+  onDelta,
+  stopOnTools = false,
+} = {}) {
+  return new Promise((resolve, reject) => {
+    const idleMs = timeoutMs;
+    const absoluteMs = typeof absoluteTimeoutMs === 'number' ? absoluteTimeoutMs : timeoutMs;
+    const startedAt = Date.now();
+    let gatewayRunId = '';
+    let settled = false;
+
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      const run = gatewayRunId ? pendingMeetingRuns.get(gatewayRunId) : null;
+      if (run) {
+        run.settled = true;
+        if (run.timeout) clearTimeout(run.timeout);
+        pendingMeetingRuns.delete(gatewayRunId);
+      }
+      const runId = gatewayRunId;
+      void (async () => {
+        if (runId) await abortMeetingChatRun(sessionKey, runId);
+        reject(error instanceof Error ? error : new Error(String(error || '会议发言失败')));
+      })();
+    };
+
+    const succeed = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    void (async () => {
+      try {
+        const client = ensureGateway();
+        await client.waitForConnect();
+        await subscribeMeetingSession(client, sessionKey);
+        const idempotencyKey = `qizi-meeting-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const ack = await client.request('chat.send', {
+          sessionKey,
+          message,
+          deliver: false,
+          idempotencyKey,
+        });
+        gatewayRunId = (ack && ack.runId) || idempotencyKey;
+      } catch (err) {
+        fail(err);
+        return;
+      }
+
+      const armIdle = () => {
+        const run = pendingMeetingRuns.get(gatewayRunId);
+        if (!run || run.settled || settled) return;
+        if (run.timeout) clearTimeout(run.timeout);
+        const remain = absoluteMs - (Date.now() - startedAt);
+        if (remain <= 0) {
+          fail(new Error('会议发言超时'));
+          return;
+        }
+        run.timeout = setTimeout(() => {
+          fail(new Error('会议发言超时'));
+        }, Math.min(idleMs, remain));
+        run.timeout.unref?.();
+      };
+
+      pendingMeetingRuns.set(gatewayRunId, {
+        fullText: '',
         sessionKey,
-        message,
-        deliver: false,
-        idempotencyKey,
+        stopOnTools,
+        stoppingForTools: false,
+        settled: false,
+        armIdle,
+        resolve: (value) => succeed(value),
+        reject: (err) => fail(err),
+        timeout: null,
+        lastEventAt: Date.now(),
+        onDelta,
       });
-      gatewayRunId = (ack && ack.runId) || idempotencyKey;
-    } catch (err) {
-      reject(err);
-      return;
-    }
-    const timeout = setTimeout(() => {
-      pendingMeetingRuns.delete(gatewayRunId);
-      reject(new Error('会议发言超时'));
-    }, timeoutMs);
-    timeout.unref?.();
-    pendingMeetingRuns.set(gatewayRunId, {
-      fullText: '',
-      resolve,
-      reject,
-      timeout,
-      lastEventAt: Date.now(),
-      onDelta,
-    });
+      armIdle();
+    })();
   });
 }
 
@@ -2634,7 +2756,7 @@ async function maybeForwardMeetingConclusion(config, messages, meetingId) {
   const agentId = String(config?.postMeetingExecAgentId || '').trim();
   if (!agentId) return null;
 
-  const execSessionKey = pinnedSessionKeyForAgent(agentId);
+  const execSessionKey = shellSessionKeyForAgent(agentId);
   const normalizedMeetingId = String(meetingId || '').trim();
   const label = resolveExecAgentLabel(config, agentId);
   const goal = String(config?.goal || '').trim();
@@ -2759,6 +2881,7 @@ async function runMeetingBriefingFlow(config) {
       },
       onEvent: (event) => {
         if (event.type === 'briefing_ready' && event.payload) {
+          if (config.ephemeral) event.payload.ephemeral = true;
           setActiveMeetingMeta({
             sessionKey: event.payload.sessionKey,
             meetingId: event.payload.meetingId,
@@ -2807,6 +2930,7 @@ async function runMeetingBriefingFlow(config) {
       isCancelled: () => meetingBriefingCancelled,
     });
   } catch (err) {
+    console.error('[qizi] meeting failed:', err?.message || err);
     clearActiveMeeting();
     if (!meetingBriefingCancelled) {
       broadcastMeetingEvent({ type: 'error', payload: { error: err.message || String(err) } });
@@ -2817,6 +2941,11 @@ async function runMeetingBriefingFlow(config) {
     activeMeetingRelay = null;
     meetingBriefingRunning = false;
     meetingBriefingCancelled = false;
+    try {
+      if (gateway?.connected) void ensureGatewaySessionSubscription(gateway);
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -3016,12 +3145,13 @@ async function sendDetachedBtwChat(event, { message, attachments }) {
   await client.waitForConnect();
 
   const idempotencyKey = `qizi-btw-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const sessionKey = getSessionKey();
   const ack = await client.request('chat.send', {
-    sessionKey: getSessionKey(),
+    sessionKey,
     message: trimmedMessage,
-    deliver: false,
     idempotencyKey,
     attachments: attachments && attachments.length > 0 ? attachments : undefined,
+    ...sendFieldsForSession(sessionKey),
   });
   const gatewayRunId = (ack && ack.runId) || idempotencyKey;
 
@@ -3483,7 +3613,7 @@ async function switchToAgent(agentId) {
 
     closeHistoryWindow();
 
-    const newSessionKey = pinnedSessionKeyForAgent(agentId, mainKey);
+    const newSessionKey = shellSessionKeyForAgent(agentId, mainKey);
     persistSessionKey(newSessionKey);
     debugEvent('session', 'switch_agent_success', { agentId, sessionKey: newSessionKey });
     await ensureGatewaySessionSubscription(client);
@@ -4112,7 +4242,7 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
 
       const results = [];
       for (const agent of targets) {
-        const sessionKey = pinnedSessionKeyForAgent(agent.id, mainKey);
+        const sessionKey = shellSessionKeyForAgent(agent.id, mainKey);
         const idempotencyKey = meetingForward
           ? buildForwardIdempotencyKey(scope, agent.id)
           : `qizi-fwd-${inFlightKey}-${agent.id}`.slice(0, 120);
@@ -4130,8 +4260,8 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
           const ack = await client.request('chat.send', {
             sessionKey,
             message: trimmed,
-            deliver: false,
             idempotencyKey,
+            ...sendFieldsForSession(sessionKey),
           });
           const gatewayRunId = (ack && ack.runId) || idempotencyKey;
           debugEvent('session', 'forward_sent', {
@@ -4235,12 +4365,13 @@ async function streamChat(event, { message, attachments, runId, priorAssistantTe
 
     void (async () => {
       try {
+        const sessionKey = getSessionKey();
         const ack = await client.request('chat.send', {
-          sessionKey: getSessionKey(),
+          sessionKey,
           message: message || '',
-          deliver: false,
           idempotencyKey,
           attachments: attachments && attachments.length > 0 ? attachments : undefined,
+          ...sendFieldsForSession(sessionKey),
         });
 
         const gatewayRunId = (ack && ack.runId) || idempotencyKey;
@@ -4491,28 +4622,6 @@ async function saveMeetingPreset(raw) {
   }
 }
 
-function unsavedMeetingParameters(config, preset) {
-  const drifted = [];
-  const same = (label, left, right) => {
-    if (String(left || '').trim() !== String(right || '').trim()) drifted.push(label);
-  };
-  same('期望结论方向', config?.goal, preset.goal);
-  same('阅读报告', config?.readingReport, preset.readingReport);
-  same('主持', config?.moderatorAgentId, preset.moderatorAgentId);
-  same('会后接收', config?.postMeetingExecAgentId, preset.postMeetingExecAgentId);
-  const formRounds = Number(config?.roundCount);
-  const savedRounds = Number(preset.roundCount);
-  if ((formRounds === 1 || formRounds === 3 ? formRounds : 2) !== savedRounds) drifted.push('讨论轮次');
-  if (Boolean(config?.noRepeatPastTopics) !== Boolean(preset.noRepeatPastTopics)) {
-    drifted.push('不可与往日主题重复');
-  }
-  const formIds = Array.isArray(config?.participantAgentIds)
-    ? config.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
-    : [];
-  if (formIds.join('\n') !== (preset.participantAgentIds || []).join('\n')) drifted.push('议事 Agent');
-  return drifted;
-}
-
 async function loadMeetingRequirements(topic) {
   const key = String(topic || '').trim();
   if (!key) return { ok: false, error: '请填写议题' };
@@ -4570,41 +4679,95 @@ ipcMain.handle('qizi-meeting:presets:delete', async (event, payload) => {
   return deleteMeetingPreset(payload || {});
 });
 
+function isMissingSavedMeetingError(error) {
+  return /未找到已保存的会议/.test(String(error || ''));
+}
+
+function catalogAgentLabel(catalog, agentId, fallback) {
+  const id = String(agentId || '').trim();
+  if (!id) return '';
+  const entry = (catalog || []).find((agent) => agent.id === id);
+  return String(fallback || entry?.label || entry?.name || id).trim();
+}
+
+async function resolveMeetingLaunch(config) {
+  const topic = String(config?.topic || '').trim();
+  const loaded = await loadMeetingRequirements(topic);
+  if (!loaded.ok && !isMissingSavedMeetingError(loaded.error)) return loaded;
+  const savedReady = loaded.ok && unsavedMeetingParameters(config, loaded.preset).length === 0;
+  if (savedReady) {
+    const report = await checkReadingReportOnGateway(loaded.preset.readingReport);
+    if (!report.ok) return report;
+    return {
+      ok: true,
+      config: {
+        ...(config || {}),
+        topic: loaded.preset.topic,
+        draft: String(config?.draft || '').trim(),
+        savedDraft: loaded.preset.draft == null ? '' : loaded.preset.draft,
+        goal: loaded.preset.goal,
+        readingReport: report.path,
+        participantLabels: loaded.preset.participantLabels,
+        postMeetingExecLabel: loaded.preset.postMeetingExecLabel,
+        postMeetingExecAgentId: loaded.preset.postMeetingExecAgentId,
+        moderatorAgentId: loaded.preset.moderatorAgentId,
+        moderatorLabel: loaded.preset.moderatorLabel || config?.moderatorLabel,
+        participantAgentIds: loaded.preset.participantAgentIds,
+        roundCount: loaded.preset.roundCount,
+        noRepeatPastTopics: loaded.preset.noRepeatPastTopics,
+        meetingRequirements: loaded.sections,
+        ephemeral: false,
+      },
+    };
+  }
+
+  const report = await checkReadingReportOnGateway(config?.readingReport);
+  if (!report.ok) return report;
+  const parsed = parseMeetingRequirementSections(
+    `---\ntopic: "t"\n---\n${buildMeetingRequirementSections(report.path)}`,
+  );
+  if (!parsed.ok) return { ok: false, error: parsed.error || '无法准备会议要求' };
+  const catalog = config?.agentCatalog || [];
+  const participantAgentIds = Array.isArray(config?.participantAgentIds)
+    ? config.participantAgentIds.map((id) => String(id || '').trim()).filter(Boolean)
+    : [];
+  const roundCount = Number(config?.roundCount);
+  return {
+    ok: true,
+    config: {
+      ...(config || {}),
+      topic,
+      draft: String(config?.draft || '').trim(),
+      savedDraft: '',
+      goal: String(config?.goal || '').trim(),
+      readingReport: report.path,
+      participantAgentIds,
+      participantLabels: participantAgentIds.map((id, index) => catalogAgentLabel(
+        catalog,
+        id,
+        Array.isArray(config?.participantLabels) ? config.participantLabels[index] : '',
+      )),
+      postMeetingExecAgentId: String(config?.postMeetingExecAgentId || '').trim(),
+      postMeetingExecLabel: catalogAgentLabel(catalog, config?.postMeetingExecAgentId, config?.postMeetingExecLabel),
+      moderatorAgentId: String(config?.moderatorAgentId || '').trim(),
+      moderatorLabel: catalogAgentLabel(catalog, config?.moderatorAgentId, config?.moderatorLabel),
+      roundCount: roundCount === 1 || roundCount === 3 ? roundCount : 2,
+      noRepeatPastTopics: Boolean(config?.noRepeatPastTopics),
+      meetingRequirements: parsed.sections,
+      ephemeral: true,
+    },
+  };
+}
+
 ipcMain.handle('qizi-meeting:start', async (event, config) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     if (meetingBriefingRunning || (meetingEngine && meetingEngine.running)) {
       return { ok: false, error: '已有会议在进行中' };
     }
-    const loaded = await loadMeetingRequirements(config?.topic);
-    if (!loaded.ok) return loaded;
-    const preset = loaded.preset;
-    const drifted = unsavedMeetingParameters(config, preset);
-    if (drifted.length) {
-      return {
-        ok: false,
-        error: `还没保存到 OpenClaw：${drifted.join('、')}。请先保存会议。Agent 读的是服务器上的这份文件，缺一项就会用错。`,
-      };
-    }
-    const report = await checkReadingReportOnGateway(preset.readingReport);
-    if (!report.ok) return report;
-    void runMeetingBriefingFlow({
-      ...(config || {}),
-      topic: preset.topic,
-      draft: String(config?.draft || '').trim(),
-      savedDraft: preset.draft == null ? '' : preset.draft,
-      goal: preset.goal,
-      readingReport: report.path,
-      participantLabels: preset.participantLabels,
-      postMeetingExecLabel: preset.postMeetingExecLabel,
-      postMeetingExecAgentId: preset.postMeetingExecAgentId,
-      moderatorAgentId: preset.moderatorAgentId,
-      moderatorLabel: preset.moderatorLabel || config?.moderatorLabel,
-      participantAgentIds: preset.participantAgentIds,
-      roundCount: preset.roundCount,
-      noRepeatPastTopics: preset.noRepeatPastTopics,
-      meetingRequirements: loaded.sections,
-    });
+    const launch = await resolveMeetingLaunch(config);
+    if (!launch.ok) return launch;
+    void runMeetingBriefingFlow(launch.config);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: err.message || '无法启动会议' };
@@ -4776,13 +4939,167 @@ ipcMain.handle('openclaw:stt:transcribe', async (event, payload) => {
   }
 });
 
+async function loadPrivateChannelSource(client, agentId) {
+  await client.waitForConnect();
+  const [status, cfg, agents] = await Promise.all([
+    client.request('channels.status', { probe: false }),
+    client.request('config.get', {}),
+    client.request('agents.list', {}),
+  ]);
+  let sessions = [];
+  const paramSets = [
+    { limit: 500, agentId, includeGlobal: true, includeUnknown: true },
+    { limit: 200, includeGlobal: true, includeUnknown: true },
+  ];
+  for (const params of paramSets) {
+    try {
+      const listed = await client.request('sessions.list', params);
+      sessions = Array.isArray(listed?.sessions) ? listed.sessions : [];
+      if (sessions.length) break;
+    } catch {
+      // 换一组参数再试
+    }
+  }
+  const config = cfg?.config || {};
+  return {
+    dmScope: config.session?.dmScope,
+    hash: typeof cfg?.hash === 'string' ? cfg.hash : '',
+    bindings: Array.isArray(config.bindings) ? config.bindings : [],
+    channelStatus: status || {},
+    sessions,
+    defaultAgentId: agents?.defaultId || 'main',
+    mainKey: agents?.mainKey || SHELL_SESSION_MAIN_KEY,
+  };
+}
+
+async function getPrivateChannelCatalog(agentId) {
+  const id = String(agentId || '').trim();
+  if (!id) return { ok: false, error: '未指定 Agent' };
+  try {
+    const client = ensureGateway();
+    const source = await loadPrivateChannelSource(client, id);
+    const catalog = buildPrivateChannelCatalog({
+      agentId: id,
+      defaultAgentId: source.defaultAgentId,
+      mainKey: source.mainKey,
+      dmScope: source.dmScope,
+      channelStatus: source.channelStatus,
+      bindings: source.bindings,
+      sessions: source.sessions,
+      savedChoice: getPrivateChannels().getChoice(id),
+    });
+    return {
+      ok: true,
+      agentId: id,
+      selectedId: catalog.selectedId,
+      options: catalog.options.map(publicChannelOption),
+    };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
+async function ensurePrivateChannelDmScope(client, needed, baseHash) {
+  const target = normalizeDmScope(needed);
+  if (target === 'main') return false;
+  try {
+    const patched = await client.request('config.patch', {
+      raw: JSON.stringify({ session: { dmScope: target } }),
+      baseHash,
+    });
+    return patched?.noop !== true;
+  } catch (err) {
+    try {
+      await client.waitForConnect();
+    } catch {
+      // 配置可能已经写上，连接正在重来
+    }
+    const again = await client.request('config.get', {});
+    const now = normalizeDmScope(again?.config?.session?.dmScope);
+    if (dmScopeRank(now) < dmScopeRank(target)) throw err;
+    return true;
+  }
+}
+
+async function setPrivateChannelChoice(agentId, choiceId) {
+  const id = String(agentId || '').trim();
+  const picked = String(choiceId || '').trim();
+  if (!id || !picked) return { ok: false, error: '请选择一个私聊通道' };
+  try {
+    const client = ensureGateway();
+    const source = await loadPrivateChannelSource(client, id);
+    const catalog = buildPrivateChannelCatalog({
+      agentId: id,
+      defaultAgentId: source.defaultAgentId,
+      mainKey: source.mainKey,
+      dmScope: source.dmScope,
+      channelStatus: source.channelStatus,
+      bindings: source.bindings,
+      sessions: source.sessions,
+      savedChoice: getPrivateChannels().getChoice(id),
+    });
+    const option = catalog.options.find((item) => item.id === picked);
+    if (!option || option.selectable !== true) {
+      return { ok: false, error: '这个选项现在不能用' };
+    }
+    let scopeChanged = false;
+    if (option.mode === 'channel') {
+      const current = normalizeDmScope(source.dmScope);
+      const needed = normalizeDmScope(option.dmScope);
+      if (dmScopeRank(current) < dmScopeRank(needed)) {
+        if (!source.hash) return { ok: false, error: '网关配置暂时不能改，请稍后再试' };
+        scopeChanged = await ensurePrivateChannelDmScope(client, needed, source.hash);
+        try {
+          await client.waitForConnect();
+        } catch {
+          // 订阅时再等
+        }
+      }
+      getPrivateChannels().setChoice(id, option);
+    } else {
+      getPrivateChannels().setChoice(id, null);
+    }
+    const sessionKey = shellSessionKeyForAgent(id, source.mainKey);
+    const viewingThisAgent = parseAgentIdFromSessionKey(getSessionKey()) === id;
+    if (viewingThisAgent) {
+      persistSessionKey(sessionKey);
+      await ensureGatewaySessionSubscription(client);
+    }
+    return {
+      ok: true,
+      agentId: id,
+      sessionKey,
+      appliedToOpenChat: viewingThisAgent,
+      scopeChanged,
+      label: option.label,
+      shellSessionKeys: getPrivateChannels().shellSessionKeys([id], source.mainKey),
+    };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
 ipcMain.handle('openclaw:getSessionKey', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return getSessionKey();
 });
-ipcMain.handle('openclaw:agents:list', (event) => {
+ipcMain.handle('openclaw:agents:list', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
-  return listAgents();
+  const result = await listAgents();
+  if (!result?.ok) return result;
+  const ids = (result.agents || []).map((agent) => agent?.id).filter(Boolean);
+  return {
+    ...result,
+    shellSessionKeys: getPrivateChannels().shellSessionKeys(ids, result.mainKey || SHELL_SESSION_MAIN_KEY),
+  };
+});
+ipcMain.handle('openclaw:private-channel:get', (event, agentId) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return getPrivateChannelCatalog(agentId);
+});
+ipcMain.handle('openclaw:private-channel:set', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return setPrivateChannelChoice(payload?.agentId, payload?.choiceId);
 });
 ipcMain.handle('openclaw:forward', (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
@@ -5069,6 +5386,46 @@ ipcMain.handle('openclaw:history:read-local', async (event, payload) => {
   if (!getAuthorizedHistoryWindow(event)) return forbiddenSenderResult();
   const messages = await readLocalMessagesFromMainWindow(payload?.sessionKey);
   return { ok: true, messages };
+});
+
+const HISTORY_MESSAGE_ACTIONS = new Set([
+  'copy', 'quote', 'forward', 'multiselect', 'export', 'start-meeting',
+]);
+
+function historyActionMessage(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const images = Array.isArray(raw.images) ? raw.images.map(() => ({})) : undefined;
+  const files = Array.isArray(raw.files)
+    ? raw.files.map((file) => ({
+      name: typeof file?.name === 'string' ? file.name : '',
+      mimeType: typeof file?.mimeType === 'string' ? file.mimeType : '',
+      size: Number.isFinite(file?.size) ? file.size : undefined,
+    }))
+    : undefined;
+  return {
+    who: raw.who === 'me' ? 'me' : 'them',
+    text: typeof raw.text === 'string' ? raw.text : '',
+    quote: raw.quote && typeof raw.quote === 'object' ? raw.quote : undefined,
+    forward: raw.forward && typeof raw.forward === 'object' ? raw.forward : undefined,
+    sentTime: typeof raw.sentTime === 'string' ? raw.sentTime : undefined,
+    sentAtMs: Number.isFinite(raw.sentAtMs) ? raw.sentAtMs : undefined,
+    time: typeof raw.time === 'string' ? raw.time : undefined,
+    runId: raw.runId,
+    images: images?.length ? images : undefined,
+    files: files?.length ? files : undefined,
+  };
+}
+
+ipcMain.handle('openclaw:history:message-action', (event, payload) => {
+  if (!getAuthorizedHistoryWindow(event)) return forbiddenSenderResult();
+  const action = String(payload?.action || '');
+  if (!HISTORY_MESSAGE_ACTIONS.has(action)) return { ok: false, error: '未知操作' };
+  const message = historyActionMessage(payload?.message);
+  if (!message) return { ok: false, error: '没有这条消息' };
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: '主窗口不可用' };
+  showMainWindow();
+  safeSendTo(mainWindow.webContents, 'openclaw:history:message-action', { action, message });
+  return { ok: true };
 });
 
 ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, priorAssistantText }) => {
