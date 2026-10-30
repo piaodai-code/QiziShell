@@ -86,12 +86,15 @@ const mainCatalog = buildPrivateChannelCatalog({
 });
 const mainLabels = mainCatalog.options.map((option) => `${option.label}|${option.detail}|${option.selectable}`);
 assert.deepEqual(mainLabels, [
-  '只在这台 Mac 上|只在这台 Mac 上聊，不发到手机|true',
+  'Webchat|只在这台 Mac 上聊，不发到手机|true',
   '和 Telegram 同一通道||true',
   '和 Telegram 同一通道|Ada|true',
   '和 WhatsApp 同一通道|还没有私聊。先在这个软件里给这个 Agent 发一条，再回来选。|false',
 ]);
 assert.equal(mainCatalog.selectedId, 'mac');
+assert.equal(mainCatalog.options[0].shortLabel, 'Webchat');
+assert.equal(mainCatalog.options[1].shortLabel, 'Telegram');
+assert.equal(mainCatalog.options.find((option) => option.channel === 'whatsapp').shortLabel, 'WhatsApp');
 const mainTelegram = mainCatalog.options.find((option) => option.sessionKey === sessionKey);
 assert.ok(mainTelegram);
 assert.equal(mainTelegram.originatingTo, 'telegram:7044906239');

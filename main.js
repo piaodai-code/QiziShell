@@ -3471,22 +3471,55 @@ async function checkConnection() {
   }
 }
 
+function finiteUsageNumber(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function readMessageCost(message) {
+  const sources = [message?.cost, message?.usage?.cost];
+  const cost = {};
+  for (const key of ['input', 'output', 'cacheRead', 'cacheWrite']) {
+    for (const source of sources) {
+      const value = finiteUsageNumber(source?.[key]);
+      if (value != null) {
+        cost[key] = value;
+        break;
+      }
+    }
+  }
+  return Object.keys(cost).length ? cost : null;
+}
+
+function latestAssistantCost(messages) {
+  if (!Array.isArray(messages)) return null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const role = message?.role || message?.who;
+    if (role === 'user') return null;
+    if (role !== 'assistant') continue;
+    const cost = readMessageCost(message);
+    if (cost) return cost;
+  }
+  return null;
+}
+
 async function fetchSessionInfo() {
   const client = ensureGateway();
   await client.waitForConnect();
   const result = await client.request('chat.history', {
     sessionKey: getSessionKey(),
-    limit: 1,
+    limit: 8,
   });
   return {
     sessionInfo: result?.sessionInfo || {},
     defaults: result?.defaults || {},
+    messages: Array.isArray(result?.messages) ? result.messages : [],
   };
 }
 
 async function getSessionInfo() {
   try {
-    const { sessionInfo, defaults } = await fetchSessionInfo();
+    const { sessionInfo, defaults, messages } = await fetchSessionInfo();
     const provider = sessionInfo.modelProvider ?? defaults.modelProvider ?? null;
     const model = sessionInfo.model ?? defaults.model ?? null;
     const used = typeof sessionInfo.totalTokens === 'number' ? sessionInfo.totalTokens : null;
@@ -3502,7 +3535,16 @@ async function getSessionInfo() {
       model,
       qualified: provider && model ? `${provider}/${model}` : null,
       hasActiveRun: Boolean(sessionInfo.hasActiveRun),
-      context: { used, max, percent, fresh },
+      context: {
+        used,
+        max,
+        percent,
+        fresh,
+        input: finiteUsageNumber(sessionInfo.inputTokens),
+        output: finiteUsageNumber(sessionInfo.outputTokens),
+        cost: finiteUsageNumber(sessionInfo.estimatedCostUsd),
+        costByType: latestAssistantCost(messages),
+      },
     };
   } catch (err) {
     return { ok: false, error: formatGatewayError(err) };

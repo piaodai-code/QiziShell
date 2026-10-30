@@ -47,8 +47,9 @@ const unreadAgentStackEl = document.getElementById('unread-agent-stack');
 const composerHistoryBtn = document.getElementById('composer-history-btn');
 const agentPopup = document.getElementById('agent-popup');
 const contextMeter = document.getElementById('context-meter');
-const contextMeterFill = document.getElementById('context-meter-fill');
-const contextMeterText = document.getElementById('context-meter-text');
+const contextRingBtn = document.getElementById('context-ring-btn');
+const contextRingFill = document.getElementById('context-ring-fill');
+const contextUsagePopover = document.getElementById('context-usage-popover');
 const settingsBtn = document.getElementById('settings-btn');
 const appMenuPopup = document.getElementById('app-menu-popup');
 const settingsModal = document.getElementById('settings-modal');
@@ -4389,22 +4390,172 @@ function formatTokenCount(value) {
   return String(n);
 }
 
-function updateContextMeter({ used, max, percent, fresh } = {}) {
-  if (!contextMeter || !contextMeterFill || !contextMeterText) return;
-  if (used == null || max == null || max <= 0) {
-    contextMeterFill.style.width = '0%';
-    contextMeterText.textContent = '—';
-    contextMeter.classList.remove('stale');
-    contextMeter.title = 'Context 占用';
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * 6.5;
+let contextUsageDetail = null;
+
+function formatContextTokens(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  const tokens = Math.max(0, Number(value));
+  if (tokens < 1000) return String(Math.round(tokens));
+  if (tokens < 1_000_000) {
+    const thousands = (tokens / 1000).toFixed(1).replace(/\.0$/, '');
+    if (Number(thousands) < 1000) return `${thousands}k`;
+  }
+  return `${(tokens / 1_000_000).toFixed(1).replace(/\.0$/, '')}m`;
+}
+
+function formatContextUsd(value) {
+  if (value == null || !Number.isFinite(Number(value))) return null;
+  const amount = Number(value);
+  const abs = Math.abs(amount);
+  if (abs === 0) return '$0.00';
+  if (abs >= 1) {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency: 'USD',
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    }).format(amount);
+  }
+  if (abs >= 0.01) return `$${amount.toFixed(3)}`;
+  return `$${amount.toFixed(4)}`;
+}
+
+function appendContextStat(list, label, value) {
+  if (value == null || value === '') return;
+  const item = document.createElement('div');
+  item.className = 'context-usage-stat';
+  const name = document.createElement('dt');
+  name.textContent = label;
+  const number = document.createElement('dd');
+  number.textContent = value;
+  item.appendChild(name);
+  item.appendChild(number);
+  list.appendChild(item);
+}
+
+function renderContextUsagePopover(detail) {
+  if (!contextUsagePopover) return;
+  contextUsagePopover.innerHTML = '';
+  if (detail?.used == null || detail?.max == null || detail.max <= 0) {
+    const empty = document.createElement('div');
+    empty.className = 'context-usage-empty';
+    empty.textContent = '还没有上下文用量。';
+    contextUsagePopover.appendChild(empty);
     return;
   }
-  const pct = percent != null ? percent : Math.min(100, Math.round((used / max) * 100));
-  contextMeterFill.style.width = `${pct}%`;
-  contextMeterText.textContent = `${formatTokenCount(used)} / ${formatTokenCount(max)} · ${pct}%`;
-  contextMeter.classList.toggle('stale', fresh === false);
-  contextMeter.title = fresh === false
-    ? `Context 占用（估算）${used.toLocaleString()} / ${max.toLocaleString()} tokens`
-    : `Context 占用 ${used.toLocaleString()} / ${max.toLocaleString()} tokens`;
+  const pct = detail.percent != null
+    ? detail.percent
+    : Math.min(100, Math.round((detail.used / detail.max) * 100));
+  const approx = detail.fresh === false ? '~' : '';
+  const header = document.createElement('div');
+  header.className = 'context-usage-header';
+  const title = document.createElement('span');
+  title.className = 'context-usage-title';
+  title.textContent = '上下文窗口';
+  const value = document.createElement('strong');
+  value.className = 'context-usage-value';
+  value.textContent = `${approx}${formatContextTokens(detail.used)} / ${formatContextTokens(detail.max)} · ${approx}${pct}%`;
+  header.appendChild(title);
+  header.appendChild(value);
+  contextUsagePopover.appendChild(header);
+
+  const bar = document.createElement('div');
+  bar.className = 'context-usage-bar';
+  bar.setAttribute('role', 'progressbar');
+  bar.setAttribute('aria-valuemin', '0');
+  bar.setAttribute('aria-valuemax', '100');
+  bar.setAttribute('aria-valuenow', String(pct));
+  bar.setAttribute('aria-label', '上下文窗口');
+  const fill = document.createElement('span');
+  fill.style.width = `${pct}%`;
+  bar.appendChild(fill);
+  contextUsagePopover.appendChild(bar);
+
+  const runLabel = document.createElement('div');
+  runLabel.className = 'context-usage-section';
+  runLabel.textContent = '最近一次运行的词元数';
+  contextUsagePopover.appendChild(runLabel);
+  const runStats = document.createElement('dl');
+  runStats.className = 'context-usage-stats';
+  appendContextStat(runStats, '输入', formatContextTokens(detail.input));
+  appendContextStat(runStats, '输出', formatContextTokens(detail.output));
+  const costText = formatContextUsd(detail.cost);
+  if (costText) appendContextStat(runStats, '预估费用', costText);
+  contextUsagePopover.appendChild(runStats);
+
+  const costs = detail.costByType || {};
+  const costRows = [
+    ['输入', costs.input],
+    ['输出', costs.output],
+    ['缓存读取', costs.cacheRead],
+    ['缓存写入', costs.cacheWrite],
+  ].filter(([, amount]) => typeof amount === 'number' && amount > 0);
+  if (costRows.length) {
+    const costLabel = document.createElement('div');
+    costLabel.className = 'context-usage-section';
+    costLabel.textContent = '按类型统计费用';
+    contextUsagePopover.appendChild(costLabel);
+    const costStats = document.createElement('dl');
+    costStats.className = 'context-usage-stats';
+    for (const [label, amount] of costRows) {
+      appendContextStat(costStats, label, formatContextUsd(amount));
+    }
+    contextUsagePopover.appendChild(costStats);
+  }
+}
+
+function updateContextMeter(detail = {}) {
+  contextUsageDetail = detail;
+  if (!contextMeter || !contextRingFill || !contextRingBtn) return;
+  const used = detail.used;
+  const max = detail.max;
+  const hasWindow = used != null && max != null && max > 0;
+  const pct = hasWindow
+    ? (detail.percent != null ? detail.percent : Math.min(100, Math.round((used / max) * 100)))
+    : 0;
+  contextRingFill.style.strokeDasharray = CONTEXT_RING_CIRCUMFERENCE.toFixed(2);
+  contextRingFill.style.strokeDashoffset = (CONTEXT_RING_CIRCUMFERENCE * (1 - pct / 100)).toFixed(2);
+  contextMeter.classList.toggle('is-warning', hasWindow && pct >= 85);
+  const approx = detail.fresh === false ? '约 ' : '';
+  const summary = hasWindow
+    ? `上下文窗口 ${approx}${formatContextTokens(used)} / ${formatContextTokens(max)}，${approx}${pct}%`
+    : '上下文用量';
+  contextRingBtn.title = summary;
+  contextRingBtn.setAttribute('aria-label', summary);
+  if (contextUsagePopover && !contextUsagePopover.hidden) renderContextUsagePopover(detail);
+}
+
+function hideContextUsagePopup() {
+  if (!contextUsagePopover) return;
+  contextUsagePopover.hidden = true;
+  contextUsagePopover.innerHTML = '';
+  if (contextRingBtn) {
+    contextRingBtn.classList.remove('open');
+    contextRingBtn.setAttribute('aria-expanded', 'false');
+  }
+}
+
+function showContextUsagePopup() {
+  if (!contextUsagePopover || !contextRingBtn) return;
+  if (!contextUsagePopover.hidden) {
+    hideContextUsagePopup();
+    return;
+  }
+  hideAgentPopup();
+  hideCommandPopup();
+  hideModelPopup();
+  hideSessionControlsPopup();
+  hidePermissionPopup();
+  hideChannelPopup();
+  hideContextUsagePopup();
+  hideAttachPopup();
+  hideEmojiPicker();
+  hideAppMenu();
+  renderContextUsagePopover(contextUsageDetail);
+  contextUsagePopover.hidden = false;
+  contextRingBtn.classList.add('open');
+  contextRingBtn.setAttribute('aria-expanded', 'true');
 }
 
 async function refreshSessionInfo() {
@@ -4622,6 +4773,7 @@ async function showAgentPopup() {
   hideCommandPopup();
   hidePermissionPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   hideAttachPopup();
   agentPopup.hidden = false;
   titlebarAgentBtn.classList.add('open');
@@ -4756,6 +4908,7 @@ async function switchToAgent(agentId) {
     resetOutboundChatState({ clearQueue: true });
     await refreshCurrentModelBadge();
     await refreshSessionInfo();
+    void refreshChannelPickerLabel();
     setStatus('已连接', 'ok');
   } catch (err) {
     currentSessionKey = prevSessionKey;
@@ -4998,6 +5151,7 @@ function showAttachPopup() {
   hideSessionControlsPopup();
   hidePermissionPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   hideEmojiPicker();
   attachPopup.hidden = false;
   attachPickerBtn.classList.add('open');
@@ -5051,6 +5205,7 @@ async function showPermissionPopup() {
   hideSessionControlsPopup();
   hideAttachPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   permissionPopupError = '';
   permPopup.hidden = false;
   permPickerBtn.classList.add('open');
@@ -5315,6 +5470,7 @@ async function showSessionControlsPopup() {
   hideModelPopup();
   hidePermissionPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   hideAttachPopup();
   sessionControlsPopup.hidden = false;
   sessionControlsBtn.classList.add('open');
@@ -5417,6 +5573,7 @@ async function showModelPopup() {
   hideSessionControlsPopup();
   hidePermissionPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   hideAttachPopup();
   modelPopup.hidden = false;
   modelPickerBtn.classList.add('open');
@@ -5510,6 +5667,7 @@ async function checkConnection() {
       lastSyncedHistorySignature = '';
       lastSessionSyncAt = 0;
       await refreshCurrentModelBadge();
+      void refreshChannelPickerLabel();
       if (ENABLE_GATEWAY_HISTORY_SYNC) {
         await syncHistoryFromGateway();
         const sessionInfo = await window.qizi.getSessionInfo();
@@ -5679,6 +5837,7 @@ function selectActiveCommandPopupItem() {
 function showCommandPopup(filter) {
   hidePermissionPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   hideAttachPopup();
   if (!cmdPopup) return;
   const q = (filter || '').toLowerCase();
@@ -6068,6 +6227,7 @@ if (window.qizi.onGatewayStatus) {
       } else {
         setStatus('已连接', 'ok');
         refreshCurrentModelBadge();
+        void refreshChannelPickerLabel();
         if (!busy) {
           lastSyncedHistorySignature = '';
           syncHistoryFromGateway();
@@ -6638,6 +6798,7 @@ function showEmojiPicker() {
   hideModelPopup();
   hidePermissionPopup();
   hideChannelPopup();
+  hideContextUsagePopup();
   hideAttachPopup();
   emojiPickerEl.hidden = false;
   positionEmojiPicker();
@@ -6862,6 +7023,13 @@ if (channelPickerBtn) {
   });
 }
 
+if (contextRingBtn) {
+  contextRingBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    showContextUsagePopup();
+  });
+}
+
 if (permPickerBtn) {
   permPickerBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -6894,6 +7062,9 @@ document.addEventListener('click', (e) => {
   }
   if (channelPopup && !channelPopup.hidden) {
     if (!e.target.closest('.channel-picker-wrap')) hideChannelPopup();
+  }
+  if (contextUsagePopover && !contextUsagePopover.hidden) {
+    if (!e.target.closest('.context-usage')) hideContextUsagePopup();
   }
   if (attachPopup && !attachPopup.hidden) {
     if (!e.target.closest('.attach-picker-wrap')) hideAttachPopup();
@@ -6932,6 +7103,10 @@ document.addEventListener('keydown', (e) => {
     }
     if (channelPopup && !channelPopup.hidden) {
       hideChannelPopup();
+      return;
+    }
+    if (contextUsagePopover && !contextUsagePopover.hidden) {
+      hideContextUsagePopup();
       return;
     }
     if (settingsModal && !settingsModal.hidden) {
@@ -7791,6 +7966,28 @@ async function testSettingsConnection() {
 
 let channelPopupCatalog = null;
 let channelPopupBusy = false;
+let channelPickerLabelEpoch = 0;
+
+function setChannelPickerLabel(text) {
+  const name = String(text || '').trim() || 'Webchat';
+  if (!channelPickerBtn) return;
+  channelPickerBtn.textContent = name;
+  channelPickerBtn.setAttribute('aria-label', `哪一通道，当前 ${name}`);
+}
+
+async function refreshChannelPickerLabel() {
+  if (!channelPickerBtn || !window.qizi?.getPrivateChannel) return;
+  const epoch = ++channelPickerLabelEpoch;
+  const agentId = currentAgentId;
+  try {
+    const result = await window.qizi.getPrivateChannel(agentId);
+    if (epoch !== channelPickerLabelEpoch || agentId !== currentAgentId) return;
+    const selected = (result?.options || []).find((option) => option.id === result?.selectedId);
+    setChannelPickerLabel(selected?.shortLabel || selected?.label);
+  } catch {
+    if (epoch !== channelPickerLabelEpoch) return;
+  }
+}
 
 function hideChannelPopup() {
   if (!channelPopup) return;
@@ -7858,7 +8055,7 @@ function renderChannelPopup(catalog, errorText) {
 
   const note = document.createElement('div');
   note.className = 'channel-popup-note';
-  note.textContent = '以前混在一起的旧消息仍留在「只在这台 Mac 上」。';
+  note.textContent = '以前混在一起的旧消息仍留在「Webchat」。';
   channelPopup.appendChild(note);
 
   if (errorText) {
@@ -7881,6 +8078,7 @@ async function showChannelPopup() {
   hideSessionControlsPopup();
   hidePermissionPopup();
   hideAttachPopup();
+  hideContextUsagePopup();
   hideEmojiPicker();
   hideAppMenu();
   channelPopupCatalog = null;
@@ -7980,8 +8178,9 @@ async function selectPrivateChannel(option) {
       await adoptShellSession(result.sessionKey);
     }
     hideChannelPopup();
-    const phrase = result.label === '只在这台 Mac 上'
-      ? '已改成只在这台 Mac 上'
+    setChannelPickerLabel(option.shortLabel || result.label);
+    const phrase = result.label === 'Webchat'
+      ? '已改成 Webchat'
       : `已改成${result.label || '这条通道'}`;
     const extra = result.scopeChanged ? '之后各聊天软件的新私聊会分开。' : '';
     setStatus(`${phrase}。${extra}`, 'ok');

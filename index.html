@@ -97,24 +97,25 @@
             <img src="assets/icons/history-inline.png" alt="" aria-hidden="true">
           </button>
           <span class="composer-tools-separator" aria-hidden="true">|</span>
-          <div class="channel-picker-wrap">
-            <button type="button" class="icon-btn icon-btn-img channel-picker-btn" id="channel-picker-btn" title="哪一通道" aria-label="哪一通道" aria-haspopup="menu" aria-expanded="false">
-              <img id="channel-picker-glyph" src="assets/icons/channel-line.png" alt="" aria-hidden="true">
-            </button>
-            <div class="perm-popup channel-popup" id="channel-popup" hidden role="menu" aria-label="哪一通道"></div>
-          </div>
           <div class="perm-picker-wrap">
             <button type="button" class="icon-btn icon-btn-img perm-picker-btn" id="perm-picker-btn" title="执行权限" aria-label="执行权限" aria-haspopup="menu" aria-expanded="false">
               <img id="perm-picker-glyph" src="assets/icons/perm-default.png" alt="" aria-hidden="true">
             </button>
             <div class="perm-popup" id="perm-popup" hidden role="menu" aria-label="执行权限"></div>
           </div>
-        </div>
-        <div class="context-meter" id="context-meter" title="Context 占用">
-          <div class="context-meter-bar" aria-hidden="true">
-            <div class="context-meter-fill" id="context-meter-fill"></div>
+          <div class="channel-picker-wrap">
+            <button type="button" class="channel-picker-btn" id="channel-picker-btn" title="哪一通道" aria-label="哪一通道" aria-haspopup="menu" aria-expanded="false">…</button>
+            <div class="perm-popup channel-popup" id="channel-popup" hidden role="menu" aria-label="哪一通道"></div>
           </div>
-          <span class="context-meter-text" id="context-meter-text">—</span>
+        </div>
+        <div class="context-usage" id="context-meter">
+          <button type="button" class="context-ring" id="context-ring-btn" title="上下文用量" aria-label="上下文用量" aria-haspopup="dialog" aria-expanded="false">
+            <svg class="context-ring-dial" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+              <circle class="context-ring-track" cx="8" cy="8" r="6.5"></circle>
+              <circle class="context-ring-fill" id="context-ring-fill" cx="8" cy="8" r="6.5"></circle>
+            </svg>
+          </button>
+          <div class="context-usage-popover" id="context-usage-popover" hidden role="dialog" aria-label="上下文用量详情"></div>
         </div>
         <div class="composer-session-tools">
           <div class="session-controls-wrap">

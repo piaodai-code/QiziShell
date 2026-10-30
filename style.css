@@ -777,44 +777,136 @@ body.meeting-mode .composer {
 .attach-item.is-recording {
   background: #ffcdd2;
 }
-.context-meter {
-  flex: 1;
-  min-width: 0;
+.context-usage {
+  position: relative;
+  flex: 0 0 auto;
+  margin-left: auto;
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 0 4px;
+  color: #6a6a6a;
 }
-.context-meter-bar {
-  flex: 0 0 1cm;
-  width: 1cm;
-  max-width: 1cm;
-  height: 4px;
-  background: #e4e4e4;
-  border-radius: 2px;
+.context-usage.is-warning { color: #c2410c; }
+.context-ring {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.context-ring:hover,
+.context-ring.open { background: #ececec; }
+.context-ring-dial {
+  width: 15px;
+  height: 15px;
+  transform: rotate(-90deg);
+}
+.context-ring-track,
+.context-ring-fill {
+  fill: none;
+  stroke-width: 2.5px;
+}
+.context-ring-track { stroke: color-mix(in srgb, currentColor 22%, transparent); }
+.context-ring-fill {
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-dasharray: 40.84;
+  stroke-dashoffset: 40.84;
+}
+.context-usage-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(300px, calc(100vw - 28px));
+  max-height: min(420px, calc(100vh - 96px));
+  overflow-y: auto;
+  padding: 14px;
+  background: #fff;
+  color: #1c1c1c;
+  border: 1px solid #e7e7e7;
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.14);
+  z-index: 140;
+}
+.context-usage-popover[hidden] { display: none !important; }
+.context-usage-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+.context-usage-title,
+.context-usage-section {
+  color: #8a8a8a;
+  letter-spacing: 0.08em;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.context-usage-value {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: #1c1c1c;
+}
+.context-usage-bar {
+  height: 5px;
+  margin: 8px 0 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, #8a8a8a 22%, transparent);
   overflow: hidden;
 }
-.context-meter-fill {
+.context-usage-bar span {
+  display: block;
   height: 100%;
-  width: 0%;
-  background: #979797;
-  border-radius: 2px;
-  transition: width 0.25s ease;
+  border-radius: inherit;
+  background: #5c5c5c;
 }
-.context-meter-text {
-  font-size: 10px;
-  color: #888;
-  white-space: nowrap;
-  flex-shrink: 0;
+.context-usage.is-warning .context-usage-bar span { background: #c2410c; }
+.context-usage-section {
+  border-top: 1px solid #ececec;
+  padding-top: 14px;
+}
+.context-usage-stats {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.context-usage-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+}
+.context-usage-stat:not(:last-child)::after {
+  content: "·";
+  color: #8a8a8a;
+  margin-left: 2px;
+}
+.context-usage-stat dt { color: #8a8a8a; }
+.context-usage-stat dd {
+  margin: 0;
+  color: #1c1c1c;
+  font-weight: 650;
   font-variant-numeric: tabular-nums;
 }
-.context-meter.stale .context-meter-text { color: #aaa; }
+.context-usage-empty {
+  font-size: 12px;
+  color: #8a8a8a;
+}
 .composer-session-tools {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-left: auto;
+  margin-left: 6px;
 }
 .model-picker-wrap,
 .session-controls-wrap {
@@ -1811,15 +1903,29 @@ body.meeting-mode .composer {
   position: relative;
   flex-shrink: 0;
 }
-.channel-picker-btn img {
-  width: 18px;
-  height: 18px;
-  object-fit: contain;
-  display: block;
-  opacity: 1;
+.channel-picker-btn {
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  max-width: 160px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 13px;
+  font-weight: 400;
+  color: rgba(0, 0, 0, 0.82);
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.channel-picker-btn:hover,
 .channel-picker-btn.open {
   background: #ececec;
+  color: #000;
 }
 .channel-picker-btn.is-pending { opacity: 0.72; }
 .channel-popup {

@@ -295,7 +295,8 @@ function buildPrivateChannelCatalog({
   const options = [{
     id: 'mac',
     mode: 'mac',
-    label: '只在这台 Mac 上',
+    label: 'Webchat',
+    shortLabel: 'Webchat',
     detail: '只在这台 Mac 上聊，不发到手机',
     selectable: true,
     sessionKey: `agent:${id}:${mainKey || 'main'}`,
@@ -335,6 +336,7 @@ function buildPrivateChannelCatalog({
         mode: 'channel',
         channel,
         label: `和 ${channelLabel} 同一通道`,
+        shortLabel: channelLabel,
         detail: '还没有私聊。先在这个软件里给这个 Agent 发一条，再回来选。',
         selectable: false,
       });
@@ -355,6 +357,7 @@ function buildPrivateChannelCatalog({
         sessionKey: peer.sessionKey,
         dmScope: scope,
         label: `和 ${channelLabel} 同一通道`,
+        shortLabel: channelLabel,
         detail,
         selectable: true,
       });
@@ -368,6 +371,7 @@ function buildPrivateChannelCatalog({
       id: choiceIdFor(saved.channel, saved.accountId, saved.peerId),
       ...saved,
       label: `和 ${channelLabel} 同一通道`,
+      shortLabel: channelLabel,
       detail: '',
       selectable: true,
     });
@@ -385,6 +389,7 @@ function publicChannelOption(option) {
   return {
     id: option.id,
     label: option.label,
+    shortLabel: option.shortLabel || option.label,
     detail: option.detail || '',
     selectable: option.selectable === true,
   };
