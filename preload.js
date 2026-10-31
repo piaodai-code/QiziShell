@@ -19,8 +19,8 @@ contextBridge.exposeInMainWorld('qizi', {
   chatStream: (payload, runId) => ipcRenderer.invoke('openclaw:chat', { ...payload, runId }),
   onChatDelta: (callback) => {
     const handler = (_event, payload) => {
-      if (typeof payload === 'string') callback(payload, undefined);
-      else callback(payload?.delta || '', payload?.runId, payload?.replace === true);
+      if (typeof payload === 'string') callback(payload, undefined, false, null);
+      else callback(payload?.delta || '', payload?.runId, payload?.replace === true, payload);
     };
     ipcRenderer.on('openclaw:delta', handler);
     return () => ipcRenderer.removeListener('openclaw:delta', handler);
@@ -36,8 +36,8 @@ contextBridge.exposeInMainWorld('qizi', {
   },
   onChatError: (callback) => {
     const handler = (_event, payload) => {
-      if (typeof payload === 'string') callback(payload, undefined);
-      else callback(payload?.error || '未知错误', payload?.runId);
+      if (typeof payload === 'string') callback(payload, undefined, null);
+      else callback(payload?.error || '未知错误', payload?.runId, payload);
     };
     ipcRenderer.on('openclaw:error', handler);
     return () => ipcRenderer.removeListener('openclaw:error', handler);
@@ -76,6 +76,11 @@ contextBridge.exposeInMainWorld('qizi', {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('openclaw:models-updated', handler);
     return () => ipcRenderer.removeListener('openclaw:models-updated', handler);
+  },
+  onPrivateChannelUpdated: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:private-channel-updated', handler);
+    return () => ipcRenderer.removeListener('openclaw:private-channel-updated', handler);
   },
   abortChat: () => ipcRenderer.invoke('openclaw:abort'),
   getSessionKey: () => ipcRenderer.invoke('openclaw:getSessionKey'),

@@ -511,7 +511,16 @@ body.meeting-mode .composer {
   text-align: center; color: var(--meta-text); font-size: 13px; padding: 40px 20px;
 }
 .msg { display: flex; align-items: flex-start; padding: 0 var(--msg-edge-pad); }
-.messages.is-multiselect .msg { align-items: center; }
+.messages.is-multiselect {
+  --msg-select-size: 22px;
+  --msg-select-inset: 18px;
+  --msg-select-gap: 14px;
+}
+.messages.is-multiselect .msg {
+  position: relative;
+  align-items: center;
+  padding-left: calc(var(--msg-select-inset) + var(--msg-select-size) + var(--msg-select-gap));
+}
 .msg.me { flex-direction: row-reverse; }
 .msg-select-check {
   flex-shrink: 0;
@@ -530,6 +539,15 @@ body.meeting-mode .composer {
   padding: 0;
   margin: 0 var(--msg-avatar-gap);
   align-self: center;
+}
+.messages.is-multiselect .msg-select-check {
+  position: absolute;
+  left: var(--msg-select-inset);
+  top: 50%;
+  width: var(--msg-select-size);
+  height: var(--msg-select-size);
+  margin: 0;
+  transform: translateY(-50%);
 }
 .msg-select-check:hover { border-color: #999; }
 .msg-select-check.selected {

@@ -182,6 +182,7 @@ let cmdPopupActiveIndex = -1;
 let pendingModelUpdate = false;
 let currentModelQualified = null;
 let modelCatalogCache = null;
+let modelCatalogAgentId = null;
 let modelCatalogExpiresAt = 0;
 const MODEL_CATALOG_TTL_MS = 60_000;
 
@@ -335,6 +336,11 @@ function applyGatewayToolEvent(payload) {
 
 function applyChatSegment(payload) {
   if (!payload) return;
+  const sessionKey = ownedEventSessionKey(payload);
+  if (sessionKey && sessionKey !== currentSessionKey) {
+    applyBackgroundOwnedSegment(sessionKey, payload.runId, payload.text);
+    return;
+  }
   ensureChatTimeline().enqueueSegment({ runId: payload.runId, text: payload.text });
 }
 let busy = false;
@@ -402,6 +408,10 @@ let currentSessionKey = DEFAULT_SESSION_KEY;
 let currentAgentId = 'main';
 /** 切换 Agent 时递增，配合 sessionKey 标记避免旧 stream IPC 写入新 Agent */
 let chatScopeEpoch = 0;
+let sessionSwitchSettling = false;
+let agentSwitchToken = 0;
+/** 切走后仍在更新的会话视图。键是 sessionKey，值是当时的消息数组。 */
+const liveSessionSnapshots = new Map();
 /** @type {Map<string, object>} */
 let agentCatalog = new Map();
 
@@ -2597,9 +2607,16 @@ function dedupeAdjacentUserMessages(list) {
   return out;
 }
 
+const EXEC_COMPLETION_NOTICE_RE = /^exec (completed|failed) \([a-z0-9_-]{1,64},\s*(?:code -?\d+|signal [^)]+)\)/i;
+
+function isExecCompletionNoticeText(text) {
+  return EXEC_COMPLETION_NOTICE_RE.test(String(text || '').trim());
+}
+
 function finalizeHistoryMessages(list) {
+  const cleaned = (Array.isArray(list) ? list : []).filter((msg) => !isExecCompletionNoticeText(msg?.text));
   return dedupeAssistantMessages(
-    dedupeAdjacentUserMessages(dedupeForwardUserMessages(list)),
+    dedupeAdjacentUserMessages(dedupeForwardUserMessages(cleaned)),
   );
 }
 
@@ -3607,6 +3624,7 @@ function handleAgentsCatalogUpdated(result) {
   if (agentPopup && !agentPopup.hidden) {
     renderAgentPopup(result.agents);
   }
+  void warmOtherAgentHistories();
   if (forwardModal && !forwardModal.hidden && forwardAgentsListEl) {
     renderForwardAgentList(result.agents);
   }
@@ -3892,6 +3910,7 @@ function stopSessionWatch() {
 
 async function tickSessionWatch() {
   if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
+  if (sessionSwitchSettling) return;
   if (window.MeetingView?.isVisible?.()) return;
   if (!connected || isLocalOwnedActiveRun()) return;
 
@@ -4163,6 +4182,7 @@ async function syncHistoryFromGateway(options = {}) {
 
 async function syncHistoryFromGatewayOnce(options = {}) {
   if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
+  if (sessionSwitchSettling && options.duringSwitch !== true) return;
   if (!window.qizi.loadHistory) return;
   try {
     const result = await window.qizi.loadHistory();
@@ -4588,13 +4608,16 @@ async function loadModelCatalog(force) {
     throw new Error(result?.error || '无法加载模型列表');
   }
   modelCatalogCache = Array.isArray(result.models) ? result.models : [];
+  modelCatalogAgentId = result.agentId || currentAgentId;
   modelCatalogExpiresAt = now + MODEL_CATALOG_TTL_MS;
   return modelCatalogCache;
 }
 
 function handleModelsCatalogUpdated(result) {
   if (!result?.ok || !Array.isArray(result.models)) return;
+  if (result.agentId && result.agentId !== currentAgentId) return;
   modelCatalogCache = result.models;
+  modelCatalogAgentId = result.agentId || currentAgentId;
   modelCatalogExpiresAt = Date.now() + MODEL_CATALOG_TTL_MS;
   if (modelPopup && !modelPopup.hidden) {
     void refreshCurrentModelBadge();
@@ -4810,6 +4833,68 @@ async function showAgentPopup() {
   }
 }
 
+function stampMessagesToCurrentScope(list) {
+  for (const message of list || []) {
+    if (!message) continue;
+    message.sessionKey = currentSessionKey;
+    if (message.chatEpoch != null) message.chatEpoch = chatScopeEpoch;
+  }
+}
+
+function applyCachedAgentChrome(agentId) {
+  const agent = agentCatalog.get(agentId) || { id: agentId };
+  updateAgentTitleLabel(agent);
+  const modelLabel = formatAgentCurrentModel(agent);
+  if (modelLabel && modelLabel !== '—') setModelBadgeText(modelLabel);
+  const cachedChannel = channelCatalogByAgent.get(agentId);
+  if (!cachedChannel) return;
+  const selected = (cachedChannel.options || []).find((option) => option.id === cachedChannel.selectedId);
+  setChannelPickerLabel(selected?.shortLabel || selected?.label);
+}
+
+function showSessionMessages(sessionKey) {
+  const parked = liveSessionSnapshots.get(sessionKey);
+  if (parked) {
+    liveSessionSnapshots.delete(sessionKey);
+    messages = parked;
+    return;
+  }
+  messages = [];
+  loadMessages();
+  messages = finalizeHistoryMessages(messages);
+}
+
+function adoptBackgroundRun(summary) {
+  if (!summary?.clientRunId) return;
+  if (ensureChatTimeline().isRunFinished(summary.clientRunId)) return;
+  let target = [...messages].reverse().find((message) => (
+    message.who === 'them' && message.streaming && runIdsMatch(message.runId, summary.clientRunId)
+  ));
+  if (!target) {
+    target = {
+      id: allocMessageId(),
+      who: 'them',
+      text: summary.text || '…',
+      time: now(),
+      streaming: true,
+      runId: summary.clientRunId,
+      sessionKey: currentSessionKey,
+      chatEpoch: chatScopeEpoch,
+      streamingStartedAt: Date.now(),
+      lastDeltaAt: Date.now(),
+    };
+    messages.push(target);
+  } else if (summary.text && summary.text.length > String(target.text || '').length) {
+    target.text = summary.text;
+  }
+  target.sessionKey = currentSessionKey;
+  target.chatEpoch = chatScopeEpoch;
+  target.streaming = true;
+  userAborted = false;
+  setBusy(true);
+  activeRunId = summary.clientRunId;
+}
+
 async function switchToAgent(agentId) {
   if (window.MeetingView?.isVisible?.()) {
     window.MeetingView.leaveView();
@@ -4821,106 +4906,119 @@ async function switchToAgent(agentId) {
 
   if (multiSelectMode) exitMultiSelectMode();
 
+  const token = ++agentSwitchToken;
+  sessionSwitchSettling = true;
   hideAgentPopup();
-  setStatus('切换 Agent…', 'pending');
   dismissBtwSideCard();
   clearPendingOutbound();
-
-  if (busy) {
-    userAborted = true;
-    try {
-      await window.qizi.abortChat();
-    } catch {
-      // ignore
-    }
-    stopStreamHistoryPoll();
-    setBusy(false);
-    activeRunId = null;
-    for (const m of messages) {
-      if (m.streaming) m.streaming = false;
-    }
-  }
+  stopStreamHistoryPoll();
 
   const prevSessionKey = currentSessionKey;
+  const prevAgentId = currentAgentId;
   debugEvent('session', 'switch_agent_start', {
-    fromAgent: currentAgentId,
+    fromAgent: prevAgentId,
     toAgent: agentId,
     fromSessionKey: prevSessionKey,
   });
+  if (prevSessionKey) liveSessionSnapshots.set(prevSessionKey, messages);
+
+  const nextSessionKey = shellSessionKeyForAgent(agentId);
   chatScopeEpoch += 1;
   resetChatTimeline();
-  messages = [];
-  clearPendingOutbound();
+  currentSessionKey = nextSessionKey;
+  currentAgentId = agentId;
+  clearAgentUnread(agentId);
+  userAborted = false;
   pendingImages = [];
   pendingFiles = [];
   activeRunId = null;
+  setBusy(false);
+  showSessionMessages(nextSessionKey);
+  stampMessagesToCurrentScope(messages);
+  syncCurrentRunIdFromMessages();
+  if (modelCatalogAgentId !== agentId) {
+    modelCatalogCache = null;
+    modelCatalogAgentId = null;
+    modelCatalogExpiresAt = 0;
+  }
+  applyCachedAgentChrome(agentId);
+  render({ scrollToBottom: true });
+  setStatus('已连接', 'ok');
 
   try {
     const result = await window.qizi.switchAgent(agentId);
+    if (token !== agentSwitchToken) return;
     if (!result?.ok) {
       currentSessionKey = prevSessionKey;
-      currentAgentId = parseAgentIdFromSessionKey(prevSessionKey);
-      loadMessages();
+      currentAgentId = prevAgentId;
+      chatScopeEpoch += 1;
+      resetChatTimeline();
+      showSessionMessages(prevSessionKey);
+      stampMessagesToCurrentScope(messages);
       render({ scrollToBottom: true });
+      applyCachedAgentChrome(prevAgentId);
       setStatus(result?.error || '切换失败', 'error');
       return;
     }
 
-    let nextSessionKey = result.sessionKey || buildAgentSessionKeyFallback(agentId);
-    try {
-      const canonicalKey = await window.qizi.getSessionKey();
-      if (canonicalKey) nextSessionKey = canonicalKey;
-    } catch {
-      // ignore
+    if (result.mainKey) rememberShellMainKey({ mainKey: result.mainKey });
+    if (result.sessionKey && result.sessionKey !== currentSessionKey) {
+      currentSessionKey = result.sessionKey;
+      if (!messages.some((message) => message.streaming)) {
+        messages = [];
+        loadMessages();
+        messages = finalizeHistoryMessages(messages);
+      }
+      stampMessagesToCurrentScope(messages);
     }
-    currentSessionKey = nextSessionKey;
-    currentAgentId = agentId;
-    clearAgentUnread(agentId);
+    if (result.agent) {
+      agentCatalog.set(agentId, { ...(agentCatalog.get(agentId) || {}), ...result.agent });
+      applyCachedAgentChrome(agentId);
+    }
+    if (result.activeRun) adoptBackgroundRun(result.activeRun);
+    render({ scrollToBottom: true });
     debugEvent('session', 'switch_agent_success', {
       agentId,
-      sessionKey: nextSessionKey,
+      sessionKey: currentSessionKey,
     });
-    if (result.agent) {
-      agentCatalog.set(agentId, result.agent);
-    }
-    userAborted = false;
-    modelCatalogExpiresAt = 0;
 
-    updateAgentTitleLabel(result.agent || { id: agentId });
-    loadMessages();
-    messages = finalizeHistoryMessages(messages);
-    syncCurrentRunIdFromMessages();
-    render({ scrollToBottom: true });
-
-    if (ENABLE_GATEWAY_HISTORY_SYNC) {
+    if (ENABLE_GATEWAY_HISTORY_SYNC && !isLocalOwnedActiveRun()) {
       lastSyncedHistorySignature = '';
       lastSessionSyncAt = 0;
-      await syncHistoryFromGateway();
+      await syncHistoryFromGateway({ duringSwitch: true });
+      if (token !== agentSwitchToken) return;
       const sessionInfo = await window.qizi.getSessionInfo();
-      if (sessionInfo?.ok && sessionInfo.hasActiveRun) {
+      if (token !== agentSwitchToken) return;
+      if (sessionInfo?.ok && sessionInfo.hasActiveRun && !isLocalOwnedActiveRun()) {
         await resumeInterruptedSession();
-      } else {
+      } else if (!isLocalOwnedActiveRun()) {
         clearStaleStreamingState({ force: true });
       }
-    } else {
+    } else if (!isLocalOwnedActiveRun()) {
       clearStaleStreamingState({ force: true });
     }
-    resetOutboundChatState({ clearQueue: true });
-    await refreshCurrentModelBadge();
-    await refreshSessionInfo();
+    void refreshCurrentModelBadge();
+    void refreshSessionInfo();
     void refreshChannelPickerLabel();
-    setStatus('已连接', 'ok');
+    if (token === agentSwitchToken) setStatus('已连接', 'ok');
   } catch (err) {
+    if (token !== agentSwitchToken) return;
     currentSessionKey = prevSessionKey;
-    currentAgentId = parseAgentIdFromSessionKey(prevSessionKey);
+    currentAgentId = prevAgentId;
     debugEvent('session', 'switch_agent_failed', {
       agentId,
       fallbackSessionKey: prevSessionKey,
       error: err.message || '切换失败',
     });
-    loadMessages();
+    chatScopeEpoch += 1;
+    resetChatTimeline();
+    showSessionMessages(prevSessionKey);
+    stampMessagesToCurrentScope(messages);
     render({ scrollToBottom: true });
+    applyCachedAgentChrome(prevAgentId);
     setStatus(err.message || '切换失败', 'error');
+  } finally {
+    if (token === agentSwitchToken) sessionSwitchSettling = false;
   }
 }
 
@@ -5577,8 +5675,10 @@ async function showModelPopup() {
   hideAttachPopup();
   modelPopup.hidden = false;
   modelPickerBtn.classList.add('open');
-  const cachedModels = modelCatalogCache && modelCatalogExpiresAt > Date.now() ? modelCatalogCache : null;
-  if (cachedModels?.length) {
+  const cachedModels = modelCatalogAgentId === currentAgentId && modelCatalogCache?.length
+    ? modelCatalogCache
+    : null;
+  if (cachedModels) {
     renderModelPopup(cachedModels);
   } else {
     modelPopup.innerHTML = '<div class="model-popup-loading">加载模型…</div>';
@@ -5586,6 +5686,7 @@ async function showModelPopup() {
 
   if (!connected) {
     await checkConnection();
+    if (!modelPopup || modelPopup.hidden) return;
     if (!connected) {
       modelPopup.innerHTML = '<div class="model-popup-error">未连接 Gateway</div>';
       return;
@@ -5593,13 +5694,13 @@ async function showModelPopup() {
   }
 
   try {
-    await refreshCurrentModelBadge();
     const models = await loadModelCatalog(false);
+    if (!modelPopup || modelPopup.hidden) return;
     renderModelPopup(models);
+    void refreshCurrentModelBadge();
   } catch (err) {
-    if (!cachedModels?.length) {
-      modelPopup.innerHTML = `<div class="model-popup-error">${escapeHtml(err.message || '加载失败')}</div>`;
-    }
+    if (!modelPopup || modelPopup.hidden || cachedModels?.length) return;
+    modelPopup.innerHTML = `<div class="model-popup-error">${escapeHtml(err.message || '加载失败')}</div>`;
   }
 }
 
@@ -5653,6 +5754,57 @@ function updateModelBadge(text) {
   }
 }
 
+let currentHistoryReady = false;
+const HISTORY_WARM_FRESH_MS = 45 * 1000;
+const historyWarmedAt = new Map();
+let historyWarmCursor = 0;
+let historyWarmTimer = null;
+let historyWarmPassRunning = false;
+
+function startIdleWarmup() {
+  if (historyWarmTimer) return;
+  historyWarmTimer = setInterval(() => {
+    void tickIdleWarmup();
+  }, 12000);
+  setTimeout(() => {
+    void warmOtherAgentHistories();
+  }, 800);
+}
+
+async function warmOtherAgentHistories() {
+  if (!currentHistoryReady || historyWarmPassRunning) return;
+  historyWarmPassRunning = true;
+  try {
+    const agents = getAgentCatalogList().filter((agent) => agent?.id && agent.id !== currentAgentId);
+    for (const agent of agents) {
+      if (!connected || sessionSwitchSettling || isLocalOwnedActiveRun()) return;
+      if (window.MeetingView?.isVisible?.()) return;
+      const key = shellSessionKeyForAgent(agent.id);
+      if (liveSessionSnapshots.has(key)) continue;
+      if (Date.now() - (historyWarmedAt.get(key) || 0) < HISTORY_WARM_FRESH_MS) continue;
+      historyWarmedAt.set(key, Date.now());
+      await refreshSessionFromGateway(key);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+    }
+  } finally {
+    historyWarmPassRunning = false;
+  }
+}
+
+async function tickIdleWarmup() {
+  if (!currentHistoryReady || !connected || sessionSwitchSettling || isLocalOwnedActiveRun()) return;
+  if (window.MeetingView?.isVisible?.()) return;
+  const agents = getAgentCatalogList().filter((agent) => agent?.id && agent.id !== currentAgentId);
+  if (!agents.length) return;
+  const agent = agents[historyWarmCursor % agents.length];
+  historyWarmCursor += 1;
+  const key = shellSessionKeyForAgent(agent.id);
+  if (!key || liveSessionSnapshots.has(key)) return;
+  if (Date.now() - (historyWarmedAt.get(key) || 0) < HISTORY_WARM_FRESH_MS) return;
+  historyWarmedAt.set(key, Date.now());
+  await refreshSessionFromGateway(key);
+}
+
 async function checkConnection() {
   setStatus('连接中…', 'pending');
   try {
@@ -5679,7 +5831,10 @@ async function checkConnection() {
       } else if (!isLocalOwnedActiveRun()) {
         clearStaleStreamingState({ force: true });
       }
+      currentHistoryReady = true;
       startSessionWatch();
+      startIdleWarmup();
+      void warmOtherAgentHistories();
     } else {
       connected = false;
       debugEvent('session', 'connection_error_result', { error: result.error || '连接失败' });
@@ -6129,10 +6284,13 @@ async function runStream(assistantMsg) {
 
   try {
     const payload = toChatPayload(assistantMsg);
+    const homeSessionKey = assistantMsg.sessionKey || currentSessionKey;
     const result = await window.qizi.chatStream({
       ...payload,
       priorAssistantText: '',
+      sessionKey: homeSessionKey,
     }, myRunId);
+    if (homeSessionKey !== currentSessionKey) return;
     if (result?.ok === true) {
       if (!ensureChatTimeline().isRunFinished(myRunId)) {
         finishAssistant({ runId: myRunId, text: result.text || '' });
@@ -6179,17 +6337,116 @@ function processQueue() {
   runStream(assistant);
 }
 
-window.qizi.onChatDelta((delta, runId, replace) => {
+function ensureBackgroundSnapshot(sessionKey) {
+  let list = liveSessionSnapshots.get(sessionKey);
+  if (!list) {
+    list = exportHistoryArchiveForSession(sessionKey).map((message) => ({ ...message }));
+    liveSessionSnapshots.set(sessionKey, list);
+  }
+  return list;
+}
+
+function applyBackgroundOwnedText(sessionKey, runId, text, replace) {
+  const incoming = String(text || '');
+  if (!incoming.trim()) return;
+  const list = ensureBackgroundSnapshot(sessionKey);
+  let target = [...list].reverse().find((message) => (
+    message.who === 'them' && message.streaming && (runId == null || runIdsMatch(message.runId, runId))
+  ));
+  if (!target) {
+    target = {
+      id: allocMessageId(),
+      who: 'them',
+      text: '',
+      time: now(),
+      streaming: true,
+      runId,
+      sessionKey,
+    };
+    list.push(target);
+  }
+  if (replace || isStreamingPlaceholderText(target.text)) target.text = incoming;
+  else if (!String(target.text || '').endsWith(incoming)) target.text = `${target.text || ''}${incoming}`;
+  target.streaming = true;
+  const agentId = visibleUnreadAgentId(sessionKey);
+  if (agentId) markAgentUnread(agentId);
+}
+
+function applyBackgroundOwnedSegment(sessionKey, runId, text) {
+  const incoming = String(text || '').trim();
+  if (!incoming) return;
+  const list = ensureBackgroundSnapshot(sessionKey);
+  let target = [...list].reverse().find((message) => (
+    message.who === 'them' && message.streaming && (runId == null || runIdsMatch(message.runId, runId))
+  ));
+  if (!target) {
+    target = {
+      id: allocMessageId(),
+      who: 'them',
+      text: incoming,
+      time: now(),
+      streaming: false,
+      runId,
+      sessionKey,
+    };
+    list.push(target);
+  } else {
+    if (incoming.length >= String(target.text || '').length) target.text = incoming;
+    target.streaming = false;
+  }
+  appendCompletedMessageToArchive(sessionKey, target);
+}
+
+function applyBackgroundOwnedTerminal(payload) {
+  const sessionKey = String(payload?.sessionKey || '').trim();
+  if (!sessionKey || sessionKey === currentSessionKey) return;
+  const list = ensureBackgroundSnapshot(sessionKey);
+  const runId = payload.runId;
+  const target = [...list].reverse().find((message) => (
+    message.who === 'them' && (runId == null || runIdsMatch(message.runId, runId))
+  ));
+  if (target) {
+    const incoming = String(payload.text || '');
+    if (incoming && incoming.length >= String(target.text || '').length) target.text = incoming;
+    target.streaming = false;
+    if (payload.error) {
+      target.text = target.text ? `${target.text}\n\n[错误] ${payload.error}` : `[错误] ${payload.error}`;
+    }
+    appendCompletedMessageToArchive(sessionKey, target);
+  }
+  liveSessionSnapshots.delete(sessionKey);
+  const agentId = visibleUnreadAgentId(sessionKey);
+  if (agentId) {
+    maybePlayNewMessageSound(payload);
+    markAgentUnread(agentId);
+  }
+}
+
+function ownedEventSessionKey(payload) {
+  return String(payload?.sessionKey || '').trim();
+}
+
+window.qizi.onChatDelta((delta, runId, replace, payload) => {
+  const sessionKey = ownedEventSessionKey(payload);
+  if (sessionKey && sessionKey !== currentSessionKey) {
+    applyBackgroundOwnedText(sessionKey, runId, delta, replace === true);
+    return;
+  }
   applyStreamingDelta(delta, runId, replace);
 });
 
 window.qizi.onChatDone((runId, payload) => {
+  const sessionKey = ownedEventSessionKey(payload);
+  if (sessionKey && sessionKey !== currentSessionKey) {
+    applyBackgroundOwnedTerminal({ ...payload, runId, sessionKey });
+    return;
+  }
   debugEvent('stream', 'run_done_event', {
     runId,
     textLength: String(payload?.text || '').length,
     activeRunId,
   });
-  finishAssistant({ runId, text: payload?.text });
+  finishAssistant({ runId, text: payload?.text, aborted: payload?.aborted === true });
   setTimeout(() => {
     if (!busy) void syncHistoryFromGateway();
   }, 0);
@@ -6234,7 +6491,22 @@ if (window.qizi.onGatewayStatus) {
         }
       }
       startSessionWatch();
+      startIdleWarmup();
     }
+  });
+}
+
+if (window.qizi.onPrivateChannelUpdated) {
+  window.qizi.onPrivateChannelUpdated(() => {
+    void refreshChannelPickerLabel();
+    if (!channelPopup || channelPopup.hidden) return;
+    const agentId = currentAgentId;
+    void window.qizi.getPrivateChannel(agentId).then((result) => {
+      if (!result?.ok || channelPopup.hidden || agentId !== currentAgentId) return;
+      rememberChannelCatalog(agentId, result);
+      channelPopupCatalog = result;
+      renderChannelPopup(result);
+    }).catch(() => {});
   });
 }
 
@@ -6298,7 +6570,12 @@ if (window.qizi.onForwardSent) {
 // 真死了 (像 /stop 那次) 也不卡, 新 stream 走 runId 锁 + 入队, 不依赖旧 stream 收尾
 // 用户主动 abort 时，立即保存已输出内容，不等待 500ms
 
-window.qizi.onChatError((message, runId) => {
+window.qizi.onChatError((message, runId, payload) => {
+  const sessionKey = ownedEventSessionKey(payload);
+  if (sessionKey && sessionKey !== currentSessionKey) {
+    applyBackgroundOwnedTerminal({ sessionKey, runId, text: '', error: message, gatewayRunId: payload?.gatewayRunId });
+    return;
+  }
   debugEvent('stream', 'run_error_event', { runId, message: String(message || '') });
   finishAssistant({ error: message, runId });
 });
@@ -7967,6 +8244,14 @@ async function testSettingsConnection() {
 let channelPopupCatalog = null;
 let channelPopupBusy = false;
 let channelPickerLabelEpoch = 0;
+/** @type {Map<string, object>} */
+const channelCatalogByAgent = new Map();
+
+function rememberChannelCatalog(agentId, catalog) {
+  const id = String(agentId || '').trim();
+  if (!id || !catalog?.ok) return;
+  channelCatalogByAgent.set(id, catalog);
+}
 
 function setChannelPickerLabel(text) {
   const name = String(text || '').trim() || 'Webchat';
@@ -7982,6 +8267,7 @@ async function refreshChannelPickerLabel() {
   try {
     const result = await window.qizi.getPrivateChannel(agentId);
     if (epoch !== channelPickerLabelEpoch || agentId !== currentAgentId) return;
+    if (result?.ok) rememberChannelCatalog(agentId, result);
     const selected = (result?.options || []).find((option) => option.id === result?.selectedId);
     setChannelPickerLabel(selected?.shortLabel || selected?.label);
   } catch {
@@ -8081,28 +8367,37 @@ async function showChannelPopup() {
   hideContextUsagePopup();
   hideEmojiPicker();
   hideAppMenu();
-  channelPopupCatalog = null;
+  const agentId = currentAgentId;
+  const cached = channelCatalogByAgent.get(agentId) || null;
+  channelPopupCatalog = cached;
   channelPopup.hidden = false;
   channelPickerBtn.classList.add('open');
   channelPickerBtn.setAttribute('aria-expanded', 'true');
-  renderChannelPopup({ options: [] });
-  const loading = channelPopup.querySelector('.channel-popup-note');
-  if (loading) loading.textContent = '正在读取已接上的聊天软件…';
+  if (cached) {
+    renderChannelPopup(cached);
+  } else {
+    renderChannelPopup({ options: [] });
+    const loading = channelPopup.querySelector('.channel-popup-note');
+    if (loading) loading.textContent = '正在读取已接上的聊天软件…';
+  }
   if (!window.qizi?.getPrivateChannel) {
     renderChannelPopup(null, '当前版本还不能读取私聊通道');
     return;
   }
   try {
-    const result = await window.qizi.getPrivateChannel(currentAgentId);
-    if (channelPopup.hidden) return;
+    const result = await window.qizi.getPrivateChannel(agentId);
+    if (channelPopup.hidden || agentId !== currentAgentId) return;
     if (!result?.ok) {
-      renderChannelPopup(null, result?.error || '读取失败');
+      if (!cached) renderChannelPopup(null, result?.error || '读取失败');
       return;
     }
+    rememberChannelCatalog(agentId, result);
     channelPopupCatalog = result;
     renderChannelPopup(result);
+    const selected = (result.options || []).find((option) => option.id === result.selectedId);
+    setChannelPickerLabel(selected?.shortLabel || selected?.label);
   } catch (err) {
-    if (channelPopup.hidden) return;
+    if (channelPopup.hidden || cached) return;
     renderChannelPopup(null, err.message || '读取失败');
   }
 }
@@ -8178,6 +8473,10 @@ async function selectPrivateChannel(option) {
       await adoptShellSession(result.sessionKey);
     }
     hideChannelPopup();
+    const cached = channelCatalogByAgent.get(currentAgentId);
+    if (cached) {
+      rememberChannelCatalog(currentAgentId, { ...cached, selectedId: option.id });
+    }
     setChannelPickerLabel(option.shortLabel || result.label);
     const phrase = result.label === 'Webchat'
       ? '已改成 Webchat'

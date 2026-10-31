@@ -851,12 +851,10 @@ async function refreshAgentListInBackground() {
 
 const MODEL_LIST_FRESH_MS = 3 * 60 * 1000;
 const MODEL_LIST_STALE_MS = 24 * 60 * 60 * 1000;
-let modelListCache = { cacheKey: null, at: 0, data: null };
-let modelListRefreshPromise = null;
-
-function getModelListCacheKey() {
-  return `${getAgentListGatewayKey()}\0${parseAgentIdFromSessionKey(getSessionKey())}`;
-}
+/** @type {Map<string, { at: number, data: object }>} */
+const modelListByAgent = new Map();
+/** @type {Set<string>} */
+const modelRefreshInflight = new Set();
 
 function normalizeModelCatalogEntries(models) {
   return (Array.isArray(models) ? models : []).map((entry) => {
@@ -871,8 +869,10 @@ function normalizeModelCatalogEntries(models) {
   });
 }
 
-function storeModelListResult(data) {
-  modelListCache = { cacheKey: getModelListCacheKey(), at: Date.now(), data };
+function storeModelListResult(agentId, data) {
+  const id = String(agentId || '').trim();
+  if (!id) return;
+  modelListByAgent.set(id, { at: Date.now(), data });
 }
 
 function broadcastModelsUpdated(payload) {
@@ -901,26 +901,31 @@ async function loadModelCatalogForAgent(client, agentId) {
   return [];
 }
 
-async function refreshModelListInBackground() {
-  if (modelListRefreshPromise) return modelListRefreshPromise;
-  modelListRefreshPromise = (async () => {
-    try {
-      const client = ensureGateway();
-      await client.waitForConnect();
-      const agentId = parseAgentIdFromSessionKey(getSessionKey());
-      const models = await loadModelCatalogForAgent(client, agentId);
-      const data = { ok: true, models, agentId };
-      storeModelListResult(data);
-      broadcastModelsUpdated(data);
-      return data;
-    } catch (err) {
-      console.warn('[qizi] model list refresh failed:', err.message);
-      return null;
-    } finally {
-      modelListRefreshPromise = null;
-    }
-  })();
-  return modelListRefreshPromise;
+async function refreshModelListForAgent(agentId) {
+  const id = String(agentId || '').trim();
+  if (!id || modelRefreshInflight.has(id)) return null;
+  const cached = modelListByAgent.get(id);
+  if (cached?.data?.ok && Date.now() - cached.at < MODEL_LIST_FRESH_MS) return cached.data;
+  modelRefreshInflight.add(id);
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const models = await loadModelCatalogForAgent(client, id);
+    const data = { ok: true, models, agentId: id };
+    storeModelListResult(id, data);
+    broadcastModelsUpdated(data);
+    return data;
+  } catch (err) {
+    console.warn('[qizi] model list refresh failed:', err.message);
+    return null;
+  } finally {
+    modelRefreshInflight.delete(id);
+  }
+}
+
+function refreshModelListInBackground() {
+  const agentId = parseAgentIdFromSessionKey(getSessionKey());
+  return refreshModelListForAgent(agentId);
 }
 
 function prefetchModelList() {
@@ -1660,6 +1665,7 @@ function sendToMainRenderer(channel, payload) {
 function sendStreamDeltaToRenderer(run, clientRunId, text, replace = false) {
   const payload = {
     runId: clientRunId,
+    sessionKey: run?.sessionKey || getSessionKey(),
     delta: text,
     replace: replace === true,
   };
@@ -1675,7 +1681,12 @@ function sendStreamDeltaToRenderer(run, clientRunId, text, replace = false) {
 }
 
 function sendStreamDoneToRenderer(run, clientRunId, payload) {
-  const fullPayload = { runId: clientRunId, ...payload };
+  const fullPayload = {
+    runId: clientRunId,
+    sessionKey: run?.sessionKey || getSessionKey(),
+    gatewayRunId: run?.gatewayRunId || '',
+    ...payload,
+  };
   debugEvent('stream', 'done_emit', {
     runId: clientRunId,
     textLength: String(payload?.text || '').length,
@@ -1688,7 +1699,11 @@ function sendStreamDoneToRenderer(run, clientRunId, payload) {
 }
 
 function sendStreamErrorToRenderer(run, clientRunId, error) {
-  const payload = { runId: clientRunId, error };
+  const payload = {
+    runId: clientRunId,
+    sessionKey: run?.sessionKey || getSessionKey(),
+    error,
+  };
   debugEvent('stream', 'error_emit', { runId: clientRunId, error: String(error || '') });
   sendToMainRenderer('openclaw:error', payload);
   if (run?.sender) {
@@ -1697,7 +1712,11 @@ function sendStreamErrorToRenderer(run, clientRunId, error) {
 }
 
 function sendChatSegmentToRenderer(run, clientRunId, text) {
-  const payload = { runId: clientRunId, text };
+  const payload = {
+    runId: clientRunId,
+    sessionKey: run?.sessionKey || getSessionKey(),
+    text,
+  };
   sendToMainRenderer('openclaw:chat-segment', payload);
   if (run?.sender) {
     safeSendTo(run.sender, 'openclaw:chat-segment', payload);
@@ -1839,8 +1858,18 @@ function looksLikeLeakedToolPayloadText(text) {
   return false;
 }
 
+const EXEC_COMPLETION_NOTICE_RE = /^exec (completed|failed) \([a-z0-9_-]{1,64},\s*(?:code -?\d+|signal [^)]+)\)/i;
+
+function isExecCompletionNoticeText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const visible = stripLeadingEnvelopeTimestamp(stripSenderUntrustedMetadata(raw)).trim();
+  return EXEC_COMPLETION_NOTICE_RE.test(visible) || EXEC_COMPLETION_NOTICE_RE.test(raw);
+}
+
 function shouldHideHistoryMessage(message) {
   if (isToolHistoryMessage(message)) return true;
+  if (isExecCompletionNoticeText(extractMessageText(message))) return true;
   const role = normalizeHistoryRole(message?.role ?? message?.who);
   if (role === 'assistant' || role === 'them' || !role) {
     return looksLikeLeakedToolPayloadText(extractMessageText(message));
@@ -2132,9 +2161,10 @@ function bindRunToGatewayRunId(clientRunId, run, gatewayRunId) {
   gatewayRunIndex.set(gatewayRunId, clientRunId);
 }
 
-function pickLatestActiveRun() {
+function pickLatestActiveRun(sessionKey) {
   let latest = null;
   for (const [clientRunId, run] of activeRuns.entries()) {
+    if (sessionKey && run.sessionKey && run.sessionKey !== sessionKey) continue;
     if (!latest || Number(run.startedAt || 0) > Number(latest.run.startedAt || 0)) {
       latest = { clientRunId, run };
     }
@@ -2155,23 +2185,26 @@ function findOwnedRunForChatPayload(payload) {
     }
   }
 
+  const payloadSessionKey = typeof payload?.sessionKey === 'string' ? payload.sessionKey : '';
+
   if (activeRuns.size === 1) {
     const [clientRunId, run] = activeRuns.entries().next().value;
-    bindRunToGatewayRunId(clientRunId, run, gatewayRunId);
-    debugEvent('stream', 'run_bind_single_active', {
-      clientRunId,
-      gatewayRunId,
-      payloadSessionKey: payload?.sessionKey || null,
-    });
-    return { clientRunId, run };
+    if (!(payloadSessionKey && run.sessionKey && payloadSessionKey !== run.sessionKey)) {
+      bindRunToGatewayRunId(clientRunId, run, gatewayRunId);
+      debugEvent('stream', 'run_bind_single_active', {
+        clientRunId,
+        gatewayRunId,
+        payloadSessionKey: payloadSessionKey || null,
+      });
+      return { clientRunId, run };
+    }
   }
 
   // Some gateways emit chat deltas before ack runId mapping settles.
   // If payload belongs to current session, attach it to the newest local run.
-  const payloadSessionKey = typeof payload?.sessionKey === 'string' ? payload.sessionKey : '';
   const currentSessionKey = getSessionKey();
   if (!payloadSessionKey || payloadSessionKey === currentSessionKey) {
-    const fallback = pickLatestActiveRun();
+    const fallback = pickLatestActiveRun(payloadSessionKey || currentSessionKey);
     if (fallback) {
       const { clientRunId, run } = fallback;
       bindRunToGatewayRunId(clientRunId, run, gatewayRunId);
@@ -2347,7 +2380,7 @@ function finishClientRun(clientRunId, outcome) {
   const run = activeRuns.get(clientRunId);
   if (!run) return;
   if (run.gatewayRunId) {
-    rememberFinishedOwnedGatewayRun(run.gatewayRunId, getSessionKey());
+    rememberFinishedOwnedGatewayRun(run.gatewayRunId, run.sessionKey || getSessionKey());
   }
   unregisterActiveRun(clientRunId);
   const fullText = String(
@@ -3219,6 +3252,9 @@ function attachGatewayHandlers(client) {
     void ensureGatewaySessionSubscription(client);
     prefetchAgentList();
     prefetchModelList();
+    warmPrivateChannelSource();
+    ensureShellWarmTimer();
+    ensureBackgroundRunPoll();
     broadcastToRenderers('openclaw:gateway-status', {
       connected: true,
       reconnected: activeRuns.size > 0,
@@ -3260,8 +3296,10 @@ function ensureGateway() {
       gateway.stop();
     }
     clearAgentListCache();
-    modelListCache = { cacheKey: null, at: 0, data: null };
-    modelListRefreshPromise = null;
+    modelListByAgent.clear();
+    modelRefreshInflight.clear();
+    channelSourceCache = { at: 0, source: null };
+    channelSourceInflight = null;
     gateway = new GatewayWsClient({
       url: config.wsUrl,
       token: config.tokenless ? undefined : config.token,
@@ -3564,17 +3602,17 @@ async function getCurrentModel() {
 
 async function listModels(options = {}) {
   const forceRefresh = options?.forceRefresh === true;
-  const cacheKey = getModelListCacheKey();
-  const cacheValid = modelListCache.cacheKey === cacheKey;
-  const cached = cacheValid ? modelListCache.data : null;
-  const age = cacheValid ? Date.now() - modelListCache.at : Infinity;
+  const agentId = String(options?.agentId || parseAgentIdFromSessionKey(getSessionKey()) || '').trim();
+  const cachedEntry = agentId ? modelListByAgent.get(agentId) : null;
+  const cached = cachedEntry?.data || null;
+  const age = cachedEntry ? Date.now() - cachedEntry.at : Infinity;
 
   if (!forceRefresh && cached?.ok) {
     if (age < MODEL_LIST_FRESH_MS) {
       return cached;
     }
     if (age < MODEL_LIST_STALE_MS) {
-      void refreshModelListInBackground();
+      void refreshModelListForAgent(agentId);
       return cached;
     }
   }
@@ -3582,10 +3620,9 @@ async function listModels(options = {}) {
   try {
     const client = ensureGateway();
     await client.waitForConnect();
-    const agentId = parseAgentIdFromSessionKey(getSessionKey());
     const models = await loadModelCatalogForAgent(client, agentId);
     const data = { ok: true, models, agentId };
-    storeModelListResult(data);
+    storeModelListResult(agentId, data);
     return data;
   } catch (err) {
     if (cached?.ok) return cached;
@@ -3632,6 +3669,18 @@ async function listAgents(options = {}) {
   }
 }
 
+function describeActiveRunForSession(sessionKey) {
+  let latest = null;
+  for (const [clientRunId, run] of activeRuns.entries()) {
+    if (run.sessionKey !== sessionKey) continue;
+    if (!latest || Number(run.startedAt || 0) > Number(latest.startedAt || 0)) {
+      latest = { clientRunId, text: run.fullText || '', startedAt: run.startedAt || 0 };
+    }
+  }
+  if (!latest) return null;
+  return { clientRunId: latest.clientRunId, text: latest.text };
+}
+
 async function switchToAgent(agentId) {
   if (!agentId || typeof agentId !== 'string') {
     return { ok: false, error: '未指定 Agent' };
@@ -3640,17 +3689,17 @@ async function switchToAgent(agentId) {
     debugEvent('session', 'switch_agent_start', { agentId, fromSessionKey: getSessionKey() });
     const client = ensureGateway();
     await client.waitForConnect();
-    const result = await client.request('agents.list', {});
-    const defaultId = result?.defaultId || 'main';
-    const mainKey = result?.mainKey || 'main';
-    const agents = Array.isArray(result?.agents) ? result.agents : [];
-    const found = agents.find((agent) => agent.id === agentId);
+    const cacheOk = agentListCache.data?.ok && agentListCache.gatewayKey === getAgentListGatewayKey();
+    let mainKey = cacheOk ? (agentListCache.data.mainKey || SHELL_SESSION_MAIN_KEY) : SHELL_SESSION_MAIN_KEY;
+    let found = cacheOk
+      ? (agentListCache.data.agents || []).find((agent) => agent.id === agentId) || null
+      : null;
     if (!found) {
-      return { ok: false, error: `未找到 Agent: ${agentId}` };
-    }
-
-    for (const [clientRunId] of [...activeRuns.entries()]) {
-      finishClientRun(clientRunId, { aborted: true });
+      const result = await client.request('agents.list', {});
+      mainKey = result?.mainKey || mainKey;
+      const agents = Array.isArray(result?.agents) ? result.agents : [];
+      found = agents.find((agent) => agent.id === agentId) || null;
+      if (!found) return { ok: false, error: `未找到 Agent: ${agentId}` };
     }
 
     closeHistoryWindow();
@@ -3658,20 +3707,13 @@ async function switchToAgent(agentId) {
     const newSessionKey = shellSessionKeyForAgent(agentId, mainKey);
     persistSessionKey(newSessionKey);
     debugEvent('session', 'switch_agent_success', { agentId, sessionKey: newSessionKey });
-    await ensureGatewaySessionSubscription(client);
-    const agent = await enrichAgentEntry(client, found, { defaultId });
-    const currentModel = await fetchSessionCurrentModel(client, newSessionKey, {
-      modelProvider: result?.defaults?.modelProvider,
-      model: result?.defaults?.model,
-    });
-    applyCurrentModelToEntry(agent, currentModel, {
-      modelProvider: result?.defaults?.modelProvider,
-      model: result?.defaults?.model,
-    });
+    void ensureGatewaySessionSubscription(client);
     return {
       ok: true,
       sessionKey: newSessionKey,
-      agent,
+      agent: found,
+      mainKey,
+      activeRun: describeActiveRunForSession(newSessionKey),
     };
   } catch (err) {
     debugEvent('session', 'switch_agent_failed', { agentId, error: formatGatewayError(err) });
@@ -4370,11 +4412,12 @@ async function forwardMessageToAgents({ agentIds, message, dedupeScope } = {}) {
   return work;
 }
 
-async function streamChat(event, { message, attachments, runId, priorAssistantText: priorFromRenderer }) {
+async function streamChat(event, { message, attachments, runId, priorAssistantText: priorFromRenderer, sessionKey: requestedSessionKey }) {
   const client = ensureGateway();
   await client.waitForConnect();
 
   const priorAssistantText = typeof priorFromRenderer === 'string' ? priorFromRenderer : '';
+  const sessionKey = String(requestedSessionKey || '').trim() || getSessionKey();
 
   const idempotencyKey = `qizi-${runId}-${Date.now()}`;
 
@@ -4382,6 +4425,7 @@ async function streamChat(event, { message, attachments, runId, priorAssistantTe
     registerActiveRun(runId, idempotencyKey, {
       gatewayRunId: idempotencyKey,
       sender: event.sender,
+      sessionKey,
       fullText: '',
       priorAssistantText,
       committedInRunText: '',
@@ -4389,6 +4433,8 @@ async function streamChat(event, { message, attachments, runId, priorAssistantTe
       startedAt: Date.now(),
       lastEventAt: Date.now(),
       stableHistoryPolls: 0,
+      quietPolls: 0,
+      backgroundPollInflight: false,
       done: (outcome) => {
         if (outcome.error) {
           resolve({ ok: false, error: outcome.error });
@@ -4407,7 +4453,6 @@ async function streamChat(event, { message, attachments, runId, priorAssistantTe
 
     void (async () => {
       try {
-        const sessionKey = getSessionKey();
         const ack = await client.request('chat.send', {
           sessionKey,
           message: message || '',
@@ -4981,37 +5026,181 @@ ipcMain.handle('openclaw:stt:transcribe', async (event, payload) => {
   }
 });
 
-async function loadPrivateChannelSource(client, agentId) {
-  await client.waitForConnect();
-  const [status, cfg, agents] = await Promise.all([
-    client.request('channels.status', { probe: false }),
-    client.request('config.get', {}),
-    client.request('agents.list', {}),
-  ]);
-  let sessions = [];
-  const paramSets = [
-    { limit: 500, agentId, includeGlobal: true, includeUnknown: true },
-    { limit: 200, includeGlobal: true, includeUnknown: true },
-  ];
-  for (const params of paramSets) {
+const CHANNEL_SOURCE_FRESH_MS = 60 * 1000;
+const CHANNEL_SOURCE_STALE_MS = 10 * 60 * 1000;
+let channelSourceCache = { at: 0, source: null };
+let channelSourceInflight = null;
+
+async function refreshPrivateChannelSource(client) {
+  if (channelSourceInflight) return channelSourceInflight;
+  channelSourceInflight = (async () => {
+    await client.waitForConnect();
+    const [status, cfg, agents] = await Promise.all([
+      client.request('channels.status', { probe: false }),
+      client.request('config.get', {}),
+      client.request('agents.list', {}),
+    ]);
+    let sessions = [];
     try {
-      const listed = await client.request('sessions.list', params);
+      const listed = await client.request('sessions.list', {
+        limit: 500,
+        includeGlobal: true,
+        includeUnknown: true,
+      });
       sessions = Array.isArray(listed?.sessions) ? listed.sessions : [];
-      if (sessions.length) break;
     } catch {
-      // 换一组参数再试
+      sessions = [];
+    }
+    const config = cfg?.config || {};
+    const source = {
+      dmScope: config.session?.dmScope,
+      hash: typeof cfg?.hash === 'string' ? cfg.hash : '',
+      bindings: Array.isArray(config.bindings) ? config.bindings : [],
+      channelStatus: status || {},
+      sessions,
+      defaultAgentId: agents?.defaultId || 'main',
+      mainKey: agents?.mainKey || SHELL_SESSION_MAIN_KEY,
+    };
+    channelSourceCache = { at: Date.now(), source };
+    broadcastToRenderers('openclaw:private-channel-updated', { at: channelSourceCache.at });
+    return source;
+  })().finally(() => {
+    channelSourceInflight = null;
+  });
+  return channelSourceInflight;
+}
+
+async function loadPrivateChannelSource(client) {
+  const age = channelSourceCache.source ? Date.now() - channelSourceCache.at : Infinity;
+  if (channelSourceCache.source && age < CHANNEL_SOURCE_FRESH_MS) return channelSourceCache.source;
+  if (channelSourceCache.source && age < CHANNEL_SOURCE_STALE_MS) {
+    void refreshPrivateChannelSource(client);
+    return channelSourceCache.source;
+  }
+  return refreshPrivateChannelSource(client);
+}
+
+function warmPrivateChannelSource() {
+  if (!gateway?.connected) return;
+  const age = channelSourceCache.source ? Date.now() - channelSourceCache.at : Infinity;
+  if (age < CHANNEL_SOURCE_FRESH_MS || channelSourceInflight) return;
+  void refreshPrivateChannelSource(gateway).catch((err) => {
+    console.warn('[qizi] channel source warm failed:', err.message);
+  });
+}
+
+const BACKGROUND_RUN_POLL_MS = 2500;
+let backgroundRunPollTimer = null;
+
+function ensureBackgroundRunPoll() {
+  if (backgroundRunPollTimer) return;
+  backgroundRunPollTimer = setInterval(() => {
+    void pollBackgroundOwnedRuns();
+  }, BACKGROUND_RUN_POLL_MS);
+  backgroundRunPollTimer.unref?.();
+}
+
+async function pollBackgroundOwnedRuns() {
+  const client = gateway;
+  if (!client?.connected) return;
+  const current = getSessionKey();
+  for (const [clientRunId, run] of activeRuns.entries()) {
+    if (!run.sessionKey || run.sessionKey === current) continue;
+    if (run.backgroundPollInflight) continue;
+    if (Date.now() - (run.lastEventAt || 0) < 3000) continue;
+    run.backgroundPollInflight = true;
+    try {
+      const result = await client.request('chat.history', {
+        sessionKey: run.sessionKey,
+        limit: 40,
+        maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
+      });
+      if (!activeRuns.has(clientRunId)) continue;
+      const msgs = convertHistoryMessages(result?.messages || []);
+      const latest = [...msgs].reverse().find((item) => item.who === 'them' && String(item.text || '').trim());
+      const text = latest?.text || '';
+      if (text && text !== run.fullText && text.length >= String(run.fullText || '').length) {
+        run.fullText = text;
+        run.lastEventAt = Date.now();
+        sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
+      }
+      const info = result?.sessionInfo;
+      if (info && info.hasActiveRun === false && Date.now() - (run.startedAt || 0) > 4000) {
+        run.quietPolls = (run.quietPolls || 0) + 1;
+        if (run.quietPolls >= 2) {
+          finishClientRun(clientRunId, { ok: true, text: run.fullText || text });
+        }
+      } else {
+        run.quietPolls = 0;
+      }
+    } catch (err) {
+      debugEvent('session', 'background_run_poll_failed', { error: err.message || String(err) });
+    } finally {
+      if (activeRuns.get(clientRunId) === run) run.backgroundPollInflight = false;
     }
   }
-  const config = cfg?.config || {};
-  return {
-    dmScope: config.session?.dmScope,
-    hash: typeof cfg?.hash === 'string' ? cfg.hash : '',
-    bindings: Array.isArray(config.bindings) ? config.bindings : [],
-    channelStatus: status || {},
-    sessions,
-    defaultAgentId: agents?.defaultId || 'main',
-    mainKey: agents?.mainKey || SHELL_SESSION_MAIN_KEY,
-  };
+}
+
+const SHELL_WARM_MS = 20 * 1000;
+let shellWarmTimer = null;
+let shellWarmStep = 0;
+let modelWarmCursor = 0;
+let modelWarmBusy = false;
+
+function currentSessionHasOwnedRun() {
+  const current = getSessionKey();
+  for (const run of activeRuns.values()) {
+    if (!run.sessionKey || run.sessionKey === current) return true;
+  }
+  return false;
+}
+
+async function warmOneStaleModel() {
+  if (modelWarmBusy) return;
+  modelWarmBusy = true;
+  try {
+  const agents = agentListCache.data?.agents || [];
+  const currentId = parseAgentIdFromSessionKey(getSessionKey());
+  const ids = [];
+  if (currentId) ids.push(currentId);
+  for (const agent of agents) {
+    if (agent?.id && agent.id !== currentId) ids.push(agent.id);
+  }
+  if (!ids.length) return;
+  for (let offset = 0; offset < ids.length; offset += 1) {
+    const id = ids[(modelWarmCursor + offset) % ids.length];
+    const entry = modelListByAgent.get(id);
+    const age = entry ? Date.now() - entry.at : Infinity;
+    if (age < MODEL_LIST_FRESH_MS || modelRefreshInflight.has(id)) continue;
+    modelWarmCursor = (modelWarmCursor + offset + 1) % ids.length;
+    await refreshModelListForAgent(id);
+    return;
+  }
+  } finally {
+    modelWarmBusy = false;
+  }
+}
+
+function ensureShellWarmTimer() {
+  if (shellWarmTimer) return;
+  shellWarmTimer = setInterval(() => {
+    void tickShellWarm();
+  }, SHELL_WARM_MS);
+  shellWarmTimer.unref?.();
+  setTimeout(() => {
+    void tickShellWarm();
+  }, 2500);
+}
+
+async function tickShellWarm() {
+  if (!gateway?.connected || currentSessionHasOwnedRun()) return;
+  shellWarmStep += 1;
+  try {
+    if (shellWarmStep % 2 === 0) warmPrivateChannelSource();
+    else await warmOneStaleModel();
+  } catch (err) {
+    console.warn('[qizi] shell warm failed:', err.message);
+  }
 }
 
 async function getPrivateChannelCatalog(agentId) {
@@ -5101,6 +5290,7 @@ async function setPrivateChannelChoice(agentId, choiceId) {
     } else {
       getPrivateChannels().setChoice(id, null);
     }
+    if (scopeChanged) channelSourceCache = { at: 0, source: null };
     const sessionKey = shellSessionKeyForAgent(id, source.mainKey);
     const viewingThisAgent = parseAgentIdFromSessionKey(getSessionKey()) === id;
     if (viewingThisAgent) {
@@ -5194,21 +5384,22 @@ ipcMain.handle('openclaw:session:permission:set', (event, payload) => {
 ipcMain.handle('openclaw:abort', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   const client = gateway;
-  const runs = [...activeRuns.entries()];
+  const sessionKey = getSessionKey();
+  const runs = [...activeRuns.entries()].filter(([, run]) => !run.sessionKey || run.sessionKey === sessionKey);
 
   if (client?.connected) {
     if (runs.length > 0) {
       await Promise.allSettled(
         runs.map(([, run]) =>
           client.request('chat.abort', {
-            sessionKey: getSessionKey(),
+            sessionKey: run.sessionKey || sessionKey,
             runId: run.gatewayRunId,
           }),
         ),
       );
     } else {
       try {
-        await client.request('chat.abort', { sessionKey: getSessionKey() });
+        await client.request('chat.abort', { sessionKey });
       } catch {
         // ignore
       }
@@ -5470,7 +5661,7 @@ ipcMain.handle('openclaw:history:message-action', (event, payload) => {
   return { ok: true };
 });
 
-ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, priorAssistantText }) => {
+ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, priorAssistantText, sessionKey }) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
     const imageList = Array.isArray(images) ? images : [];
@@ -5490,6 +5681,7 @@ ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, p
       attachments,
       runId,
       priorAssistantText,
+      sessionKey,
     });
   } catch (err) {
     const errMessage = formatGatewayError(err);
