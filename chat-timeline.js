@@ -298,8 +298,12 @@
     }
 
     function processSegment({ runId, text }) {
-      if (!findStreaming(runId)) return;
       const segmentText = text ? stripCommittedAssistantPrefix(runId, text) : '';
+      if (!findStreaming(runId)) {
+        if (segmentText.trim()) appendFinalBubble({ runId, text: segmentText });
+        onRender();
+        return;
+      }
       commitStream({ runId, text: segmentText || undefined, archive: true });
       onRender();
     }
@@ -318,12 +322,20 @@
         commitStream({ runId, text: incoming, archive: true, error: err || null });
       } else if (incoming.trim()) {
         const last = findLastAssistantBubble(runId);
+        const lastText = String(last?.text || '').trim();
+        const nextText = incoming.trim();
         if (last && textSame(last.text, incoming)) {
           // 已由 segment / delta 展示，跳过重复气泡
-        } else if (last && !last.streaming && incoming.trim().length > String(last.text || '').trim().length) {
+        } else if (
+          last
+          && !last.streaming
+          && lastText
+          && nextText.startsWith(lastText)
+          && nextText.length > lastText.length
+        ) {
           last.text = incoming;
           onArchive(last);
-        } else if (!last) {
+        } else {
           appendFinalBubble({ runId, text: incoming, error: err || null });
         }
       } else if (err) {

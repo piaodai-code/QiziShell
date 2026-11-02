@@ -3059,7 +3059,7 @@ function clearStaleStreamingState(options = {}) {
       cleared = true;
     }
   }
-  if (cleared && (force || !isLocalOwnedActiveRun())) {
+  if (force || (cleared && !isLocalOwnedActiveRun())) {
     stopStreamHistoryPoll();
     setBusy(false);
     activeRunId = null;
@@ -3967,20 +3967,26 @@ async function tickSessionWatch() {
   if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (sessionSwitchSettling) return;
   if (window.MeetingView?.isVisible?.()) return;
-  if (!connected || isLocalOwnedActiveRun()) return;
+  if (!connected) return;
 
-  const now = Date.now();
-  if (now - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
+  const nowMs = Date.now();
+  if (nowMs - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
 
   try {
     const sessionInfo = await window.qizi.getSessionInfo();
     if (!sessionInfo?.ok) return;
 
-    lastSessionSyncAt = now;
+    lastSessionSyncAt = nowMs;
 
     if (!sessionInfo.hasActiveRun) {
-      if (busy || messages.some((m) => m.streaming)) {
-        await syncHistoryFromGateway();
+      const waiting = busy || messages.some((m) => m.streaming);
+      const ownedJustStarted = isLocalOwnedActiveRun() && messages.some((m) => {
+        if (m.who !== 'them' || !m.streaming || m.external) return false;
+        const started = m.lastDeltaAt || m.streamingStartedAt || 0;
+        return started > 0 && Date.now() - started < 8000;
+      });
+      if (waiting && !ownedJustStarted) {
+        await syncHistoryFromGateway({ force: true });
         clearStaleStreamingState({ force: true });
         render();
       } else {
@@ -3993,6 +3999,8 @@ async function tickSessionWatch() {
       }
       return;
     }
+
+    if (isLocalOwnedActiveRun()) return;
 
     await syncHistoryFromGateway({ preserveExternalStream: true });
   } catch {
@@ -4247,11 +4255,11 @@ async function syncHistoryFromGatewayOnce(options = {}) {
       lastSyncedHistorySignature = '';
     }
 
-    if (isLocalOwnedActiveRun()) {
+    if (isLocalOwnedActiveRun() && options.force !== true) {
       return;
     }
 
-    if (messages.some((m) => m.who === 'them' && m.streaming && !m.external)) {
+    if (!options.force && messages.some((m) => m.who === 'them' && m.streaming && !m.external)) {
       return;
     }
 
@@ -5292,6 +5300,20 @@ function hideAttachPopup() {
   }
 }
 
+function placeAttachPopup() {
+  if (!attachPopup || !attachPickerBtn) return;
+  const rect = attachPickerBtn.getBoundingClientRect();
+  const margin = 8;
+  attachPopup.style.position = 'fixed';
+  attachPopup.style.zIndex = '10005';
+  attachPopup.style.right = 'auto';
+  attachPopup.style.top = 'auto';
+  const width = Math.max(attachPopup.offsetWidth || 148, 148);
+  const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+  attachPopup.style.left = `${Math.round(left)}px`;
+  attachPopup.style.bottom = `${Math.round(Math.max(margin, window.innerHeight - rect.top + margin))}px`;
+}
+
 function showAttachPopup() {
   if (!attachPopup || !attachPickerBtn) return;
   if (!attachPopup.hidden) {
@@ -5307,6 +5329,7 @@ function showAttachPopup() {
   hideContextUsagePopup();
   hideEmojiPicker();
   attachPopup.hidden = false;
+  placeAttachPopup();
   attachPickerBtn.classList.add('open');
   attachPickerBtn.setAttribute('aria-expanded', 'true');
 }
@@ -6917,7 +6940,7 @@ if (composerSendBtn) {
 const screenshotBtn = document.getElementById('screenshot-btn');
 if (screenshotBtn) {
   screenshotBtn.addEventListener('click', async () => {
-    if (busy) return; // 生成中不准触发
+    if (!claimAttachItemActivate()) return;
     screenshotBtn.disabled = true;
     const oldTitle = screenshotBtn.title;
     screenshotBtn.title = '选个区域...';
@@ -6946,7 +6969,7 @@ if (screenshotBtn) {
 const pickImageBtn = document.getElementById('pick-image-btn');
 if (pickImageBtn) {
   pickImageBtn.addEventListener('click', async () => {
-    if (busy) return;
+    if (!claimAttachItemActivate()) return;
     pickImageBtn.disabled = true;
     const oldTitle = pickImageBtn.title;
     pickImageBtn.title = '选图中…';
@@ -6980,7 +7003,7 @@ if (pickImageBtn) {
 const pickFileBtn = document.getElementById('pick-file-btn');
 if (pickFileBtn) {
   pickFileBtn.addEventListener('click', async () => {
-    if (busy) return;
+    if (!claimAttachItemActivate()) return;
     pickFileBtn.disabled = true;
     const oldTitle = pickFileBtn.title;
     pickFileBtn.title = '选文件中…';
@@ -7376,9 +7399,25 @@ if (attachPickerBtn) {
   });
 }
 
+let attachItemActivatedAt = 0;
+function claimAttachItemActivate() {
+  const t = Date.now();
+  if (t - attachItemActivatedAt < 450) return false;
+  attachItemActivatedAt = t;
+  return true;
+}
+
 if (attachPopup) {
+  attachPopup.addEventListener('mousedown', (e) => {
+    const item = e.target.closest('button.attach-item');
+    if (!item) return;
+    e.preventDefault();
+    e.stopPropagation();
+    hideAttachPopup();
+    item.click();
+  });
   attachPopup.addEventListener('click', (e) => {
-    if (e.target.closest('.attach-item')) hideAttachPopup();
+    e.stopPropagation();
   });
 }
 
@@ -7626,13 +7665,12 @@ function updateMicButtonState() {
     return;
   }
   micBtn.classList.remove('is-recording');
+  micBtn.disabled = false;
   if (sttReady) {
-    micBtn.disabled = false;
     micBtn.classList.remove('is-disabled');
     micBtn.title = '语音输入（点击开始，再点结束）';
     micBtn.setAttribute('aria-disabled', 'false');
   } else {
-    micBtn.disabled = true;
     micBtn.classList.add('is-disabled');
     micBtn.title = '请先在设置中安装语音识别';
     micBtn.setAttribute('aria-disabled', 'true');
@@ -8696,7 +8734,11 @@ if (sttRecordingCancelBtn) {
 }
 if (micBtn) {
   micBtn.addEventListener('click', () => {
-    if (!sttReady || busy) return;
+    if (!claimAttachItemActivate()) return;
+    if (!sttReady) {
+      setStatus('请先在设置中安装语音识别', 'pending');
+      return;
+    }
     if (sttRecording && sttRecordingMode === 'composer') stopSttRecording();
     else if (!sttRecording) startSttRecording('composer');
   });

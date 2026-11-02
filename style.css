@@ -749,15 +749,15 @@ body.meeting-mode .composer {
   flex-shrink: 0;
 }
 .attach-popup {
-  position: absolute;
+  position: fixed;
   left: 0;
-  bottom: calc(100% + 8px);
+  bottom: 0;
   min-width: 148px;
   background: #fff;
   border: 1px solid #e7e7e7;
   border-radius: 12px;
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.14);
-  z-index: 140;
+  z-index: 10005;
   padding: 6px;
 }
 .attach-popup[hidden] { display: none !important; }

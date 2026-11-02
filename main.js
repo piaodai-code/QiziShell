@@ -3094,16 +3094,13 @@ function handleOwnedGatewayChatEvent(payload, matched) {
       }
     }
     const visible = String(run.fullText || '').trim();
-    if (run.sawToolActivity) {
-      run.sawChatFinal = true;
-      if (visible) {
-        sendChatSegmentToRenderer(run, clientRunId, run.fullText);
-        recordCommittedSegment(run, run.fullText);
-        run.fullText = '';
-      }
-      return;
+    // chat final 就是这一轮的结束（网页版据此收起「正在回复」）。
+    // 用过工具时不能再空等 lifecycle / hasActiveRun：结束后网关仍可能短暂标成活跃，界面就会一直停在等待。
+    if (run.sawToolActivity && visible) {
+      sendChatSegmentToRenderer(run, clientRunId, run.fullText);
+      recordCommittedSegment(run, run.fullText);
     }
-    if (!visible) return;
+    run.sawChatFinal = true;
     finishClientRun(clientRunId, { ok: true, text: run.fullText });
     return;
   }
@@ -5115,7 +5112,7 @@ async function pollBackgroundOwnedRuns() {
   const current = getSessionKey();
   for (const [clientRunId, run] of activeRuns.entries()) {
     const onScreen = !run.sessionKey || run.sessionKey === current;
-    if (onScreen && !run.sawToolActivity) continue;
+    if (onScreen && !run.sawToolActivity && !run.sawChatFinal) continue;
     if (run.backgroundPollInflight) continue;
     const quietMs = onScreen ? 2000 : 3000;
     if (Date.now() - (run.lastEventAt || 0) < quietMs) continue;
@@ -5141,7 +5138,9 @@ async function pollBackgroundOwnedRuns() {
         sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
       }
       const info = result?.sessionInfo;
-      if (info && info.hasActiveRun === false && Date.now() - (run.startedAt || 0) > 4000) {
+      const gatewayIdle = info && info.hasActiveRun === false;
+      const replyAlreadyFinal = run.sawChatFinal === true;
+      if ((gatewayIdle || replyAlreadyFinal) && Date.now() - (run.startedAt || 0) > 4000) {
         run.quietPolls = (run.quietPolls || 0) + 1;
         const needQuietPolls = (onScreen && (run.sawChatFinal || run.sawToolResult)) ? 1 : 2;
         if (run.quietPolls >= needQuietPolls) {
