@@ -237,6 +237,7 @@
       row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m, i, agent).html;
       container.appendChild(row);
     }
+    window.QiziCodeBlocks?.decorate(container);
     container.scrollTop = container.scrollHeight;
   }
 

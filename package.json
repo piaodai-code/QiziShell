@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.1",
+  "version": "0.2.1-1",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -59,6 +59,7 @@
       "message-time.js",
       "tool-stream.js",
       "chat-timeline.js",
+      "code-block.js",
       "marked.min.js",
       "dompurify.min.js",
       "assets/icons/**",

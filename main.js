@@ -2408,11 +2408,15 @@ function isPayloadForCurrentSession(payload) {
   return !key || key === getSessionKey();
 }
 
-function markOwnedRunToolActivity(gatewayRunId) {
+function markOwnedRunToolActivity(gatewayRunId, phase) {
   const id = gatewayRunId == null ? '' : String(gatewayRunId).trim();
   if (!id) return;
   const matched = findClientRunByGatewayRunId(id);
-  if (matched?.run) matched.run.sawToolActivity = true;
+  if (!matched?.run) return;
+  matched.run.sawToolActivity = true;
+  matched.run.lastEventAt = Date.now();
+  matched.run.quietPolls = 0;
+  if (phase === 'result') matched.run.sawToolResult = true;
 }
 
 function isToolAgentEventPayload(payload) {
@@ -2425,7 +2429,10 @@ function handleGatewayToolEvent(payload) {
   if (sessionKey && sessionKey !== getSessionKey()) return;
   if (activeMeetingSessionKey && sessionKey === activeMeetingSessionKey) return;
   if (isMeetingA2ASessionKey(sessionKey)) return;
-  if (payload.runId) markOwnedRunToolActivity(String(payload.runId));
+  if (payload.runId) {
+    const phase = typeof payload.data?.phase === 'string' ? payload.data.phase : '';
+    markOwnedRunToolActivity(String(payload.runId), phase);
+  }
   broadcastToRenderers('openclaw:tool-event', payload);
 }
 
@@ -3062,6 +3069,7 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   }
   run.lastEventAt = Date.now();
   run.stableHistoryPolls = 0;
+  run.quietPolls = 0;
   clearRunRecoverTimer(run);
 
   if (payload.state === 'delta') {
@@ -3087,6 +3095,7 @@ function handleOwnedGatewayChatEvent(payload, matched) {
     }
     const visible = String(run.fullText || '').trim();
     if (run.sawToolActivity) {
+      run.sawChatFinal = true;
       if (visible) {
         sendChatSegmentToRenderer(run, clientRunId, run.fullText);
         recordCommittedSegment(run, run.fullText);
@@ -5105,21 +5114,28 @@ async function pollBackgroundOwnedRuns() {
   if (!client?.connected) return;
   const current = getSessionKey();
   for (const [clientRunId, run] of activeRuns.entries()) {
-    if (!run.sessionKey || run.sessionKey === current) continue;
+    const onScreen = !run.sessionKey || run.sessionKey === current;
+    if (onScreen && !run.sawToolActivity) continue;
     if (run.backgroundPollInflight) continue;
-    if (Date.now() - (run.lastEventAt || 0) < 3000) continue;
+    const quietMs = onScreen ? 2000 : 3000;
+    if (Date.now() - (run.lastEventAt || 0) < quietMs) continue;
+    const observedAt = run.lastEventAt || 0;
     run.backgroundPollInflight = true;
     try {
       const result = await client.request('chat.history', {
-        sessionKey: run.sessionKey,
+        sessionKey: run.sessionKey || current,
         limit: 40,
         maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
       });
       if (!activeRuns.has(clientRunId)) continue;
+      if (onScreen && (run.lastEventAt || 0) !== observedAt) {
+        run.quietPolls = 0;
+        continue;
+      }
       const msgs = convertHistoryMessages(result?.messages || []);
       const latest = [...msgs].reverse().find((item) => item.who === 'them' && String(item.text || '').trim());
       const text = latest?.text || '';
-      if (text && text !== run.fullText && text.length >= String(run.fullText || '').length) {
+      if (!onScreen && text && text !== run.fullText && text.length >= String(run.fullText || '').length) {
         run.fullText = text;
         run.lastEventAt = Date.now();
         sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
@@ -5127,7 +5143,8 @@ async function pollBackgroundOwnedRuns() {
       const info = result?.sessionInfo;
       if (info && info.hasActiveRun === false && Date.now() - (run.startedAt || 0) > 4000) {
         run.quietPolls = (run.quietPolls || 0) + 1;
-        if (run.quietPolls >= 2) {
+        const needQuietPolls = (onScreen && (run.sawChatFinal || run.sawToolResult)) ? 1 : 2;
+        if (run.quietPolls >= needQuietPolls) {
           finishClientRun(clientRunId, { ok: true, text: run.fullText || text });
         }
       } else {

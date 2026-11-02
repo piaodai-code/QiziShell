@@ -70,8 +70,14 @@ const settingsLaunchAtLogin = document.getElementById('settings-launch-at-login'
 const settingsShowMainOnLaunch = document.getElementById('settings-show-main-on-launch');
 const settingsMessageSound = document.getElementById('settings-message-sound');
 const settingsMessageSoundSelect = document.getElementById('settings-message-sound-id');
+const settingsSoundPreviewBtn = document.getElementById('settings-sound-preview');
 if (settingsMessageSound) {
   settingsMessageSound.addEventListener('change', syncMessageSoundSelectEnabled);
+}
+if (settingsSoundPreviewBtn) {
+  settingsSoundPreviewBtn.addEventListener('click', () => {
+    playMessageSoundPreview();
+  });
 }
 const MESSAGE_SOUNDS = [
   { id: '日历铃声.mp3', file: 'assets/sounds/日历铃声.mp3' },
@@ -997,6 +1003,7 @@ function render(options = {}) {
       console.error('render error:', e);
     }
   }
+  window.QiziCodeBlocks?.decorate(messagesEl);
   settleMessageListScroll(messagesEl, {
     prevScrollTop,
     preserveScroll: options.preserveScroll === true,
@@ -3487,6 +3494,53 @@ function syncMessageSoundSelectEnabled() {
   settingsMessageSoundSelect.disabled = settingsMessageSound?.checked !== true;
 }
 
+let messageSoundPreviewToken = 0;
+let messageSoundPreviewAudio = null;
+
+function stopMessageSoundPreview() {
+  messageSoundPreviewToken += 1;
+  if (messageSoundPreviewAudio) {
+    messageSoundPreviewAudio.pause();
+    messageSoundPreviewAudio.src = '';
+    messageSoundPreviewAudio = null;
+  }
+  settingsSoundPreviewBtn?.classList.remove('is-playing');
+}
+
+function playMessageSoundPreview() {
+  messageSoundPreviewToken += 1;
+  const token = messageSoundPreviewToken;
+  if (messageSoundPreviewAudio) {
+    messageSoundPreviewAudio.pause();
+    messageSoundPreviewAudio.src = '';
+    messageSoundPreviewAudio = null;
+  }
+  const id = settingsMessageSoundSelect?.value || messageSoundId;
+  const sound = MESSAGE_SOUNDS.find((entry) => entry.id === id) || MESSAGE_SOUNDS[0];
+  let played = 0;
+  settingsSoundPreviewBtn?.classList.add('is-playing');
+  const playOnce = () => {
+    if (token !== messageSoundPreviewToken) return;
+    if (played >= 3) {
+      settingsSoundPreviewBtn?.classList.remove('is-playing');
+      return;
+    }
+    played += 1;
+    const audio = new Audio(sound.file);
+    messageSoundPreviewAudio = audio;
+    audio.loop = false;
+    audio.addEventListener('ended', () => {
+      if (token !== messageSoundPreviewToken) return;
+      window.setTimeout(playOnce, 500);
+    });
+    audio.play().catch(() => {
+      if (token !== messageSoundPreviewToken) return;
+      settingsSoundPreviewBtn?.classList.remove('is-playing');
+    });
+  };
+  playOnce();
+}
+
 function maybePlayNewMessageSound(payload) {
   if (!messageSoundEnabled) return;
   const runId = String(payload?.gatewayRunId || '').trim();
@@ -3885,6 +3939,7 @@ function updateStreamingBubble(runId) {
   const bubble = row.querySelector('.msg-bubble');
   if (bubble) {
     bubble.innerHTML = renderMessageBubbleContent(m, msgIndex).html;
+    window.QiziCodeBlocks?.decorate(bubble);
   }
   const meta = row.querySelector('.msg-meta');
   if (meta) {
@@ -6592,7 +6647,7 @@ if (messagesEl) {
     }
     if (multiSelectMode) {
       const row = e.target.closest('.msg');
-      if (row && !e.target.closest('.msg-quote-toggle, a, .msg-bubble img')) {
+      if (row && !e.target.closest('.msg-quote-toggle, a, .msg-code-btn, .msg-bubble img')) {
         const rows = [...messagesEl.querySelectorAll('.msg')];
         const idx = rows.indexOf(row);
         if (idx >= 0) {
@@ -8173,6 +8228,7 @@ function clearSttSettingsSession() {
 
 function closeSettingsModal() {
   if (!settingsModal) return;
+  stopMessageSoundPreview();
   if (sttRecording && sttRecordingMode === 'test') stopSttRecording();
   clearSttSettingsSession();
   settingsModal.hidden = true;

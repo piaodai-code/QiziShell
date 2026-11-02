@@ -330,7 +330,9 @@
         appendFinalBubble({ runId, text: '', error: err });
       }
       for (const m of msgs()) {
-        if (isToolMsg(m) && m.streaming) m.streaming = false;
+        if (!isToolMsg(m) || !m.streaming) continue;
+        m.streaming = false;
+        if (m.phase !== 'result') m.phase = 'result';
       }
       if (key) finishedRuns.add(key);
       onRender();

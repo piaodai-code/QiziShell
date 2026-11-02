@@ -2219,8 +2219,69 @@ body.meeting-mode .composer {
 .msg-bubble pre {
   background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 8px;
   overflow-x: auto; margin: 8px 0; font-size: 12px; line-height: 1.5;
+  white-space: pre;
 }
-.msg-bubble pre code { background: transparent; padding: 0; font-size: inherit; }
+.msg-bubble pre code {
+  background: transparent;
+  padding: 0;
+  font-size: inherit;
+  white-space: pre;
+}
+.msg-code-block {
+  position: relative;
+  max-width: 100%;
+  margin: 8px 0;
+  padding: 30px 0 0;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border-radius: 8px;
+}
+.msg-code-block pre {
+  margin: 0;
+  padding: 0 12px 12px;
+  background: transparent;
+  border-radius: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+.msg-code-block pre code {
+  white-space: inherit;
+}
+.msg-code-block.is-wrapped pre {
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.msg-code-toolbar {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.msg-code-btn {
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.msg-code-btn:hover,
+.msg-code-btn.is-copied { background: rgba(255, 255, 255, 0.14); }
+.msg-code-btn img {
+  width: 16px;
+  height: 16px;
+  display: block;
+  pointer-events: none;
+  filter: invert(1);
+  opacity: 0.92;
+}
 .msg-bubble .msg-table-wrap {
   overflow-x: auto;
   max-width: 100%;
@@ -2608,6 +2669,26 @@ body.drag-over .composer-pending {
   opacity: 0.45;
   cursor: not-allowed;
 }
+.settings-sound-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+.settings-sound-preview {
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  flex: 0 0 26px;
+}
+.settings-sound-preview:hover { background: #f5f5f5; }
+.settings-sound-preview.is-playing { background: #eee; }
 .settings-tips {
   margin-left: 18px;
   font-size: 12px;

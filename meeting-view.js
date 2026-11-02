@@ -340,6 +340,7 @@
       row.querySelector('.msg-bubble').innerHTML = renderBubbleHtml(m.text, m.streaming);
       messagesEl.appendChild(row);
     }
+    window.QiziCodeBlocks?.decorate(messagesEl);
     settleMeetingScroll(options, prevScrollTop);
   }
 
@@ -766,7 +767,7 @@
       }
       if (window.QiziShellMsgOps?.isMultiSelectMode?.()) {
         const row = e.target.closest('.msg');
-        if (row && !e.target.closest('a, .msg-bubble img')) {
+        if (row && !e.target.closest('a, .msg-code-btn, .msg-bubble img')) {
           const rows = [...messagesEl.querySelectorAll('.msg')];
           const idx = rows.indexOf(row);
           if (idx >= 0) {
