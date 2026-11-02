@@ -1,12 +1,12 @@
 /**
  * 聊天气泡里的黑底代码框：复制、折行切换。
- * 默认不折行。三横线进入折行，双向箭头回到不折行。
+ * 默认折行。双向箭头回到不折行，三横线再进入折行。
  */
 (function initCodeBlocks(global) {
   const COPY_ICON = 'assets/icons/code-copy.png';
   const LINES_ICON = 'assets/icons/code-lines.png';
   const ARROWS_ICON = 'assets/icons/code-arrows.png';
-  const wrappedKeys = new Set();
+  const unwrappedKeys = new Set();
 
   function blockKey(text) {
     const value = String(text || '');
@@ -59,13 +59,14 @@
       if (pre.classList.contains('msg-stream-plain')) return;
       if (pre.closest('.msg-code-block')) return;
       const text = codeText(pre);
+      const wrapped = !unwrappedKeys.has(blockKey(text));
       const block = document.createElement('div');
-      block.className = 'msg-code-block';
+      block.className = wrapped ? 'msg-code-block is-wrapped' : 'msg-code-block';
       const toolbar = document.createElement('div');
       toolbar.className = 'msg-code-toolbar';
       toolbar.innerHTML = `
         <button type="button" class="msg-code-btn msg-code-wrap">
-          <img src="${LINES_ICON}" alt="" aria-hidden="true">
+          <img src="${wrapped ? ARROWS_ICON : LINES_ICON}" alt="" aria-hidden="true">
         </button>
         <button type="button" class="msg-code-btn msg-code-copy" title="复制" aria-label="复制代码">
           <img src="${COPY_ICON}" alt="" aria-hidden="true">
@@ -74,8 +75,6 @@
       pre.parentNode.insertBefore(block, pre);
       block.appendChild(toolbar);
       block.appendChild(pre);
-      const wrapped = wrappedKeys.has(blockKey(text));
-      block.classList.toggle('is-wrapped', wrapped);
       setWrapButton(toolbar.querySelector('.msg-code-wrap'), wrapped);
     });
   }
@@ -104,8 +103,8 @@
     const wrapped = !block.classList.contains('is-wrapped');
     block.classList.toggle('is-wrapped', wrapped);
     const key = blockKey(codeText(pre));
-    if (wrapped) wrappedKeys.add(key);
-    else wrappedKeys.delete(key);
+    if (wrapped) unwrappedKeys.delete(key);
+    else unwrappedKeys.add(key);
     setWrapButton(button, wrapped);
   }, true);
 
