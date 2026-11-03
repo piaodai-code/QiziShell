@@ -1523,7 +1523,7 @@ function buildForwardSnapshot(msg) {
   if (!msg) {
     return { who: 'them', authorLabel: '未知', text: '', time: '' };
   }
-  if (msg.isMergedForward) {
+  if (msg.preparedForward === true || msg.isMergedForward) {
     return {
       who: msg.who || 'them',
       authorLabel: msg.authorLabel || '已选消息',
@@ -2131,10 +2131,9 @@ async function submitForward() {
   }
 }
 
-async function openMeetingSetupForMessage(msg) {
-  if (!msg) return;
-  const draft = getMessageSelectableText(msg);
-  if (!draft) {
+async function openMeetingSetupForDraft(draft) {
+  const text = String(draft || '').trim();
+  if (!text) {
     setStatus('该消息没有可用内容', 'error');
     return;
   }
@@ -2153,80 +2152,72 @@ async function openMeetingSetupForMessage(msg) {
     }
   }
   if (window.MeetingUI?.openSetup) {
-    window.MeetingUI.openSetup(agents, { draft });
+    window.MeetingUI.openSetup(agents, { draft: text });
   }
+}
+
+async function openMeetingSetupForMessage(msg) {
+  if (!msg) return;
+  await openMeetingSetupForDraft(getMessageSelectableText(msg));
 }
 
 async function openMeetingFromMessage(index) {
   await openMeetingSetupForMessage(getActiveMessages()[index]);
 }
 
-function findLiveMessageIndex(snapshot) {
-  if (!snapshot) return -1;
-  let loose = -1;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const msg = messages[i];
-    if (!msg || msg.streaming || msg.who !== snapshot.who) continue;
-    const sameText = String(msg.text || '').trim() === String(snapshot.text || '').trim();
-    const sameMs = snapshot.sentAtMs != null && msg.sentAtMs != null && msg.sentAtMs === snapshot.sentAtMs;
-    if (sameMs && sameText) return i;
-    if (sameText && snapshot.runId != null && msg.runId === snapshot.runId) return i;
-    if (historyMessagesMatch(msg, snapshot) && loose < 0) loose = i;
-  }
-  return loose;
-}
-
-function scrollLiveMessageIntoView(index) {
-  const row = messagesEl?.querySelectorAll('.msg')[index];
-  row?.scrollIntoView({ block: 'center' });
-}
-
-async function applyHistoryMessageAction(action, snapshot) {
-  contextMenuSource = 'chat';
-  const index = findLiveMessageIndex(snapshot);
-  const msg = index >= 0 ? messages[index] : snapshot;
-  if (!msg) return;
-  if (action === 'copy') {
-    if (index >= 0) {
-      await copyMessageAtIndex(index);
-      return;
-    }
-    const text = buildMessageCopyText(msg);
-    if (!text) {
-      setStatus('该消息没有可复制的内容', 'error');
-      return;
-    }
-    const ok = await copyTextToClipboard(text);
-    setStatus(ok ? '已复制' : '复制失败', ok ? 'ok' : 'error');
+function applyHistoryQuote(raw) {
+  const text = String(raw?.text || '').trim();
+  if (!text) {
+    setStatus('该消息没有可引用的文字', 'error');
     return;
   }
+  const quote = {
+    who: raw.who === 'me' ? 'me' : 'them',
+    authorLabel: String(raw.authorLabel || '未知'),
+    text,
+    time: typeof raw.time === 'string' ? raw.time : '',
+    sentAtMs: Number.isFinite(raw.sentAtMs) ? raw.sentAtMs : undefined,
+    sentTime: typeof raw.sentTime === 'string' ? raw.sentTime : undefined,
+  };
+  if (multiSelectMode && !shouldUseMeetingMultiSelectBar()) exitMultiSelectMode();
+  const inMeeting = window.MeetingView?.isVisible?.();
+  const liveMeeting = inMeeting && window.MeetingView?.isLiveViewing?.();
+  if (liveMeeting) {
+    meetingOwnerQuote = quote;
+    renderMeetingComposerQuote();
+    window.MeetingView?.prepareComposerForQuote?.();
+    return;
+  }
+  pendingQuote = quote;
+  renderComposerQuote();
+  if (inMeeting) {
+    showMeetingQuoteSavedModal();
+    return;
+  }
+  inputEl?.focus();
+}
+
+async function applyHistoryMessageAction(payload) {
+  const action = payload?.action;
   if (action === 'quote') {
-    setPendingQuoteFromMessage(msg);
+    applyHistoryQuote(payload.quote);
     return;
   }
   if (action === 'forward') {
-    await openForwardModal(msg);
-    return;
-  }
-  if (action === 'multiselect') {
-    if (index < 0 || !isMessageSelectable(messages[index])) {
-      setStatus('这条消息不在当前会话里，无法多选', 'error');
+    const snapshot = payload?.forward;
+    const text = String(snapshot?.text || '').trim();
+    if (!snapshot || snapshot.preparedForward !== true || !text) {
+      setStatus('该消息没有可转发的文字', 'error');
       return;
     }
-    enterMultiSelectMode(index);
-    scrollLiveMessageIntoView(index);
-    return;
-  }
-  if (action === 'export') {
-    if (!isMessageSelectable(msg)) {
-      setStatus('该消息没有可保存的文字', 'error');
-      return;
-    }
-    await exportMessagesToWord([buildExportEntryForMessage(msg)]);
+    await openForwardModalWithSnapshot(
+      snapshot,
+      payload.previewLabel || `${snapshot.authorLabel || '未知'} · 转发内容`,
+    );
     return;
   }
   if (action === 'start-meeting') {
-    await openMeetingSetupForMessage(msg);
+    await openMeetingSetupForDraft(payload.draft);
   }
 }
 
@@ -6608,7 +6599,7 @@ if (window.qizi.onChatSegment) {
 
 if (window.qizi.onHistoryMessageAction) {
   window.qizi.onHistoryMessageAction((payload) => {
-    void applyHistoryMessageAction(payload?.action, payload?.message);
+    void applyHistoryMessageAction(payload);
   });
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.1-1b",
+  "version": "0.2.1-1c",
   "main": "main.js",
   "scripts": {
     "start": "electron .",

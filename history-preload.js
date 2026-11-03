@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('qiziHistory', {
   getContext: () => ipcRenderer.invoke('openclaw:history:context'),
   loadLocalMessages: (payload) => ipcRenderer.invoke('openclaw:history:read-local', payload),
   runMessageAction: (payload) => ipcRenderer.invoke('openclaw:history:message-action', payload),
+  exportWord: (entries) => ipcRenderer.invoke('openclaw:export:word', { entries }),
   onRefresh: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('openclaw:history:refresh', handler);

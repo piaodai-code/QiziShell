@@ -5510,7 +5510,7 @@ ipcMain.handle('openclaw:pickImages', async (event) => {
 });
 
 ipcMain.handle('openclaw:export:word', async (event, payload) => {
-  const win = getAuthorizedMainWindow(event);
+  const win = getAuthorizedMainWindow(event) || getAuthorizedHistoryWindow(event);
   if (!win) return forbiddenSenderResult();
   const entries = Array.isArray(payload?.entries) ? payload.entries : [];
   if (!entries.length) return { ok: false, error: '没有可导出的消息' };
@@ -5637,43 +5637,76 @@ ipcMain.handle('openclaw:history:read-local', async (event, payload) => {
   return { ok: true, messages };
 });
 
-const HISTORY_MESSAGE_ACTIONS = new Set([
-  'copy', 'quote', 'forward', 'multiselect', 'export', 'start-meeting',
-]);
+const HISTORY_HANDOFF_ACTIONS = new Set(['quote', 'forward', 'start-meeting']);
+const HISTORY_HANDOFF_MAX_CHARS = 2 * 1024 * 1024;
 
-function historyActionMessage(raw) {
+function historyHandoffText(value) {
+  if (typeof value !== 'string') return '';
+  if (value.length > HISTORY_HANDOFF_MAX_CHARS) return null;
+  return value;
+}
+
+function historyHandoffLabel(value, fallback) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return (text || fallback).slice(0, 200);
+}
+
+function sanitizeHistoryForward(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const images = Array.isArray(raw.images) ? raw.images.map(() => ({})) : undefined;
-  const files = Array.isArray(raw.files)
-    ? raw.files.map((file) => ({
-      name: typeof file?.name === 'string' ? file.name : '',
-      mimeType: typeof file?.mimeType === 'string' ? file.mimeType : '',
-      size: Number.isFinite(file?.size) ? file.size : undefined,
-    }))
-    : undefined;
+  const text = historyHandoffText(raw.text);
+  if (text == null || !text.trim()) return null;
   return {
+    preparedForward: true,
+    isMergedForward: raw.isMergedForward === true,
     who: raw.who === 'me' ? 'me' : 'them',
-    text: typeof raw.text === 'string' ? raw.text : '',
-    quote: raw.quote && typeof raw.quote === 'object' ? raw.quote : undefined,
-    forward: raw.forward && typeof raw.forward === 'object' ? raw.forward : undefined,
-    sentTime: typeof raw.sentTime === 'string' ? raw.sentTime : undefined,
+    authorLabel: historyHandoffLabel(raw.authorLabel, '未知'),
+    text,
+    time: typeof raw.time === 'string' ? raw.time.slice(0, 80) : '',
     sentAtMs: Number.isFinite(raw.sentAtMs) ? raw.sentAtMs : undefined,
-    time: typeof raw.time === 'string' ? raw.time : undefined,
-    runId: raw.runId,
-    images: images?.length ? images : undefined,
-    files: files?.length ? files : undefined,
+    sentTime: typeof raw.sentTime === 'string' ? raw.sentTime.slice(0, 80) : undefined,
   };
+}
+
+function sanitizeHistoryHandoff(payload) {
+  const action = String(payload?.action || '');
+  if (!HISTORY_HANDOFF_ACTIONS.has(action)) return null;
+  if (action === 'quote') {
+    const raw = payload?.quote;
+    const text = historyHandoffText(raw?.text);
+    if (!raw || text == null || !text.trim()) return null;
+    return {
+      action,
+      quote: {
+        who: raw.who === 'me' ? 'me' : 'them',
+        authorLabel: historyHandoffLabel(raw.authorLabel, '未知'),
+        text,
+        time: typeof raw.time === 'string' ? raw.time.slice(0, 80) : '',
+        sentAtMs: Number.isFinite(raw.sentAtMs) ? raw.sentAtMs : undefined,
+        sentTime: typeof raw.sentTime === 'string' ? raw.sentTime.slice(0, 80) : undefined,
+      },
+    };
+  }
+  if (action === 'forward') {
+    const forward = sanitizeHistoryForward(payload?.forward);
+    if (!forward) return null;
+    return {
+      action,
+      previewLabel: historyHandoffLabel(payload?.previewLabel, ''),
+      forward,
+    };
+  }
+  const draft = historyHandoffText(payload?.draft);
+  if (draft == null || !draft.trim()) return null;
+  return { action, draft };
 }
 
 ipcMain.handle('openclaw:history:message-action', (event, payload) => {
   if (!getAuthorizedHistoryWindow(event)) return forbiddenSenderResult();
-  const action = String(payload?.action || '');
-  if (!HISTORY_MESSAGE_ACTIONS.has(action)) return { ok: false, error: '未知操作' };
-  const message = historyActionMessage(payload?.message);
-  if (!message) return { ok: false, error: '没有这条消息' };
+  const handoff = sanitizeHistoryHandoff(payload);
+  if (!handoff) return { ok: false, error: '没有可操作的内容' };
   if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: '主窗口不可用' };
   showMainWindow();
-  safeSendTo(mainWindow.webContents, 'openclaw:history:message-action', { action, message });
+  safeSendTo(mainWindow.webContents, 'openclaw:history:message-action', handoff);
   return { ok: true };
 });
 

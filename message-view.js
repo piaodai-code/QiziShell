@@ -212,10 +212,30 @@
     return parts.join(' · ');
   }
 
-  function renderMessageList(container, messages, { agent, showAvatars = true } = {}) {
+  function renderSelectCheckHtml(index, msg, multiSelect) {
+    if (!multiSelect) return '';
+    const selectable = typeof multiSelect.isSelectable === 'function'
+      ? multiSelect.isSelectable(msg)
+      : true;
+    if (!selectable) {
+      return '<button type="button" class="msg-select-check" hidden aria-hidden="true" tabindex="-1"></button>';
+    }
+    const selected = multiSelect.selected?.has(index) === true;
+    return `<button type="button" class="msg-select-check${selected ? ' selected' : ''}" data-msg-index="${index}" aria-label="${selected ? '取消选择' : '选择消息'}" aria-pressed="${selected ? 'true' : 'false'}">✓</button>`;
+  }
+
+  function renderMessageList(container, messages, {
+    agent,
+    showAvatars = true,
+    preserveScroll = false,
+    multiSelect = null,
+  } = {}) {
     if (!container) return;
     const list = Array.isArray(messages) ? messages : [];
+    const prevScroll = container.scrollTop;
+    container.classList.toggle('is-multiselect', Boolean(multiSelect));
     if (!list.length) {
+      container.classList.toggle('messages--no-avatar', showAvatars !== true);
       container.innerHTML = '<div class="msg-hint">近两个月暂无历史消息</div>';
       return;
     }
@@ -233,12 +253,13 @@
           <div class="msg-bubble"></div>
           <div class="msg-meta">${escapeHtml(formatMessageMeta(m))}</div>
         </div>
+        ${renderSelectCheckHtml(i, m, multiSelect)}
       `;
       row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m, i, agent).html;
       container.appendChild(row);
     }
     window.QiziCodeBlocks?.decorate(container);
-    container.scrollTop = container.scrollHeight;
+    container.scrollTop = preserveScroll ? prevScroll : container.scrollHeight;
   }
 
   function bindQuoteToggles(container) {
