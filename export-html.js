@@ -63,7 +63,10 @@ function parseMarkdownSafe(text) {
   const source = String(text || '');
   if (!source.trim()) return '';
   try {
-    const parsed = marked.parse(source, { async: false, gfm: true, breaks: true });
+    const parsed = marked.parse(
+      source.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+      { async: false, gfm: true, breaks: true },
+    );
     if (typeof parsed === 'string' && parsed.trim()) {
       return sanitizeRichHtml(wrapMarkdownTables(parsed));
     }

@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.1-1c",
+  "version": "0.2.2",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -35,6 +35,11 @@
       "device-auth-payload.js",
       "index.html",
       "history.html",
+      "copy-edit.html",
+      "copy-edit.css",
+      "copy-edit.js",
+      "copy-edit-model.js",
+      "copy-edit-preload.js",
       "about.html",
       "about.js",
       "about.css",

@@ -74,11 +74,23 @@
     return escapeHtml(String(html || ''));
   }
 
+  const EMOJI_SPAN_SPLIT_RE = /(<span class="msg-inline-emoji">[\s\S]*?<\/span>)/g;
+
+  function escapeMarkupOutsideEmojiSpans(text) {
+    return String(text || '').split(EMOJI_SPAN_SPLIT_RE).map((part) => {
+      if (part.startsWith('<span class="msg-inline-emoji">')) return part;
+      return part
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+    }).join('');
+  }
+
   function parseMarkdown(text, options = {}) {
     const parse = getMarkedParser();
     if (parse) {
       try {
-        const result = parse(String(text || ''), {
+        const result = parse(escapeMarkupOutsideEmojiSpans(text), {
           async: false,
           gfm: true,
           breaks: options.breaks === true,

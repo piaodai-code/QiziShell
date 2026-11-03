@@ -222,6 +222,10 @@
       <img src="assets/icons/scroll-bottom.png" alt="" aria-hidden="true">
     </button>
   </div>
+  <div class="draft-capsule" id="draft-capsule" hidden>
+    <button type="button" class="draft-capsule-btn" id="draft-capsule-btn" aria-haspopup="menu" aria-expanded="false"></button>
+    <div class="draft-capsule-menu" id="draft-capsule-menu" hidden role="menu"></div>
+  </div>
   <!-- 图片放大 modal（点击消息气泡里的图打开） -->
   <div class="msg-context-menu" id="msg-context-menu" hidden role="menu">
     <button type="button" class="msg-context-item" data-action="copy" role="menuitem">
@@ -243,6 +247,12 @@
     <button type="button" class="msg-context-item" data-action="export" role="menuitem">
       <img src="assets/icons/word.png" alt="" class="msg-context-icon" aria-hidden="true">
       <span>保存</span>
+    </button>
+    <button type="button" class="msg-context-item msg-context-item-divided" data-action="copy-edit" role="menuitem">
+      <svg class="msg-context-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+        <path fill="currentColor" d="M2.2 11.7 11.3 2.6a1.2 1.2 0 0 1 1.7 0l.4.4a1.2 1.2 0 0 1 0 1.7l-9.1 9.1-2.7.6.6-2.7Z"/>
+      </svg>
+      <span>文案编辑</span>
     </button>
     <button type="button" class="msg-context-item msg-context-item-meeting" data-action="start-meeting" data-chat-only="1" role="menuitem">
       <img src="assets/icons/meeting-menu.png" alt="" class="msg-context-icon msg-context-icon-meeting" aria-hidden="true">

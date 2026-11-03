@@ -8,6 +8,15 @@ contextBridge.exposeInMainWorld('qizi', {
     return () => ipcRenderer.removeListener('openclaw:side-result', handler);
   },
   openHistory: (context) => ipcRenderer.invoke('openclaw:history:open', context),
+  openCopyEdit: (payload) => ipcRenderer.invoke('copy-edit:open', payload),
+  listCopyEditDrafts: () => ipcRenderer.invoke('copy-edit:drafts:list'),
+  deleteCopyEditDraft: (id) => ipcRenderer.invoke('copy-edit:drafts:delete', id),
+  openCopyEditDraft: (id) => ipcRenderer.invoke('copy-edit:drafts:open', id),
+  onCopyEditDraftsChanged: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('copy-edit:drafts-changed', handler);
+    return () => ipcRenderer.removeListener('copy-edit:drafts-changed', handler);
+  },
   onHistoryMessageAction: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('openclaw:history:message-action', handler);

@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none';">
+  <title>文案编辑</title>
+  <link rel="stylesheet" href="copy-edit.css">
+</head>
+<body>
+  <header class="ce-toolbar">
+    <div class="ce-toolbar-group">
+      <button type="button" class="ce-btn" id="ce-stash" title="先存起来，稍后从聊天窗口右上角继续">暂存修改</button>
+      <button type="button" class="ce-btn" id="ce-discard" title="清掉所有修改和批注，并关闭编辑器">放弃修改</button>
+    </div>
+    <div class="ce-views" role="tablist" aria-label="视图">
+      <button type="button" class="ce-view is-active" data-view="markup" role="tab" aria-selected="true">修订</button>
+      <button type="button" class="ce-view" data-view="final" role="tab" aria-selected="false">终稿</button>
+      <button type="button" class="ce-view" data-view="original" role="tab" aria-selected="false">原稿</button>
+    </div>
+    <button type="button" class="ce-btn ce-btn-primary" id="ce-send" title="把未处理的修订和批注发给当前对话">发送给 AI 优化</button>
+  </header>
+  <div class="ce-sub">
+    <span id="ce-meta"></span>
+    <span id="ce-status" role="status"></span>
+  </div>
+  <div class="ce-body">
+    <main class="ce-main">
+      <div id="ce-editor" class="ce-editor" contenteditable="true" spellcheck="false" role="textbox" aria-multiline="true" aria-label="文案"></div>
+    </main>
+    <aside class="ce-side" aria-label="修订与批注">
+      <div class="ce-side-title">修订与批注</div>
+      <div class="ce-side-list" id="ce-side-list"></div>
+    </aside>
+  </div>
+  <div id="ce-float" class="ce-float" hidden>
+    <button type="button" id="ce-float-comment">添加批注</button>
+    <p class="ce-float-hint">按住选区拖到新位置</p>
+  </div>
+  <div id="ce-drop-caret" class="ce-drop-caret" hidden></div>
+  <div id="ce-pop" class="ce-pop" hidden role="dialog" aria-label="处理这条修订">
+    <button type="button" data-decide="accept">接受</button>
+    <button type="button" data-decide="reject">拒绝</button>
+    <button type="button" data-decide="comment">批注</button>
+  </div>
+  <form id="ce-note" class="ce-note" hidden>
+    <textarea id="ce-note-input" rows="4" placeholder="写出希望 AI 怎么改。例如：这里想更有科技感，但我词穷了。"></textarea>
+    <div class="ce-note-actions">
+      <button type="button" class="ce-btn" id="ce-note-cancel">取消</button>
+      <button type="submit" class="ce-btn ce-btn-primary" id="ce-note-save">添加批注</button>
+    </div>
+  </form>
+  <div id="ce-menu" class="ce-menu" hidden role="menu">
+    <button type="button" data-menu="comment" role="menuitem">添加批注</button>
+  </div>
+  <script src="copy-edit-model.js"></script>
+  <script src="copy-edit.js"></script>
+</body>
+</html>

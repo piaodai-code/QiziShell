@@ -5,8 +5,10 @@
   --icon: #333333;
   --border: #E0E0E0;
   --meta-text: #999999;
-  --me-bubble-bg: #CDEBFF;
+  --me-bubble-bg: #C5EBD4;
   --titlebar-bg: #F9F9F9;
+  --accent: #137333;
+  --accent-hover: #0f652c;
   --font: -apple-system, BlinkMacSystemFont, "PingFang SC", "Helvetica Neue", sans-serif;
   --bubble-radius: 15px;
   --bubble-pad: 10px 13px;
@@ -18,6 +20,18 @@
   --msg-content-max-w: calc(100% - var(--msg-avatar-size) - var(--msg-avatar-gap) - (var(--msg-bubble-side-gap) - var(--msg-edge-pad)));
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
+input[type="checkbox"],
+input[type="radio"] { accent-color: var(--accent); }
+.meeting-input:focus,
+.meeting-textarea:focus,
+.meeting-exec-select:focus,
+.settings-input:focus,
+.forward-compose textarea:focus,
+.forward-compose input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
 html, body {
   height: 100%; font-family: var(--font); font-size: 14px;
   color: var(--text); background: var(--bg); overflow: hidden;
@@ -78,7 +92,7 @@ body.meeting-mode .titlebar-identity {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
 }
 .titlebar-agent-btn.open {
-  box-shadow: 0 0 0 2px #1565c0, 0 4px 16px rgba(0, 0, 0, 0.18);
+  box-shadow: 0 0 0 2px var(--accent), 0 4px 16px rgba(0, 0, 0, 0.18);
 }
 .titlebar-agent-avatar {
   width: 100%;
@@ -263,7 +277,7 @@ body.meeting-mode .titlebar-identity {
   width: 18px;
   font-size: 13px;
   font-weight: 700;
-  color: #1565c0;
+  color: var(--accent);
   text-align: center;
   opacity: 0;
 }
@@ -313,16 +327,16 @@ body.meeting-mode .titlebar-identity {
 }
 .agent-item:hover { background: #f2f2f2; }
 .agent-item.active {
-  background: #e8f4ff;
+  background: var(--me-bubble-bg);
 }
-.agent-item.active .agent-item-name { color: #1565c0; font-weight: 600; }
+.agent-item.active .agent-item-name { color: var(--accent); font-weight: 600; }
 .agent-item-meeting {
   margin: 0;
   padding: 8px 10px;
 }
 .agent-item-meeting .agent-item-name { color: var(--text); font-weight: 600; }
-.agent-item-meeting.active { background: #e8f4fd; }
-.agent-item-meeting.active .agent-item-name { color: #1565c0; }
+.agent-item-meeting.active { background: var(--me-bubble-bg); }
+.agent-item-meeting.active .agent-item-name { color: var(--accent); }
 .agent-item-avatar-meeting {
   width: calc(13px * 1.5);
   height: calc(13px * 1.5);
@@ -551,8 +565,8 @@ body.meeting-mode .composer {
 }
 .msg-select-check:hover { border-color: #999; }
 .msg-select-check.selected {
-  border-color: #1976d2;
-  background: #1976d2;
+  border-color: var(--accent);
+  background: var(--accent);
   color: #fff;
 }
 .msg-select-check[hidden] { display: none !important; }
@@ -562,7 +576,7 @@ body.meeting-mode .composer {
   font-size: 13px; color: #fff; font-weight: 500; flex-shrink: 0;
   overflow: hidden;
 }
-.msg-avatar-me { background: #5B9BD5; }
+.msg-avatar-me { background: var(--accent); }
 .msg-avatar-them {
   background: #1296DB;
 }
@@ -716,10 +730,10 @@ body.meeting-mode .composer {
   pointer-events: none;
 }
 .multiselect-btn-primary {
-  background: #1976d2;
+  background: var(--accent);
   color: #fff;
 }
-.multiselect-btn-primary:hover:not(:disabled) { background: #1565c0; }
+.multiselect-btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
 .composer-resize {
   height: 5px; cursor: ns-resize; background: transparent;
   position: relative; flex-shrink: 0;
@@ -948,7 +962,7 @@ body.meeting-mode .composer {
 }
 .session-controls-btn:hover { background: #dcdcdc; }
 .session-controls-btn:disabled { opacity: 0.6; cursor: wait; }
-.session-controls-btn.open { background: #d0e8ff; color: #1565c0; }
+.session-controls-btn.open { background: var(--me-bubble-bg); color: var(--accent); }
 #session-controls-badge {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1018,7 +1032,7 @@ body.meeting-mode .composer {
 .sc-section-value {
   font-size: 11px;
   font-weight: 600;
-  color: #1565c0;
+  color: var(--accent);
 }
 .sc-slider {
   padding: 2px 0;
@@ -1038,7 +1052,7 @@ body.meeting-mode .composer {
   bottom: 0;
   width: var(--sc-fill-width, 0);
   border-radius: 11px 0 0 11px;
-  background: #d0e8ff;
+  background: var(--me-bubble-bg);
   pointer-events: none;
   transition: width 0.15s ease, border-radius 0.15s ease;
 }
@@ -1066,7 +1080,7 @@ body.meeting-mode .composer {
   transition: transform 0.12s ease, background 0.12s ease;
 }
 .sc-slider-dot:hover { transform: scale(1.2); background: #999; }
-.sc-slider-dot.active { background: #1565c0; }
+.sc-slider-dot.active { background: var(--accent); }
 .sc-slider-thumb {
   position: absolute;
   top: 50%;
@@ -1105,7 +1119,7 @@ body.meeting-mode .composer {
 .sc-segment-btn:hover { color: #333; }
 .sc-segment-btn.active {
   background: #fff;
-  color: #1565c0;
+  color: var(--accent);
   font-weight: 600;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
@@ -1127,7 +1141,7 @@ body.meeting-mode .composer {
   cursor: pointer;
 }
 .sc-speed-extra:hover { background: #f0f0f0; color: #555; }
-.sc-speed-extra.active { color: #1565c0; font-weight: 600; }
+.sc-speed-extra.active { color: var(--accent); font-weight: 600; }
 .model-picker-wrap {
   position: relative;
 }
@@ -1148,7 +1162,7 @@ body.meeting-mode .composer {
 }
 .model-picker-btn:hover { background: #dcdcdc; }
 .model-picker-btn:disabled { opacity: 0.6; cursor: wait; }
-.model-picker-btn.open { background: #d0e8ff; color: #1565c0; }
+.model-picker-btn.open { background: var(--me-bubble-bg); color: var(--accent); }
 #model-badge {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1199,9 +1213,9 @@ body.meeting-mode .composer {
 }
 .model-item:hover { background: #f5f5f5; }
 .model-item.active {
-  background: #e8f4ff;
+  background: var(--me-bubble-bg);
 }
-.model-item.active .model-item-name { color: #1565c0; font-weight: 600; }
+.model-item.active .model-item-name { color: var(--accent); font-weight: 600; }
 .model-item:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -1417,14 +1431,96 @@ body.meeting-mode .composer {
   color: #aaa;
   cursor: not-allowed;
 }
-.msg-context-item-meeting {
+.msg-context-item-divided {
   border-top: 1px solid var(--border);
   margin-top: 2px;
   padding-top: 10px;
 }
+svg.msg-context-icon {
+  display: block;
+  color: #333;
+}
+.msg-context-item:disabled svg.msg-context-icon { color: #bbb; }
 .msg-context-icon-meeting {
   border-radius: 4px;
 }
+
+.draft-capsule {
+  position: fixed;
+  top: 50px;
+  right: 16px;
+  z-index: 150;
+}
+.draft-capsule[hidden] { display: none !important; }
+.draft-capsule-btn {
+  border: 1px solid #e4d69c;
+  background: #fffbea;
+  color: #5c4a00;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+.draft-capsule-btn:hover { background: #fff5cc; }
+.draft-capsule.is-dragging .draft-capsule-btn { cursor: grabbing; }
+.draft-capsule-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 320px;
+  max-width: calc(100vw - 16px);
+  max-height: 320px;
+  overflow: auto;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  padding: 4px 0;
+}
+.draft-capsule-menu[hidden] { display: none !important; }
+.draft-capsule.is-flip-up .draft-capsule-menu { top: auto; bottom: calc(100% + 6px); }
+.draft-capsule.is-align-left .draft-capsule-menu { right: auto; left: 0; }
+.draft-capsule-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 0;
+}
+.draft-capsule-item:hover { background: #f5f5f5; }
+.draft-capsule-open {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 4px 8px 12px;
+  font: inherit;
+  font-size: 13px;
+  color: #222;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.draft-capsule-time { color: #999; }
+.draft-capsule-del {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #aaa;
+  font-size: 12px;
+  cursor: pointer;
+}
+.draft-capsule-del:hover { background: #fce8e6; color: #c5221f; }
 
 /* 转发 */
 .forward-modal {
@@ -1507,7 +1603,7 @@ body.meeting-mode .composer {
 }
 .forward-agent-item:hover { background: #f0f0f0; }
 .forward-agent-item.selected {
-  background: #e8f4ff;
+  background: var(--me-bubble-bg);
 }
 .forward-agent-check {
   width: 18px;
@@ -1524,8 +1620,8 @@ body.meeting-mode .composer {
   flex-shrink: 0;
 }
 .forward-agent-item.selected .forward-agent-check {
-  border-color: #1976d2;
-  background: #1976d2;
+  border-color: var(--accent);
+  background: var(--accent);
   color: #fff;
 }
 .forward-agent-body {
@@ -1622,7 +1718,8 @@ body.meeting-mode .composer {
   background: #fff;
 }
 .forward-compose textarea:focus {
-  border-color: #90caf9;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 .forward-actions {
   display: flex;
@@ -1643,10 +1740,10 @@ body.meeting-mode .composer {
 }
 .forward-btn-secondary:hover { background: #e4e4e4; }
 .forward-btn-primary {
-  background: #1976d2;
+  background: var(--accent);
   color: #fff;
 }
-.forward-btn-primary:hover { background: #1565c0; }
+.forward-btn-primary:hover { background: var(--accent-hover); }
 .forward-btn-primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -1881,7 +1978,7 @@ body.meeting-mode .composer {
   padding: 4px 6px; border-radius: 3px; color: var(--icon);
 }
 .icon-btn:hover { background: #e0e0e0; }
-.icon-btn.open { background: #d0e8ff; }
+.icon-btn.open { background: var(--me-bubble-bg); }
 .icon-btn-img {
   display: inline-flex;
   align-items: center;
@@ -2175,9 +2272,9 @@ body.meeting-mode .composer {
 .stt-recording-cancel-btn:hover { background: #757575; }
 .stt-recording-cancel-btn:active { transform: scale(0.98); }
 .stt-recording-stop-btn {
-  background: #1565c0;
+  background: var(--accent);
 }
-.stt-recording-stop-btn:hover { background: #1256a8; }
+.stt-recording-stop-btn:hover { background: var(--accent-hover); }
 .stt-recording-stop-btn:active { transform: scale(0.98); }
 
 /* / 命令提示浮层 */
@@ -2194,8 +2291,8 @@ body.meeting-mode .composer {
 }
 .cmd-item:last-child { border-bottom: none; }
 .cmd-item:hover { background: #f5f5f5; }
-.cmd-item.is-active { background: #eef4fa; }
-.cmd-name { color: #1976d2; font-weight: 500; font-family: 'SF Mono', Menlo, monospace; }
+.cmd-item.is-active { background: var(--me-bubble-bg); }
+.cmd-name { color: var(--accent); font-weight: 500; font-family: 'SF Mono', Menlo, monospace; }
 .cmd-desc { color: var(--meta-text); font-size: 12px; }
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
@@ -2483,8 +2580,8 @@ body.drag-over .composer-pending {
 }
 .settings-tab:hover { color: var(--text); }
 .settings-tab.is-active {
-  color: #1565c0;
-  border-bottom-color: #1565c0;
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 .settings-body {
   flex: 1 1 auto;
@@ -2549,8 +2646,8 @@ body.drag-over .composer-pending {
 }
 .settings-input:focus {
   outline: none;
-  border-color: #1565c0;
-  box-shadow: 0 0 0 2px rgba(21, 101, 192, 0.12);
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 .settings-token-row {
   display: flex;
@@ -2727,10 +2824,10 @@ body.drag-over .composer-pending {
   padding: 8px 14px;
 }
 .settings-primary-btn {
-  background: #1565c0;
+  background: var(--accent);
   color: #fff;
 }
-.settings-primary-btn:hover { background: #1256a8; }
+.settings-primary-btn:hover { background: var(--accent-hover); }
 .settings-primary-btn:disabled,
 .settings-secondary-btn:disabled {
   opacity: 0.55;
@@ -3130,8 +3227,8 @@ body.drag-over .composer-pending {
 }
 .meeting-history-trigger:hover { background: #dcdcdc; }
 .meeting-history-trigger.open {
-  background: #d0e8ff;
-  color: #1565c0;
+  background: var(--me-bubble-bg);
+  color: var(--accent);
 }
 .meeting-history-trigger-text {
   flex: 1;
@@ -3179,8 +3276,8 @@ body.drag-over .composer-pending {
 }
 .meeting-history-item:hover { background: #f5f5f5; }
 .meeting-history-item.active {
-  background: #e8f4ff;
-  color: #1565c0;
+  background: var(--me-bubble-bg);
+  color: var(--accent);
   font-weight: 600;
 }
 .meeting-toolbar-status {
@@ -3229,10 +3326,10 @@ body.drag-over .composer-pending {
 }
 .meeting-toolbar-btn:hover { background: #e4e4e4; }
 .meeting-toolbar-btn-primary {
-  background: #1976d2;
+  background: var(--accent);
   color: #fff;
 }
-.meeting-toolbar-btn-primary:hover { background: #1565c0; }
+.meeting-toolbar-btn-primary:hover { background: var(--accent-hover); }
 .meeting-toolbar-btn-primary:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -3334,14 +3431,14 @@ body.drag-over .composer-pending {
   border: none;
   border-radius: 8px;
   background: #fff;
-  color: #1565c0;
+  color: var(--accent);
   font: inherit;
   font-size: 12px;
   padding: 6px 12px;
   cursor: pointer;
   flex-shrink: 0;
 }
-.meeting-exit-btn:hover { background: #f5fbff; }
+.meeting-exit-btn:hover { background: #e6f4ea; }
 .composer--meeting .composer-tools,
 .composer--meeting .composer-input-wrap,
 .composer--meeting .emoji-picker { display: none !important; }
@@ -3416,8 +3513,8 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
 }
 .meeting-preset-picker-btn:hover,
 .meeting-preset-picker-btn[aria-expanded="true"] {
-  background: #eef4ff;
-  color: #1565c0;
+  background: var(--me-bubble-bg);
+  color: var(--accent);
 }
 .meeting-preset-menu {
   position: absolute;
@@ -3499,8 +3596,8 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
   cursor: pointer;
   padding: 8px 14px;
 }
-.meeting-primary-btn { background: #1976d2; color: #fff; }
-.meeting-primary-btn:hover { background: #1565c0; }
+.meeting-primary-btn { background: var(--accent); color: #fff; }
+.meeting-primary-btn:hover { background: var(--accent-hover); }
 .meeting-primary-btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;
@@ -3552,19 +3649,19 @@ body.meeting-mode .msg-hint { color: var(--meta-text); }
   min-width: 92px;
 }
 .meeting-end-confirm-btn-primary {
-  background: #1565c0;
+  background: var(--accent);
   color: #fff;
 }
 .meeting-end-confirm-btn-primary:hover {
-  background: #1256a8;
+  background: var(--accent-hover);
 }
 .meeting-end-confirm-btn-secondary {
   background: #fff;
-  color: #1565c0;
-  border: 1px solid #c5e1f5;
+  color: var(--accent);
+  border: 1px solid #b7d7c2;
 }
 .meeting-end-confirm-btn-secondary:hover {
-  background: #f5fbff;
+  background: #e6f4ea;
 }
 .meeting-state-row { margin-bottom: 10px; }
 .meeting-state-label {

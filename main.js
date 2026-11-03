@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, ipcMain, shell, Tray, Menu, nativeImage, dialog } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, shell, Tray, Menu, nativeImage, dialog, screen } = require('electron');
 const { spawn } = require('child_process');
 
 const openLinksExternally = !process.argv.includes('--open-links-in-shell');
@@ -392,6 +392,8 @@ let aboutWindow = null;
 let meetingHelpWindow = null;
 let historyWindow = null;
 let historyWindowContext = null;
+let copyEditWindow = null;
+let copyEditPayload = null;
 let updateWindow = null;
 let pendingUpdateInfo = null;
 let auxiliaryModalRefCount = 0;
@@ -437,6 +439,20 @@ let privateChannelStore = null;
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 const SHELL_SESSION_MAIN_KEY = 'main';
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
+const COPY_EDIT_STATE_PATH = path.join(app.getPath('userData'), 'copy-edit-window-state.json');
+const HISTORY_STATE_PATH = path.join(app.getPath('userData'), 'history-window-state.json');
+const HISTORY_MIN_WIDTH = 360;
+const HISTORY_MIN_HEIGHT = 420;
+const HISTORY_DEFAULT_WIDTH = 480;
+const HISTORY_DEFAULT_HEIGHT = 760;
+const COPY_EDIT_MIN_WIDTH = 720;
+const COPY_EDIT_MIN_HEIGHT = 480;
+const COPY_EDIT_DEFAULT_WIDTH = 960;
+const COPY_EDIT_DEFAULT_HEIGHT = 680;
+const COPY_EDIT_MAX_CHARS = 2 * 1024 * 1024;
+const COPY_EDIT_DRAFTS_PATH = path.join(app.getPath('userData'), 'copy-edit-drafts.json');
+const COPY_EDIT_MAX_DRAFTS = 50;
+const COPY_EDIT_MAX_PATCHES = 5000;
 const SETTINGS_PATH = path.join(app.getPath('userData'), 'settings.json');
 const MESSAGE_SOUND_IDS = ['日历铃声.mp3', '明亮音调.mp3', '水滴音.mp3'];
 
@@ -1323,6 +1339,49 @@ function closeHistoryWindow() {
   historyWindowContext = null;
 }
 
+function loadHistoryWindowState() {
+  const fallback = {
+    width: HISTORY_DEFAULT_WIDTH,
+    height: HISTORY_DEFAULT_HEIGHT,
+    x: null,
+    y: null,
+  };
+  try {
+    const saved = JSON.parse(fs.readFileSync(HISTORY_STATE_PATH, 'utf8'));
+    const width = Math.max(HISTORY_MIN_WIDTH, Math.min(2400, Number(saved.width) || fallback.width));
+    const height = Math.max(HISTORY_MIN_HEIGHT, Math.min(1600, Number(saved.height) || fallback.height));
+    const x = Number(saved.x);
+    const y = Number(saved.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { width, height, x: null, y: null };
+    const visible = screen.getAllDisplays().some((display) => {
+      const area = display.workArea;
+      return x < area.x + area.width - 80
+        && x + width > area.x + 80
+        && y < area.y + area.height - 40
+        && y + 48 > area.y;
+    });
+    if (!visible) return { width, height, x: null, y: null };
+    return { width, height, x, y };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveHistoryWindowState() {
+  if (!historyWindow || historyWindow.isDestroyed()) return;
+  try {
+    const bounds = historyWindow.getBounds();
+    fs.writeFileSync(HISTORY_STATE_PATH, JSON.stringify({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }));
+  } catch {
+    // non-fatal
+  }
+}
+
 function openHistoryWindow(context) {
   historyWindowContext = context || {};
   const title = `${historyWindowContext.agentLabel || 'Agent'} · 历史消息`;
@@ -1335,12 +1394,12 @@ function openHistoryWindow(context) {
     return;
   }
 
-  const mainRef = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-  historyWindow = new BrowserWindow({
-    width: 480,
-    height: 760,
-    minWidth: 360,
-    minHeight: 420,
+  const state = loadHistoryWindowState();
+  const options = {
+    width: state.width,
+    height: state.height,
+    minWidth: HISTORY_MIN_WIDTH,
+    minHeight: HISTORY_MIN_HEIGHT,
     title,
     backgroundColor: '#eceff1',
     show: false,
@@ -1349,10 +1408,19 @@ function openHistoryWindow(context) {
       contextIsolation: true,
       nodeIntegration: false,
     },
-  });
+  };
+  if (state.x != null && state.y != null) {
+    options.x = state.x;
+    options.y = state.y;
+  }
+  const mainRef = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  historyWindow = new BrowserWindow(options);
   historyWindow.setMenu(null);
+  historyWindow.on('resize', saveHistoryWindowState);
+  historyWindow.on('move', saveHistoryWindowState);
+  historyWindow.on('close', saveHistoryWindowState);
   historyWindow.once('ready-to-show', () => {
-    if (mainRef && !mainRef.isDestroyed()) {
+    if (state.x == null && mainRef && !mainRef.isDestroyed()) {
       centerAuxiliaryWindowOnParent(historyWindow, mainRef);
     }
     historyWindow.show();
@@ -1363,6 +1431,195 @@ function openHistoryWindow(context) {
     historyWindow = null;
     historyWindowContext = null;
   });
+}
+
+function loadCopyEditWindowState() {
+  const fallback = {
+    width: COPY_EDIT_DEFAULT_WIDTH,
+    height: COPY_EDIT_DEFAULT_HEIGHT,
+    x: null,
+    y: null,
+  };
+  try {
+    const saved = JSON.parse(fs.readFileSync(COPY_EDIT_STATE_PATH, 'utf8'));
+    const width = Math.max(COPY_EDIT_MIN_WIDTH, Math.min(2400, Number(saved.width) || fallback.width));
+    const height = Math.max(COPY_EDIT_MIN_HEIGHT, Math.min(1600, Number(saved.height) || fallback.height));
+    const x = Number(saved.x);
+    const y = Number(saved.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { width, height, x: null, y: null };
+    const visible = screen.getAllDisplays().some((display) => {
+      const area = display.workArea;
+      return x < area.x + area.width - 80
+        && x + width > area.x + 80
+        && y < area.y + area.height - 40
+        && y + 48 > area.y;
+    });
+    if (!visible) return { width, height, x: null, y: null };
+    return { width, height, x, y };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveCopyEditWindowState() {
+  if (!copyEditWindow || copyEditWindow.isDestroyed()) return;
+  try {
+    const bounds = copyEditWindow.getBounds();
+    fs.writeFileSync(COPY_EDIT_STATE_PATH, JSON.stringify({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }));
+  } catch {
+    // non-fatal
+  }
+}
+
+function sanitizeCopyEditPayload(payload, extra) {
+  const source = payload && typeof payload === 'object' ? payload : {};
+  const text = typeof source.text === 'string' ? source.text : '';
+  if (!text.trim() || text.length > COPY_EDIT_MAX_CHARS) return null;
+  const sessionSource = extra && typeof extra.sessionKey === 'string' ? extra.sessionKey : source.sessionKey;
+  const labelSource = extra && typeof extra.agentLabel === 'string' ? extra.agentLabel : source.agentLabel;
+  return {
+    text,
+    sessionKey: typeof sessionSource === 'string' ? sessionSource.slice(0, 300) : '',
+    agentLabel: typeof labelSource === 'string' ? labelSource.trim().slice(0, 80) : '',
+  };
+}
+
+let copyEditDraftsCache = null;
+
+function loadCopyEditDrafts() {
+  if (copyEditDraftsCache) return copyEditDraftsCache;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(COPY_EDIT_DRAFTS_PATH, 'utf8'));
+    copyEditDraftsCache = Array.isArray(parsed) ? parsed.filter((draft) => draft && typeof draft.id === 'string') : [];
+  } catch {
+    copyEditDraftsCache = [];
+  }
+  return copyEditDraftsCache;
+}
+
+function writeCopyEditDrafts(drafts) {
+  copyEditDraftsCache = drafts;
+  try {
+    fs.writeFileSync(COPY_EDIT_DRAFTS_PATH, JSON.stringify(drafts));
+  } catch (err) {
+    console.warn('[qizi] save copy-edit drafts failed:', err.message);
+  }
+  sendToMainRenderer('copy-edit:drafts-changed', copyEditDraftSummaries());
+}
+
+function copyEditDraftSummaries() {
+  return loadCopyEditDrafts().map((draft) => ({
+    id: draft.id,
+    sessionKey: draft.sessionKey,
+    savedAt: draft.savedAt,
+    preview: draft.preview,
+  }));
+}
+
+function sanitizeCopyEditDraft(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const originalText = typeof raw.originalText === 'string' ? raw.originalText : '';
+  const baseText = typeof raw.baseText === 'string' ? raw.baseText : '';
+  if (originalText.length > COPY_EDIT_MAX_CHARS || baseText.length > COPY_EDIT_MAX_CHARS) return null;
+  if (!Array.isArray(raw.patches) || raw.patches.length > COPY_EDIT_MAX_PATCHES) return null;
+  let patches;
+  try {
+    const encoded = JSON.stringify(raw.patches);
+    if (encoded.length > COPY_EDIT_MAX_CHARS * 2) return null;
+    patches = JSON.parse(encoded);
+  } catch {
+    return null;
+  }
+  const id = typeof raw.id === 'string' && /^draft_[a-z0-9]{1,40}$/.test(raw.id)
+    ? raw.id
+    : `draft_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    id,
+    sessionKey: typeof raw.sessionKey === 'string' ? raw.sessionKey.slice(0, 300) : '',
+    agentLabel: typeof raw.agentLabel === 'string' ? raw.agentLabel.trim().slice(0, 80) : '',
+    originalText,
+    baseText,
+    patches,
+    preview: typeof raw.preview === 'string' ? raw.preview.replace(/\s+/g, ' ').trim().slice(0, 120) : '',
+    savedAt: Date.now(),
+  };
+}
+
+function removeCopyEditDraft(id) {
+  if (!id) return false;
+  const drafts = loadCopyEditDrafts();
+  const next = drafts.filter((draft) => draft.id !== id);
+  if (next.length === drafts.length) return false;
+  writeCopyEditDrafts(next);
+  return true;
+}
+
+function closeCopyEditWindowSoon() {
+  setTimeout(() => {
+    if (copyEditWindow && !copyEditWindow.isDestroyed()) copyEditWindow.close();
+  }, 0);
+}
+
+function getAuthorizedCopyEditWindow(event) {
+  if (!copyEditWindow || copyEditWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== copyEditWindow) return null;
+  return copyEditWindow;
+}
+
+function openCopyEditWindow(payload) {
+  copyEditPayload = payload;
+  const title = payload.agentLabel ? `文案编辑 · ${payload.agentLabel}` : '文案编辑';
+  if (copyEditWindow && !copyEditWindow.isDestroyed()) {
+    copyEditWindow.setTitle(title);
+    safeSendTo(copyEditWindow.webContents, 'copy-edit:load', copyEditPayload);
+    copyEditWindow.show();
+    copyEditWindow.focus();
+    return { ok: true };
+  }
+
+  const state = loadCopyEditWindowState();
+  const options = {
+    width: state.width,
+    height: state.height,
+    minWidth: COPY_EDIT_MIN_WIDTH,
+    minHeight: COPY_EDIT_MIN_HEIGHT,
+    title,
+    backgroundColor: '#f2f2f2',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'copy-edit-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  };
+  if (state.x != null && state.y != null) {
+    options.x = state.x;
+    options.y = state.y;
+  }
+  const mainRef = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  copyEditWindow = new BrowserWindow(options);
+  copyEditWindow.setMenu(null);
+  copyEditWindow.on('resize', saveCopyEditWindowState);
+  copyEditWindow.on('move', saveCopyEditWindowState);
+  copyEditWindow.on('close', saveCopyEditWindowState);
+  copyEditWindow.once('ready-to-show', () => {
+    if (state.x == null && mainRef && !mainRef.isDestroyed()) {
+      centerAuxiliaryWindowOnParent(copyEditWindow, mainRef);
+    }
+    copyEditWindow.show();
+    copyEditWindow.focus();
+  });
+  copyEditWindow.loadFile(path.join(__dirname, 'copy-edit.html'));
+  copyEditWindow.on('closed', () => {
+    copyEditWindow = null;
+  });
+  return { ok: true };
 }
 
 function openMeetingHelp() {
@@ -5708,6 +5965,94 @@ ipcMain.handle('openclaw:history:message-action', (event, payload) => {
   showMainWindow();
   safeSendTo(mainWindow.webContents, 'openclaw:history:message-action', handoff);
   return { ok: true };
+});
+
+ipcMain.handle('copy-edit:open', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const clean = sanitizeCopyEditPayload(payload);
+  if (!clean) return { ok: false, error: '没有可编辑的文字' };
+  return openCopyEditWindow(clean);
+});
+
+ipcMain.handle('copy-edit:open-from-history', (event, payload) => {
+  if (!getAuthorizedHistoryWindow(event)) return { ok: false, error: '无权打开文案编辑' };
+  const clean = sanitizeCopyEditPayload(payload, {
+    sessionKey: historyWindowContext?.sessionKey || '',
+    agentLabel: historyWindowContext?.agentLabel || '',
+  });
+  if (!clean) return { ok: false, error: '没有可编辑的文字' };
+  return openCopyEditWindow(clean);
+});
+
+ipcMain.handle('copy-edit:payload', (event) => {
+  if (!getAuthorizedCopyEditWindow(event)) return null;
+  return copyEditPayload;
+});
+
+ipcMain.handle('copy-edit:send', async (event, payload) => {
+  if (!getAuthorizedCopyEditWindow(event)) return { ok: false, error: '无权发送' };
+  const text = typeof payload?.text === 'string' ? payload.text : '';
+  if (!text.trim()) return { ok: false, error: '没有可发送的内容' };
+  if (text.length > COPY_EDIT_MAX_CHARS * 2) return { ok: false, error: '修订内容太长' };
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: '主窗口不可用' };
+  const sessionKey = typeof payload?.sessionKey === 'string' ? payload.sessionKey.slice(0, 300) : '';
+  const draftId = typeof payload?.draftId === 'string' ? payload.draftId : '';
+  showMainWindow();
+  let result;
+  try {
+    result = await mainWindow.webContents.executeJavaScript(
+      `window.qiziDeliverCopyEditPrompt(${JSON.stringify(text)}, ${JSON.stringify(sessionKey)})`,
+    );
+  } catch (err) {
+    return { ok: false, error: err?.message || '发送失败' };
+  }
+  if (!result || typeof result !== 'object') return { ok: false, error: '发送失败' };
+  if (result.ok) {
+    removeCopyEditDraft(draftId);
+    closeCopyEditWindowSoon();
+  }
+  return result;
+});
+
+ipcMain.handle('copy-edit:stash', (event, payload) => {
+  if (!getAuthorizedCopyEditWindow(event)) return { ok: false, error: '无权暂存' };
+  const draft = sanitizeCopyEditDraft(payload);
+  if (!draft) return { ok: false, error: '修改内容太大，暂存不了' };
+  const others = loadCopyEditDrafts().filter((item) => item.id !== draft.id);
+  writeCopyEditDrafts([...others, draft].slice(-COPY_EDIT_MAX_DRAFTS));
+  showMainWindow();
+  closeCopyEditWindowSoon();
+  return { ok: true, id: draft.id };
+});
+
+ipcMain.handle('copy-edit:discard', (event, payload) => {
+  if (!getAuthorizedCopyEditWindow(event)) return { ok: false, error: '无权操作' };
+  removeCopyEditDraft(typeof payload?.draftId === 'string' ? payload.draftId : '');
+  closeCopyEditWindowSoon();
+  return { ok: true };
+});
+
+ipcMain.handle('copy-edit:drafts:list', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return { ok: true, drafts: copyEditDraftSummaries() };
+});
+
+ipcMain.handle('copy-edit:drafts:delete', (event, id) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  removeCopyEditDraft(typeof id === 'string' ? id : '');
+  return { ok: true };
+});
+
+ipcMain.handle('copy-edit:drafts:open', (event, id) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const draft = loadCopyEditDrafts().find((item) => item.id === id);
+  if (!draft) return { ok: false, error: '这份暂存已经不在了' };
+  return openCopyEditWindow({
+    text: draft.originalText,
+    sessionKey: draft.sessionKey,
+    agentLabel: draft.agentLabel,
+    draft,
+  });
 });
 
 ipcMain.handle('openclaw:chat', async (event, { message, images, files, runId, priorAssistantText, sessionKey }) => {

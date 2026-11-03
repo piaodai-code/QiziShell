@@ -434,6 +434,8 @@ function hideHistoryContextMenu() {
 function showHistoryContextMenu(x, y, index) {
   if (!historyContextMenuEl) return;
   historyMenuIndex = index;
+  const editBtn = historyContextMenuEl.querySelector('[data-action="copy-edit"]');
+  if (editBtn) editBtn.disabled = !selectableText(displayedMessages[index]);
   historyContextMenuEl.hidden = false;
   const menuRect = historyContextMenuEl.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
@@ -646,6 +648,24 @@ async function runHistoryMenuAction(action) {
       previewLabel: `${forward.authorLabel || '未知'} · 转发内容`,
       forward,
     }, '转发失败');
+    return;
+  }
+  if (action === 'copy-edit') {
+    const text = selectableText(msg);
+    if (!text) {
+      setHistoryStatus('该消息没有可编辑的文字', 'error');
+      return;
+    }
+    if (!window.qiziHistory?.openCopyEdit) {
+      setHistoryStatus('文案编辑不可用', 'error');
+      return;
+    }
+    try {
+      const result = await window.qiziHistory.openCopyEdit({ text });
+      if (!result?.ok) setHistoryStatus(result?.error || '打不开文案编辑', 'error');
+    } catch (err) {
+      setHistoryStatus(err?.message || '打不开文案编辑', 'error');
+    }
     return;
   }
   if (action === 'start-meeting') {

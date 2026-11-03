@@ -28,6 +28,13 @@ const meetingQuoteSavedModal = document.getElementById('meeting-quote-saved-moda
 const meetingQuoteSavedOkBtn = document.getElementById('meeting-quote-saved-ok');
 const msgContextMenuEl = document.getElementById('msg-context-menu');
 const composerContextMenuEl = document.getElementById('composer-context-menu');
+const draftCapsuleEl = document.getElementById('draft-capsule');
+const draftCapsuleBtn = document.getElementById('draft-capsule-btn');
+const draftCapsuleMenu = document.getElementById('draft-capsule-menu');
+const DRAFT_CAPSULE_POS_KEY = 'qizi-shell-draft-capsule-pos';
+const DRAFT_PREVIEW_WIDTH = 30;
+let copyEditDrafts = [];
+let draftCapsuleSignature = '';
 const modelBadge = document.getElementById('model-badge');
 const modelPickerBtn = document.getElementById('model-picker-btn');
 const modelPopup = document.getElementById('model-popup');
@@ -621,11 +628,23 @@ function sanitizeRichHtml(html) {
   return escapeHtml(String(html || ''));
 }
 
+const EMOJI_SPAN_SPLIT_RE = /(<span class="msg-inline-emoji">[\s\S]*?<\/span>)/g;
+
+function escapeMarkupOutsideEmojiSpans(text) {
+  return String(text || '').split(EMOJI_SPAN_SPLIT_RE).map((part) => {
+    if (part.startsWith('<span class="msg-inline-emoji">')) return part;
+    return part
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }).join('');
+}
+
 function parseMarkdown(text, options = {}) {
   const parse = getMarkedParser();
   if (parse) {
     try {
-      const result = parse(String(text || ''), {
+      const result = parse(escapeMarkupOutsideEmojiSpans(text), {
         async: false,
         gfm: true,
         breaks: options.breaks === true,
@@ -957,6 +976,7 @@ function renderActiveMessageView(options = {}) {
 }
 
 function render(options = {}) {
+  renderDraftCapsule();
   if (window.MeetingView?.isVisible?.()) return;
   if (!messagesEl) return;
   const prevScrollTop = messagesEl.scrollTop;
@@ -2165,6 +2185,264 @@ async function openMeetingFromMessage(index) {
   await openMeetingSetupForMessage(getActiveMessages()[index]);
 }
 
+async function openCopyEditFromMessage(index) {
+  const msg = getActiveMessages()[index];
+  const text = getMessageSelectableText(msg);
+  hideMessageContextMenu();
+  if (!text) {
+    setStatus('该消息没有可编辑的文字', 'error');
+    return;
+  }
+  const result = await window.qizi.openCopyEdit({
+    text,
+    sessionKey: currentSessionKey,
+    agentLabel: formatAgentLabel(getCurrentAgentInfo()),
+  });
+  if (result?.ok === false) setStatus(result.error || '打不开文案编辑', 'error');
+}
+
+function visibleCopyEditDrafts() {
+  return copyEditDrafts
+    .filter((draft) => draft.sessionKey === currentSessionKey)
+    .sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+}
+
+// 中文按 2 个字符宽度算，15 个汉字约等于 30 个英文字符。
+function clipDraftPreview(text) {
+  const source = String(text || '').replace(/\s+/g, ' ').trim();
+  let width = 0;
+  let out = '';
+  for (const ch of source) {
+    const w = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/.test(ch) ? 2 : 1;
+    if (width + w > DRAFT_PREVIEW_WIDTH) return `${out}...`;
+    width += w;
+    out += ch;
+  }
+  return out || '（空）';
+}
+
+function formatDraftTime(ms) {
+  const date = new Date(ms || 0);
+  const hm = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const dayStart = new Date(date);
+  dayStart.setHours(0, 0, 0, 0);
+  const days = Math.round((today - dayStart) / 86400000);
+  if (days === 0) return hm;
+  if (days === 1) return `昨天 ${hm}`;
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+}
+
+function hideDraftCapsuleMenu() {
+  if (!draftCapsuleMenu) return;
+  draftCapsuleMenu.hidden = true;
+  draftCapsuleBtn?.setAttribute('aria-expanded', 'false');
+}
+
+function clampDraftCapsule() {
+  if (!draftCapsuleEl || draftCapsuleEl.hidden || !draftCapsuleEl.style.left) return;
+  const rect = draftCapsuleEl.getBoundingClientRect();
+  const left = Math.max(4, Math.min(rect.left, window.innerWidth - rect.width - 4));
+  const top = Math.max(4, Math.min(rect.top, window.innerHeight - rect.height - 4));
+  draftCapsuleEl.style.left = `${left}px`;
+  draftCapsuleEl.style.top = `${top}px`;
+}
+
+function restoreDraftCapsulePosition() {
+  if (!draftCapsuleEl) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(DRAFT_CAPSULE_POS_KEY) || 'null');
+    if (Number.isFinite(saved?.left) && Number.isFinite(saved?.top)) {
+      draftCapsuleEl.style.left = `${saved.left}px`;
+      draftCapsuleEl.style.top = `${saved.top}px`;
+      draftCapsuleEl.style.right = 'auto';
+    }
+  } catch {
+    // 位置读不到就用默认右上角
+  }
+}
+
+function renderDraftCapsule() {
+  if (!draftCapsuleEl || !draftCapsuleBtn) return;
+  const drafts = visibleCopyEditDrafts();
+  const hidden = drafts.length === 0 || Boolean(window.MeetingView?.isVisible?.());
+  const signature = hidden ? 'hidden' : drafts.map((draft) => `${draft.id}:${draft.savedAt}`).join('|');
+  if (signature === draftCapsuleSignature) return;
+  draftCapsuleSignature = signature;
+  draftCapsuleEl.hidden = hidden;
+  if (hidden) {
+    hideDraftCapsuleMenu();
+    return;
+  }
+  draftCapsuleBtn.textContent = drafts.length > 1
+    ? `📝 暂存修改 (${drafts.length}) ▾`
+    : '📝 暂存修改 (1)';
+  draftCapsuleBtn.title = drafts.length > 1 ? '选择要继续编辑的暂存' : '继续编辑暂存的修改';
+  if (drafts.length < 2) {
+    hideDraftCapsuleMenu();
+    draftCapsuleMenu.innerHTML = '';
+  } else {
+    draftCapsuleMenu.innerHTML = drafts.map((draft) => `
+      <div class="draft-capsule-item" role="none">
+        <button type="button" class="draft-capsule-open" role="menuitem" data-draft-open="${escapeHtml(draft.id)}">
+          <span class="draft-capsule-time">${escapeHtml(formatDraftTime(draft.savedAt))} · </span>${escapeHtml(clipDraftPreview(draft.preview))}
+        </button>
+        <button type="button" class="draft-capsule-del" title="删除这份暂存" aria-label="删除这份暂存" data-draft-del="${escapeHtml(draft.id)}">✕</button>
+      </div>`).join('');
+  }
+  requestAnimationFrame(clampDraftCapsule);
+}
+
+async function refreshCopyEditDrafts() {
+  if (!window.qizi.listCopyEditDrafts) return;
+  try {
+    const result = await window.qizi.listCopyEditDrafts();
+    if (result?.ok && Array.isArray(result.drafts)) setCopyEditDrafts(result.drafts);
+  } catch {
+    // 草稿列表读不到时不显示胶囊
+  }
+}
+
+function setCopyEditDrafts(list) {
+  copyEditDrafts = Array.isArray(list) ? list : [];
+  draftCapsuleSignature = '';
+  renderDraftCapsule();
+}
+
+async function openCopyEditDraft(id) {
+  hideDraftCapsuleMenu();
+  const result = await window.qizi.openCopyEditDraft(id);
+  if (result?.ok === false) {
+    setStatus(result.error || '打不开这份暂存', 'error');
+    void refreshCopyEditDrafts();
+  }
+}
+
+function toggleDraftCapsuleMenu() {
+  if (!draftCapsuleMenu || !draftCapsuleEl) return;
+  if (!draftCapsuleMenu.hidden) {
+    hideDraftCapsuleMenu();
+    return;
+  }
+  const rect = draftCapsuleEl.getBoundingClientRect();
+  draftCapsuleEl.classList.toggle('is-flip-up', rect.top > window.innerHeight * 0.55);
+  draftCapsuleEl.classList.toggle('is-align-left', rect.left + rect.width < 340);
+  draftCapsuleMenu.hidden = false;
+  draftCapsuleBtn.setAttribute('aria-expanded', 'true');
+}
+
+function bindDraftCapsule() {
+  if (!draftCapsuleEl || !draftCapsuleBtn || !draftCapsuleMenu) return;
+  restoreDraftCapsulePosition();
+  let drag = null;
+  draftCapsuleBtn.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const rect = draftCapsuleEl.getBoundingClientRect();
+    drag = { x: e.clientX, y: e.clientY, left: rect.left, top: rect.top, moved: false };
+    draftCapsuleBtn.setPointerCapture(e.pointerId);
+  });
+  draftCapsuleBtn.addEventListener('pointermove', (e) => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    const dy = e.clientY - drag.y;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+    if (!drag.moved) {
+      drag.moved = true;
+      hideDraftCapsuleMenu();
+      draftCapsuleEl.classList.add('is-dragging');
+    }
+    const rect = draftCapsuleEl.getBoundingClientRect();
+    const left = Math.max(4, Math.min(drag.left + dx, window.innerWidth - rect.width - 4));
+    const top = Math.max(4, Math.min(drag.top + dy, window.innerHeight - rect.height - 4));
+    draftCapsuleEl.style.left = `${left}px`;
+    draftCapsuleEl.style.top = `${top}px`;
+    draftCapsuleEl.style.right = 'auto';
+  });
+  const endDrag = () => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null;
+    draftCapsuleEl.classList.remove('is-dragging');
+    if (!moved) {
+      const drafts = visibleCopyEditDrafts();
+      if (drafts.length === 1) void openCopyEditDraft(drafts[0].id);
+      else if (drafts.length > 1) toggleDraftCapsuleMenu();
+      return;
+    }
+    const rect = draftCapsuleEl.getBoundingClientRect();
+    try {
+      localStorage.setItem(DRAFT_CAPSULE_POS_KEY, JSON.stringify({ left: rect.left, top: rect.top }));
+    } catch {
+      // 位置存不下就算了
+    }
+  };
+  draftCapsuleBtn.addEventListener('pointerup', endDrag);
+  draftCapsuleBtn.addEventListener('pointercancel', () => {
+    drag = null;
+    draftCapsuleEl.classList.remove('is-dragging');
+  });
+  draftCapsuleMenu.addEventListener('click', (e) => {
+    const del = e.target.closest('[data-draft-del]');
+    if (del) {
+      e.stopPropagation();
+      void window.qizi.deleteCopyEditDraft(del.dataset.draftDel);
+      return;
+    }
+    const open = e.target.closest('[data-draft-open]');
+    if (open) void openCopyEditDraft(open.dataset.draftOpen);
+  });
+  document.addEventListener('pointerdown', (e) => {
+    if (!draftCapsuleMenu.hidden && !e.target.closest('#draft-capsule')) hideDraftCapsuleMenu();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') hideDraftCapsuleMenu();
+  });
+  window.addEventListener('resize', clampDraftCapsule);
+  for (const name of ['qizi-meeting-view-shown', 'qizi-meeting-view-hidden', 'qizi-meeting-hub-opened', 'qizi-meeting-exited']) {
+    window.addEventListener(name, renderDraftCapsule);
+  }
+  window.qizi.onCopyEditDraftsChanged?.(setCopyEditDrafts);
+  void refreshCopyEditDrafts();
+}
+
+async function deliverCopyEditPrompt(text, sessionKey) {
+  const prompt = String(text || '').trim();
+  if (!prompt) return { ok: false, error: '没有可发送的内容' };
+  if (sessionKey && currentSessionKey && sessionKey !== currentSessionKey) {
+    return { ok: false, error: '当前已经不在原来的对话，请先切回那个 Agent 再发送' };
+  }
+  if (window.MeetingView?.isLiveViewing?.()) {
+    return { ok: false, error: '会议进行中，先回到对话再把修订发给 Agent' };
+  }
+  if (window.MeetingView?.isVisible?.()) window.MeetingView.leaveView?.();
+  if (!inputEl) return { ok: false, error: '输入框不可用' };
+  const savedInput = inputEl.value;
+  const savedQuote = pendingQuote;
+  pendingQuote = null;
+  renderComposerQuote();
+  inputEl.value = prompt;
+  try {
+    await send();
+  } catch (err) {
+    inputEl.value = savedInput;
+    pendingQuote = savedQuote;
+    renderComposerQuote();
+    resetInputHeight();
+    return { ok: false, error: err?.message || '发送失败' };
+  }
+  if (inputEl.value === prompt) {
+    inputEl.value = savedInput;
+    pendingQuote = savedQuote;
+    renderComposerQuote();
+    resetInputHeight();
+    updateComposerSendBtn();
+    return { ok: false, error: '没能发出去。请确认已连上 Gateway，并且没有别的消息在排队' };
+  }
+  setStatus('已发送文案修订', 'ok');
+  return { ok: true };
+}
+
 function applyHistoryQuote(raw) {
   const text = String(raw?.text || '').trim();
   if (!text) {
@@ -2326,6 +2604,8 @@ function showMessageContextMenu(x, y, msgIndex, source = 'chat') {
   msgContextMenuEl.querySelectorAll('[data-chat-only="1"]').forEach((el) => {
     el.hidden = source !== 'chat';
   });
+  const editBtn = msgContextMenuEl.querySelector('[data-action="copy-edit"]');
+  if (editBtn) editBtn.disabled = !getMessageSelectableText(getActiveMessages()[msgIndex]);
   msgContextMenuEl.hidden = false;
   const menuRect = msgContextMenuEl.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
@@ -6717,6 +6997,10 @@ if (msgContextMenuEl) {
       else hideMessageContextMenu();
       return;
     }
+    if (action === 'copy-edit') {
+      void openCopyEditFromMessage(contextMenuTargetIndex);
+      return;
+    }
     if (action === 'start-meeting') {
       void openMeetingFromMessage(contextMenuTargetIndex);
       return;
@@ -8826,6 +9110,9 @@ window.addEventListener('qizi-meeting-exited', () => {
   restoreMeetingTitlebar();
   render();
 });
+
+window.qiziDeliverCopyEditPrompt = deliverCopyEditPrompt;
+bindDraftCapsule();
 
 window.QiziShellText = {
   wrapInlineEmojisForHtml,

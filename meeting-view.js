@@ -198,9 +198,13 @@
   }
 
   function parseMarkdown(text) {
+    const source = String(text || '').split(/(<span class="msg-inline-emoji">[\s\S]*?<\/span>)/g).map((part) => {
+      if (part.startsWith('<span class="msg-inline-emoji">')) return part;
+      return escapeHtml(part);
+    }).join('');
     const raw = typeof marked !== 'undefined'
-      ? marked.parse(String(text || ''), { breaks: true })
-      : escapeHtml(text);
+      ? marked.parse(source, { breaks: true })
+      : source;
     return typeof DOMPurify !== 'undefined' ? DOMPurify.sanitize(raw) : raw;
   }
 
