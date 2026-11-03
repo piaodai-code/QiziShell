@@ -134,7 +134,7 @@ body.meeting-mode .titlebar-identity {
   padding: 0;
   border: 1.5px solid #fff;
   border-radius: 50%;
-  background: #1296DB;
+  background: var(--accent);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
   cursor: pointer;
   flex-shrink: 0;
@@ -291,7 +291,7 @@ body.meeting-mode .titlebar-identity {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #1296DB;
+  background: var(--accent);
   color: #fff;
 }
 .agent-avatar img {
@@ -578,7 +578,7 @@ body.meeting-mode .composer {
 }
 .msg-avatar-me { background: var(--accent); }
 .msg-avatar-them {
-  background: #1296DB;
+  background: var(--accent);
 }
 .msg-avatar img {
   width: 100%;

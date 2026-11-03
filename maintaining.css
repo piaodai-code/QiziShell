@@ -1,0 +1,163 @@
+.maintaining-title {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  height: var(--titlebar-height);
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.hermes-activity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 8px 16px 0;
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #555;
+}
+.hermes-activity[hidden] { display: none !important; }
+.hermes-activity-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  color: #ef6c00;
+}
+.hermes-activity-main::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ef6c00;
+  animation: hermes-pulse 1.2s ease-in-out infinite;
+}
+.hermes-activity-time {
+  color: #888;
+  font-variant-numeric: tabular-nums;
+}
+.hermes-activity-detail {
+  flex-basis: 100%;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hermes-activity-detail[hidden] { display: none !important; }
+@keyframes hermes-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.hermes-request {
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.hermes-request[hidden] { display: none !important; }
+.hermes-request-title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.hermes-request-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.hermes-request-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.hermes-request-actions button,
+.hermes-login-submit {
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.hermes-request-actions button.danger {
+  background: #c62828;
+}
+.hermes-request-input {
+  width: 100%;
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+.hermes-login {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+}
+.hermes-login[hidden] { display: none !important; }
+.hermes-login-panel {
+  width: min(400px, calc(100vw - 32px));
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
+  padding: 16px 16px 14px;
+}
+.hermes-login-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.hermes-login-header h2 {
+  font-size: 16px;
+  font-weight: 600;
+}
+.hermes-login-error {
+  color: #c62828;
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+.hermes-login-error[hidden] { display: none !important; }
+.hermes-login-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.hermes-login-status {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hermes-login-status[hidden] { display: none !important; }
+.hermes-login-status.ok { color: #2e7d32; }
+.hermes-login-status.error { color: #c62828; }
+.hermes-login-status.pending { color: #ef6c00; }
+.hermes-login-actions .hermes-login-submit {
+  margin-left: auto;
+}
+.hermes-login-submit:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

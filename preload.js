@@ -121,6 +121,7 @@ contextBridge.exposeInMainWorld('qizi', {
   saveSettings: (payload) => ipcRenderer.invoke('openclaw:settings:save', payload),
   getDebugMode: () => ipcRenderer.invoke('openclaw:debug:get'),
   setDebugMode: (payload) => ipcRenderer.invoke('openclaw:debug:set', payload),
+  openMaintaining: () => ipcRenderer.invoke('hermes:open'),
   openSettings: () => ipcRenderer.invoke('openclaw:open-settings'),
   openAbout: () => ipcRenderer.invoke('openclaw:open-about'),
   openUpdate: () => ipcRenderer.invoke('openclaw:open-update'),

@@ -8886,6 +8886,10 @@ function toggleAppMenu() {
 
 async function handleAppMenuAction(action) {
   hideAppMenu();
+  if (action === 'maintaining') {
+    if (window.qizi?.openMaintaining) await window.qizi.openMaintaining();
+    return;
+  }
   if (action === 'settings') {
     openSettingsModal();
     return;

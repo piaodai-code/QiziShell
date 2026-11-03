@@ -4,6 +4,7 @@ const { spawn } = require('child_process');
 const openLinksExternally = !process.argv.includes('--open-links-in-shell');
 
 const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-policy');
+const { MaintainingSession } = require('./maintaining-session');
 const { buildExportWordHtml } = require('./export-html');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
 const { startMeetingGroupRelay } = require('./meeting-group');
@@ -91,6 +92,8 @@ const {
 const { file: tmpFile } = require('tmp-promise');
 
 let mainWindow = null;
+let maintainingWindow = null;
+let maintainingSession = null;
 
 const FORWARD_DEDUP_MS = 120_000;
 const FORWARD_REGISTRY_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
@@ -367,6 +370,23 @@ function getAuthorizedMainWindow(event) {
   return mainWindow;
 }
 
+function getAuthorizedMaintainingWindow(event) {
+  if (!maintainingWindow || maintainingWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== maintainingWindow) return null;
+  return maintainingWindow;
+}
+
+function shellWindowVisible(win) {
+  return Boolean(win && !win.isDestroyed() && win.isVisible());
+}
+
+function syncDockVisibility() {
+  if (process.platform !== 'darwin' || !app.dock) return;
+  if (shellWindowVisible(mainWindow) || shellWindowVisible(maintainingWindow)) app.dock.show();
+  else app.dock.hide();
+}
+
 function forbiddenSenderResult() {
   return { ok: false, error: '仅主窗口可调用此功能' };
 }
@@ -488,9 +508,9 @@ function shouldIgnoreAppActivate() {
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
   if (mainWindow.isMinimized()) mainWindow.restore();
-  if (process.platform === 'darwin' && app.dock) app.dock.show();
   if (!mainWindow.isVisible()) mainWindow.show();
   mainWindow.focus();
+  syncDockVisibility();
 }
 
 function getSessionKeyPath() {
@@ -3642,18 +3662,12 @@ function createWindow() {
     if (!isQuitting) {
       event.preventDefault();
       mainWindow.hide();
-      // macOS: 主界面隐藏时同步隐藏 Dock 图标
-      if (process.platform === 'darwin' && app.dock) {
-        app.dock.hide();
-      }
+      syncDockVisibility();
     }
   });
 
   mainWindow.on('show', () => {
-    // 主界面显示时让 Dock 图标也出现
-    if (process.platform === 'darwin' && app.dock) {
-      app.dock.show();
-    }
+    syncDockVisibility();
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -3694,7 +3708,7 @@ function toggleMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
     mainWindow.hide();
-    if (process.platform === 'darwin' && app.dock) app.dock.hide();
+    syncDockVisibility();
   } else {
     showMainWindow();
   }
@@ -3727,12 +3741,13 @@ function trayMenuIcon(filename) {
 
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
-    { label: '设置', icon: trayMenuIcon('gear.png'), click: () => openSettings() },
+    { label: 'Settings', icon: trayMenuIcon('gear.png'), click: () => openSettings() },
+    { label: 'Maintaining', icon: trayMenuIcon('tools-wrench.png'), click: () => openMaintainingWindow() },
     { label: 'Openclaw Control', icon: trayMenuIcon('openclaw-control.png'), click: () => openOpenClawControl() },
     { label: 'Update', icon: trayMenuIcon('update-menu.png'), click: () => openUpdate() },
     { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: () => openAbout() },
     { type: 'separator' },
-    { label: '退出', icon: trayMenuIcon('exit.png'), click: () => {
+    { label: 'Quit', icon: trayMenuIcon('exit.png'), click: () => {
       isQuitting = true;
       app.quit();
     } },
@@ -5827,11 +5842,9 @@ ipcMain.handle('openclaw:pickFiles', async (event) => {
   }
 });
 
-ipcMain.handle('openclaw:screenshot', async (event) => {
-  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+function captureInteractiveScreenshot() {
   return new Promise((resolve) => {
     const tmpFile = path.join(os.tmpdir(), `qizi-shot-${Date.now()}.png`);
-    // -i 交互式选区域；-x 不播快门声；-t png 输出格式
     const proc = spawn('screencapture', ['-i', '-x', '-t', 'png', tmpFile], {
       stdio: ['ignore', 'ignore', 'ignore'],
     });
@@ -5839,7 +5852,6 @@ ipcMain.handle('openclaw:screenshot', async (event) => {
       resolve({ ok: false, error: `无法启动 screencapture: ${err.message}` });
     });
     proc.on('exit', (code) => {
-      // 用户按 Esc 取消时 exit code = 1，文件不存在
       if (code !== 0) {
         resolve({ ok: false, canceled: true });
         return;
@@ -5847,17 +5859,23 @@ ipcMain.handle('openclaw:screenshot', async (event) => {
       try {
         const buf = fs.readFileSync(tmpFile);
         const base64 = buf.toString('base64');
-        try { fs.unlinkSync(tmpFile); } catch {}
+        try { fs.unlinkSync(tmpFile); } catch { /* already gone */ }
         resolve({
           ok: true,
           dataUrl: `data:image/png;base64,${base64}`,
           size: buf.length,
+          name: 'screenshot.png',
         });
       } catch (err) {
         resolve({ ok: false, error: `读取截屏失败: ${err.message}` });
       }
     });
   });
+}
+
+ipcMain.handle('openclaw:screenshot', async (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return captureInteractiveScreenshot();
 });
 
 ipcMain.handle('openclaw:normalize-image', async (event, dataUrl) => {
@@ -6096,6 +6114,268 @@ ipcMain.handle('openclaw:btw:send', async (event, { message, images, files }) =>
   }
 });
 
+const MAINTAINING_MIN_WIDTH = 440;
+const MAINTAINING_MIN_HEIGHT = 502;
+const MAINTAINING_DEFAULT_WIDTH = 480;
+const MAINTAINING_DEFAULT_HEIGHT = 760;
+
+function maintainingStatePath() {
+  return path.join(app.getPath('userData'), 'maintaining-window-state.json');
+}
+
+function pushMaintaining(channel, payload) {
+  if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
+  safeSendTo(maintainingWindow.webContents, channel, payload);
+}
+
+function getMaintainingSession() {
+  if (!maintainingSession) {
+    maintainingSession = new MaintainingSession(app.getPath('userData'));
+    maintainingSession.on('status', (payload) => pushMaintaining('hermes:status', payload));
+    maintainingSession.on('history', (messages) => pushMaintaining('hermes:history', messages));
+    maintainingSession.on('stream', (payload) => pushMaintaining('hermes:stream', payload));
+    maintainingSession.on('complete', (payload) => pushMaintaining('hermes:complete', payload));
+    maintainingSession.on('turn-error', (payload) => pushMaintaining('hermes:turn-error', payload));
+    maintainingSession.on('request', (payload) => pushMaintaining('hermes:request', payload));
+    maintainingSession.on('activity', (payload) => pushMaintaining('hermes:activity', payload));
+  }
+  return maintainingSession;
+}
+
+function loadMaintainingWindowState() {
+  const fallback = {
+    width: MAINTAINING_DEFAULT_WIDTH,
+    height: MAINTAINING_DEFAULT_HEIGHT,
+    x: null,
+    y: null,
+  };
+  try {
+    const saved = JSON.parse(fs.readFileSync(maintainingStatePath(), 'utf8'));
+    const width = Math.max(MAINTAINING_MIN_WIDTH, Math.min(2400, Number(saved.width) || fallback.width));
+    const height = Math.max(MAINTAINING_MIN_HEIGHT, Math.min(1600, Number(saved.height) || fallback.height));
+    const x = Number(saved.x);
+    const y = Number(saved.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { width, height, x: null, y: null };
+    const visible = screen.getAllDisplays().some((display) => {
+      const area = display.workArea;
+      return x < area.x + area.width - 80
+        && x + width > area.x + 80
+        && y < area.y + area.height - 40
+        && y + 48 > area.y;
+    });
+    if (!visible) return { width, height, x: null, y: null };
+    return { width, height, x, y };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveMaintainingWindowState() {
+  if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
+  try {
+    const bounds = maintainingWindow.getBounds();
+    fs.writeFileSync(maintainingStatePath(), JSON.stringify({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }));
+  } catch {
+    // non-fatal
+  }
+}
+
+function openMaintainingWindow() {
+  if (maintainingWindow && !maintainingWindow.isDestroyed()) {
+    if (maintainingWindow.isMinimized()) maintainingWindow.restore();
+    if (!maintainingWindow.isVisible()) maintainingWindow.show();
+    maintainingWindow.focus();
+    syncDockVisibility();
+    return;
+  }
+  const state = loadMaintainingWindowState();
+  const options = {
+    width: state.width,
+    height: state.height,
+    minWidth: MAINTAINING_MIN_WIDTH,
+    minHeight: MAINTAINING_MIN_HEIGHT,
+    title: 'Maintaining',
+    show: false,
+    titleBarStyle: 'hiddenInset',
+    trafficLightPosition: { x: 12, y: 12 },
+    backgroundColor: '#F2F2F2',
+    webPreferences: {
+      preload: path.join(__dirname, 'maintaining-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
+    },
+  };
+  if (state.x != null && state.y != null) {
+    options.x = state.x;
+    options.y = state.y;
+  }
+  maintainingWindow = new BrowserWindow(options);
+  maintainingWindow.setMenu(null);
+  maintainingWindow.on('resize', saveMaintainingWindowState);
+  maintainingWindow.on('move', saveMaintainingWindowState);
+  maintainingWindow.on('close', (event) => {
+    saveMaintainingWindowState();
+    if (!isQuitting) {
+      event.preventDefault();
+      maintainingWindow.hide();
+      syncDockVisibility();
+    }
+  });
+  maintainingWindow.on('show', () => syncDockVisibility());
+  maintainingWindow.once('ready-to-show', () => {
+    if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
+    maintainingWindow.show();
+    maintainingWindow.focus();
+    syncDockVisibility();
+  });
+  maintainingWindow.on('closed', () => {
+    maintainingWindow = null;
+  });
+  maintainingWindow.loadFile(path.join(__dirname, 'maintaining.html'));
+}
+
+ipcMain.handle('hermes:open', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  openMaintainingWindow();
+  return { ok: true };
+});
+
+ipcMain.handle('hermes:boot', async (event) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  const snapshot = await getMaintainingSession().ensureConnected();
+  return { ok: true, ...snapshot };
+});
+
+ipcMain.handle('hermes:login', async (event, payload) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  const snapshot = await getMaintainingSession().login({
+    url: payload?.url,
+    username: payload?.username,
+    password: payload?.password,
+  });
+  return { ok: Boolean(snapshot.connected), ...snapshot };
+});
+
+ipcMain.handle('hermes:test', async (event, payload) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  const { HermesClient } = require('./hermes-client');
+  const probe = new HermesClient();
+  try {
+    await probe.probe({
+      url: payload?.url,
+      username: payload?.username,
+      password: payload?.password,
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Could not connect' };
+  } finally {
+    probe.close();
+  }
+});
+
+ipcMain.handle('hermes:send', async (event, payload) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  try {
+    await getMaintainingSession().send({
+      text: payload?.text,
+      images: Array.isArray(payload?.images) ? payload.images : [],
+      files: Array.isArray(payload?.files) ? payload.files : [],
+    });
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Send failed' };
+  }
+});
+
+ipcMain.handle('hermes:abort', async (event) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  try {
+    await getMaintainingSession().abort();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Could not stop' };
+  }
+});
+
+ipcMain.handle('hermes:respond', (event, payload) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  try {
+    getMaintainingSession().respond(payload?.id, payload?.result || {});
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Could not answer' };
+  }
+});
+
+ipcMain.handle('hermes:screenshot', (event) => {
+  if (!getAuthorizedMaintainingWindow(event)) return { ok: false, error: 'Forbidden' };
+  return captureInteractiveScreenshot();
+});
+
+ipcMain.handle('hermes:pick-images', async (event) => {
+  const win = getAuthorizedMaintainingWindow(event);
+  if (!win) return { ok: false, error: 'Forbidden' };
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Choose images',
+    properties: ['openFile', 'multiSelections'],
+    filters: [
+      { name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'heic', 'heif'] },
+    ],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true };
+  try {
+    const images = [];
+    for (const filePath of result.filePaths) {
+      const buf = fs.readFileSync(filePath);
+      const mime = mimeFromImagePath(filePath);
+      images.push({
+        dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+        size: buf.length,
+        name: path.basename(filePath),
+      });
+    }
+    return { ok: true, images };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Could not read the image' };
+  }
+});
+
+ipcMain.handle('hermes:pick-files', async (event) => {
+  const win = getAuthorizedMaintainingWindow(event);
+  if (!win) return { ok: false, error: 'Forbidden' };
+  const result = await dialog.showOpenDialog(win, {
+    title: 'Choose files',
+    properties: ['openFile', 'multiSelections'],
+  });
+  if (result.canceled || !result.filePaths.length) return { ok: false, canceled: true };
+  try {
+    const files = [];
+    for (const filePath of result.filePaths) {
+      const buf = fs.readFileSync(filePath);
+      if (buf.length > CHAT_ATTACHMENT_MAX_BYTES) {
+        return { ok: false, error: `${path.basename(filePath)} is larger than 20 MB` };
+      }
+      const mime = mimeFromFilePath(filePath);
+      files.push({
+        dataUrl: `data:${mime};base64,${buf.toString('base64')}`,
+        size: buf.length,
+        name: path.basename(filePath),
+        mimeType: mime,
+      });
+    }
+    return { ok: true, files };
+  } catch (err) {
+    return { ok: false, error: err.message || 'Could not read the file' };
+  }
+});
+
 app.whenReady().then(() => {
   initRuntimeDebugMode();
   initSttManager(app);
@@ -6111,7 +6391,7 @@ app.whenReady().then(() => {
   }
   if (shellSettings.showMainOnLaunch === false && mainWindow) {
     mainWindow.hide();
-    if (process.platform === 'darwin' && app.dock) app.dock.hide();
+    syncDockVisibility();
   }
   try {
     ensureGateway();
@@ -6137,6 +6417,7 @@ app.on('activate', () => {
 // 真的退出前清理菜单栏图标，避免 macOS 状态栏残留
 app.on('before-quit', () => {
   isQuitting = true;
+  if (maintainingSession) maintainingSession.close();
   stopGateway();
   if (tray) {
     tray.destroy();

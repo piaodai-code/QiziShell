@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none';">
+  <title>Maintaining</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="maintaining.css">
+</head>
+<body>
+  <div class="app">
+    <header class="titlebar">
+      <div class="titlebar-left"></div>
+      <div class="maintaining-title">Maintaining</div>
+      <div class="titlebar-right">
+        <span class="status-pill" id="status" data-kind="pending">Connecting…</span>
+        <button type="button" class="icon-btn" id="menu-btn" title="Sign in" aria-label="Sign in">⋯</button>
+      </div>
+    </header>
+    <section class="chat-screen">
+      <main class="messages" id="messages">
+        <div class="msg-hint">No messages yet</div>
+      </main>
+    </section>
+    <footer class="composer" id="composer">
+      <div class="hermes-activity" id="hermes-activity" hidden>
+        <span class="hermes-activity-main">Working</span>
+        <span class="hermes-activity-time" id="hermes-activity-time"></span>
+        <div class="hermes-activity-detail" id="hermes-activity-detail" hidden></div>
+      </div>
+      <div class="hermes-request" id="hermes-request" hidden></div>
+      <div class="composer-tools">
+        <div class="composer-tools-left">
+          <div class="attach-picker-wrap">
+            <button type="button" class="icon-btn icon-btn-img" id="attach-picker-btn" title="Add" aria-label="Add" aria-haspopup="menu" aria-expanded="false">
+              <img src="assets/icons/composer-plus.png" alt="" aria-hidden="true">
+            </button>
+            <div class="attach-popup" id="attach-popup" hidden role="menu" aria-label="Add">
+              <button type="button" class="attach-item" id="screenshot-btn">
+                <img src="assets/icons/camera.png" alt="" aria-hidden="true">
+                <span>Screenshot</span>
+              </button>
+              <button type="button" class="attach-item" id="pick-image-btn">
+                <img src="assets/icons/picture.png" alt="" aria-hidden="true">
+                <span>Image</span>
+              </button>
+              <button type="button" class="attach-item" id="pick-file-btn">
+                <img src="assets/icons/folder.png" alt="" aria-hidden="true">
+                <span>File</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="composer-pending" id="composer-pending" hidden></div>
+      <div class="composer-input-wrap">
+        <textarea id="input" placeholder="Message" rows="1"></textarea>
+        <button type="button" class="composer-send-btn" id="send-btn" title="Send" aria-label="Send" disabled>
+          <svg class="composer-send-icon composer-send-icon-send" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M8 3.25 3.75 11.75h8.5L8 3.25Z"/>
+          </svg>
+          <svg class="composer-send-icon composer-send-icon-stop" viewBox="0 0 16 16" width="10" height="10" aria-hidden="true">
+            <rect fill="currentColor" x="4" y="4" width="8" height="8" rx="1.2"/>
+          </svg>
+        </button>
+      </div>
+    </footer>
+  </div>
+  <div class="hermes-login" id="hermes-login" hidden>
+    <form class="hermes-login-panel" id="hermes-login-form">
+      <div class="hermes-login-header">
+        <h2>Sign in</h2>
+        <button type="button" class="settings-close" id="hermes-login-close" title="Close">×</button>
+      </div>
+      <p class="hermes-login-error" id="hermes-login-error" hidden></p>
+      <label class="settings-field">
+        <span class="settings-label">Address</span>
+        <input class="settings-input" id="hermes-url" type="url" placeholder="http://host:9119" spellcheck="false" autocomplete="off" required>
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Account</span>
+        <input class="settings-input" id="hermes-username" type="text" spellcheck="false" autocomplete="username">
+      </label>
+      <label class="settings-field">
+        <span class="settings-label">Password</span>
+        <input class="settings-input" id="hermes-password" type="password" autocomplete="current-password">
+      </label>
+      <div class="hermes-login-actions">
+        <button type="button" class="settings-secondary-btn" id="hermes-test-btn">Test connecting</button>
+        <span class="hermes-login-status" id="hermes-login-status" hidden></span>
+        <button type="submit" class="hermes-login-submit" id="hermes-login-submit">Connect</button>
+      </div>
+    </form>
+  </div>
+  <div class="img-modal" id="img-modal" hidden role="dialog" aria-modal="true">
+    <button class="img-modal-close" type="button" title="Close">×</button>
+    <img class="img-modal-img" id="img-modal-img" alt="">
+  </div>
+  <script src="marked.min.js"></script>
+  <script src="dompurify.min.js"></script>
+  <script src="code-block.js"></script>
+  <script src="maintaining.js"></script>
+</body>
+</html>
