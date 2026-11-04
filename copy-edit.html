@@ -37,10 +37,8 @@
     <p class="ce-float-hint">按住选区拖到新位置</p>
   </div>
   <div id="ce-drop-caret" class="ce-drop-caret" hidden></div>
-  <div id="ce-pop" class="ce-pop" hidden role="dialog" aria-label="处理这条修订">
-    <button type="button" data-decide="accept">接受</button>
-    <button type="button" data-decide="reject">拒绝</button>
-    <button type="button" data-decide="comment">批注</button>
+  <div id="ce-pop" class="ce-pop" hidden role="menu" aria-label="撤销这条修订">
+    <button type="button" data-decide="undo" role="menuitem">撤销</button>
   </div>
   <form id="ce-note" class="ce-note" hidden>
     <textarea id="ce-note-input" rows="4" placeholder="写出希望 AI 怎么改。例如：这里想更有科技感，但我词穷了。"></textarea>

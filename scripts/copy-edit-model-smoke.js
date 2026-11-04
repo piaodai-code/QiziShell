@@ -149,4 +149,43 @@ assert.deepStrictEqual(
 );
 assert.deepStrictEqual(Model.commentRangesInPiece(inside, Model.buildPieces(inside)[0]), []);
 
+const undoInsert = Model.createDocument('你好世界');
+Model.insertText(undoInsert, caret(undoInsert, 0, 2), '，很');
+const undoInsertId = undoInsert.patches[0].id;
+const undoInsIndex = Model.buildPieces(undoInsert).findIndex((piece) => piece.kind === 'ins');
+Model.addComment(undoInsert, { pieceIndex: undoInsIndex, offset: 0 }, { pieceIndex: undoInsIndex, offset: 1 }, '这个逗号');
+assert.strictEqual(undoInsert.patches.length, 2);
+assert.strictEqual(Model.undoPatch(undoInsert, undoInsertId), true);
+assert.strictEqual(undoInsert.patches.length, 0);
+assert.strictEqual(Model.finalText(undoInsert), '你好世界');
+assert.strictEqual(Model.markupText(undoInsert), '你好世界');
+
+const undoDelete = Model.createDocument('你好世界');
+Model.deleteSelection(undoDelete, caret(undoDelete, 0, 2), caret(undoDelete, 0, 4));
+assert.strictEqual(Model.finalText(undoDelete), '你好');
+assert.strictEqual(Model.undoPatch(undoDelete, undoDelete.patches[0].id), true);
+assert.strictEqual(Model.finalText(undoDelete), '你好世界');
+assert.strictEqual(Model.markupText(undoDelete), '你好世界');
+
+const undoReplace = Model.createDocument('旧词在这里');
+Model.replaceSelection(undoReplace, caret(undoReplace, 0, 0), caret(undoReplace, 0, 2), '新词');
+assert.strictEqual(Model.finalText(undoReplace), '新词在这里');
+assert.strictEqual(Model.undoPatch(undoReplace, undoReplace.patches[0].id), true);
+assert.strictEqual(Model.finalText(undoReplace), '旧词在这里');
+assert.strictEqual(kinds(undoReplace), 'base:旧词在这里');
+
+const undoMove = Model.createDocument('ABCDEFG');
+const undoMoveResult = Model.moveSelection(undoMove, caret(undoMove, 0, 2), caret(undoMove, 0, 4), caret(undoMove, 0, 6));
+assert.strictEqual(undoMoveResult.ok, true);
+assert.strictEqual(Model.finalText(undoMove), 'ABEFCDG');
+assert.strictEqual(Model.undoPatch(undoMove, undoMove.patches[0].id), true);
+assert.strictEqual(Model.finalText(undoMove), 'ABCDEFG');
+assert.strictEqual(kinds(undoMove), 'base:ABCDEFG');
+
+assert.strictEqual(Model.undoPatch(undoMove, 'missing'), false);
+const commentOnly = Model.createDocument('只批注');
+Model.addComment(commentOnly, caret(commentOnly, 0, 0), endCaret(commentOnly), '留着');
+assert.strictEqual(Model.undoPatch(commentOnly, commentOnly.patches[0].id), false);
+assert.strictEqual(commentOnly.patches.length, 1);
+
 console.log('copy-edit model smoke ok');

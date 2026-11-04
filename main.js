@@ -3759,12 +3759,20 @@ function createTray() {
   const icon = buildTrayIcon();
   tray = new Tray(icon);
   tray.setToolTip('QiziShell');
+  if (process.platform === 'darwin') {
+    // 不要 setContextMenu。macOS 会让左键进入菜单跟踪，click 在按下时触发：
+    // 主窗口刚显示，松开鼠标跟踪结束，窗口就被收掉。左键只切换主窗口，右键再弹出菜单。
+    tray.on('click', (event) => {
+      if (event.ctrlKey || event.metaKey) return;
+      markTrayClick();
+      toggleMainWindow();
+    });
+    tray.on('right-click', () => {
+      tray.popUpContextMenu(buildTrayMenu());
+    });
+    return;
+  }
   tray.setContextMenu(buildTrayMenu());
-  // 左键 = toggle 显隐主界面（macOS 会连带触发 activate，由 markTrayClick 屏蔽）
-  tray.on('click', () => {
-    markTrayClick();
-    toggleMainWindow();
-  });
 }
 
 async function checkConnection() {

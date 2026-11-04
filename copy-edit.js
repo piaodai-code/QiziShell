@@ -50,6 +50,89 @@ let menuRange = null;
 let floatRange = null;
 let popPatchId = '';
 let pointerDrag = null;
+const UNDO_LIMIT = 200;
+let undoStack = [];
+let undoFromKeydown = false;
+let undoHandledAt = 0;
+
+const UNDOABLE_KIND = {
+  ins: true,
+  del: true,
+  repl: true,
+  moveSrc: true,
+  moveDst: true,
+};
+
+function cloneDoc(source) {
+  return {
+    originalText: source.originalText,
+    baseText: source.baseText,
+    patches: source.patches.map((patch) => ({
+      ...patch,
+      comments: (patch.comments || []).map((note) => ({ ...note })),
+    })),
+  };
+}
+
+function patchKey(patch) {
+  const notes = (patch.comments || []).map((note) => note.content).join('\u0001');
+  return [
+    patch.id,
+    patch.status,
+    patch.type,
+    patch.startOffset,
+    patch.endOffset,
+    patch.oldText,
+    patch.newText,
+    patch.moveTargetOffset,
+    patch.hostPatchId,
+    patch.hostStart,
+    patch.hostEnd,
+    notes,
+  ].join('\u0002');
+}
+
+function docsEqual(a, b) {
+  if (a.baseText !== b.baseText || a.patches.length !== b.patches.length) return false;
+  for (let index = 0; index < a.patches.length; index += 1) {
+    if (patchKey(a.patches[index]) !== patchKey(b.patches[index])) return false;
+  }
+  return true;
+}
+
+function caretFromRange(range) {
+  if (!range?.start) return null;
+  return { pieceIndex: range.start.pieceIndex, offset: range.start.offset };
+}
+
+function withUndo(mutate, caretRange) {
+  const before = cloneDoc(doc);
+  const range = caretRange || readRange();
+  const result = mutate();
+  if (!docsEqual(before, doc)) {
+    undoStack.push({ doc: before, caret: caretFromRange(range) });
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+  }
+  return result;
+}
+
+function performUndo() {
+  const now = Date.now();
+  if (now - undoHandledAt < 15) return;
+  undoHandledAt = now;
+  const entry = undoStack.pop();
+  if (!entry) {
+    setStatus('没有可以撤销的修改。', true);
+    return;
+  }
+  doc = entry.doc;
+  hideFloat();
+  hidePop();
+  hideMenu();
+  hideNote();
+  setStatus('已撤销最近一次修改。');
+  render(entry.caret ? { caret: entry.caret } : {});
+}
 
 function escapeHtml(value) {
   return String(value ?? '')
@@ -318,6 +401,7 @@ function applyPayload(payload) {
   };
   view = 'markup';
   busy = false;
+  undoStack = [];
   hideFloat();
   hidePop();
   hideNote();
@@ -440,6 +524,11 @@ editor.addEventListener('beforeinput', (event) => {
     return;
   }
   const type = event.inputType || '';
+  if (type === 'historyUndo' || type === 'historyRedo') {
+    event.preventDefault();
+    if (type === 'historyUndo' && !undoFromKeydown) performUndo();
+    return;
+  }
   if (type === 'insertFromPaste' || type === 'deleteByCut') {
     event.preventDefault();
     if (inputJustHandled()) return;
@@ -448,7 +537,10 @@ editor.addEventListener('beforeinput', (event) => {
     if (type === 'deleteByCut') {
       if (pendingRange.collapsed) return;
       markInputHandled();
-      const cutCaret = Model.deleteSelection(doc, pendingRange.start, pendingRange.end);
+      const cutCaret = withUndo(
+        () => Model.deleteSelection(doc, pendingRange.start, pendingRange.end),
+        pendingRange,
+      );
       setStatus('');
       render({ caret: cutCaret });
       return;
@@ -457,9 +549,11 @@ editor.addEventListener('beforeinput', (event) => {
     if (!pasted) return;
     markInputHandled();
     hideNote();
-    const pasteCaret = pendingRange.collapsed
-      ? Model.insertText(doc, pendingRange.start, pasted)
-      : Model.replaceSelection(doc, pendingRange.start, pendingRange.end, pasted);
+    const pasteCaret = withUndo(() => (
+      pendingRange.collapsed
+        ? Model.insertText(doc, pendingRange.start, pasted)
+        : Model.replaceSelection(doc, pendingRange.start, pendingRange.end, pasted)
+    ), pendingRange);
     setStatus('');
     render({ caret: pasteCaret });
     return;
@@ -472,21 +566,29 @@ editor.addEventListener('beforeinput', (event) => {
   let caret = null;
   if (type === 'insertText') {
     const text = event.data || '';
-    caret = range.collapsed
-      ? Model.insertText(doc, range.start, text)
-      : Model.replaceSelection(doc, range.start, range.end, text);
+    caret = withUndo(() => (
+      range.collapsed
+        ? Model.insertText(doc, range.start, text)
+        : Model.replaceSelection(doc, range.start, range.end, text)
+    ), range);
   } else if (type === 'insertParagraph' || type === 'insertLineBreak') {
-    caret = range.collapsed
-      ? Model.insertText(doc, range.start, '\n')
-      : Model.replaceSelection(doc, range.start, range.end, '\n');
+    caret = withUndo(() => (
+      range.collapsed
+        ? Model.insertText(doc, range.start, '\n')
+        : Model.replaceSelection(doc, range.start, range.end, '\n')
+    ), range);
   } else if (type === 'deleteContentBackward') {
-    caret = range.collapsed
-      ? Model.deleteBackward(doc, range.start)
-      : Model.deleteSelection(doc, range.start, range.end);
+    caret = withUndo(() => (
+      range.collapsed
+        ? Model.deleteBackward(doc, range.start)
+        : Model.deleteSelection(doc, range.start, range.end)
+    ), range);
   } else if (type === 'deleteContentForward' || type === 'deleteContent') {
-    caret = range.collapsed
-      ? Model.deleteForward(doc, range.start)
-      : Model.deleteSelection(doc, range.start, range.end);
+    caret = withUndo(() => (
+      range.collapsed
+        ? Model.deleteForward(doc, range.start)
+        : Model.deleteSelection(doc, range.start, range.end)
+    ), range);
   } else {
     return;
   }
@@ -503,9 +605,11 @@ editor.addEventListener('paste', (event) => {
   if (!range || !text) return;
   markInputHandled();
   hideNote();
-  const caret = range.collapsed
-    ? Model.insertText(doc, range.start, text)
-    : Model.replaceSelection(doc, range.start, range.end, text);
+  const caret = withUndo(() => (
+    range.collapsed
+      ? Model.insertText(doc, range.start, text)
+      : Model.replaceSelection(doc, range.start, range.end, text)
+  ), range);
   setStatus('');
   render({ caret });
 });
@@ -518,7 +622,7 @@ editor.addEventListener('cut', (event) => {
   event.clipboardData.setData('text/plain', Model.selectedFragment(doc, range.start, range.end));
   if (inputJustHandled()) return;
   markInputHandled();
-  const caret = Model.deleteSelection(doc, range.start, range.end);
+  const caret = withUndo(() => Model.deleteSelection(doc, range.start, range.end), range);
   setStatus('');
   render({ caret });
 });
@@ -541,9 +645,11 @@ editor.addEventListener('compositionend', (event) => {
     render();
     return;
   }
-  const caret = range.collapsed
-    ? Model.insertText(doc, range.start, text)
-    : Model.replaceSelection(doc, range.start, range.end, text);
+  const caret = withUndo(() => (
+    range.collapsed
+      ? Model.insertText(doc, range.start, text)
+      : Model.replaceSelection(doc, range.start, range.end, text)
+  ), range);
   setStatus('');
   render({ caret });
 });
@@ -665,7 +771,10 @@ function finishPointerDrag(event) {
     setStatus('放不到这个位置。', true);
     return;
   }
-  const result = Model.moveSelection(doc, state.range.start, state.range.end, target);
+  const result = withUndo(
+    () => Model.moveSelection(doc, state.range.start, state.range.end, target),
+    state.range,
+  );
   if (!result.ok) {
     setStatus(result.error || '不能移动这段', true);
     render();
@@ -768,7 +877,7 @@ editor.addEventListener('click', (event) => {
   }
   const span = event.target.closest?.('[data-patch-id]');
   const kind = span?.dataset.kind;
-  if (!span || kind === 'base' || !span.dataset.patchId) {
+  if (!span || !UNDOABLE_KIND[kind] || !span.dataset.patchId) {
     hidePop();
     return;
   }
@@ -806,25 +915,19 @@ floatEl.querySelector('#ce-float-comment').addEventListener('click', () => {
 
 popEl.addEventListener('click', (event) => {
   const button = event.target.closest('[data-decide]');
-  if (!button || !popPatchId) return;
+  if (!button || button.dataset.decide !== 'undo' || !popPatchId) return;
   const id = popPatchId;
-  const rect = popEl.getBoundingClientRect();
-  if (button.dataset.decide === 'accept') {
-    Model.acceptPatch(doc, id);
-    hidePop();
-    setStatus('已接受。');
-    render();
-    return;
-  }
-  if (button.dataset.decide === 'reject') {
-    Model.rejectPatch(doc, id);
-    hidePop();
-    setStatus('已拒绝。');
-    render();
-    return;
-  }
+  const patch = doc.patches.find((item) => item.id === id);
   hidePop();
-  openNote({ start: { pieceIndex: 0, offset: 0 }, end: { pieceIndex: 0, offset: 0 } }, id, rect.left, rect.bottom + 6);
+  if (!patch) return;
+  const landing = patch.startOffset || 0;
+  const ok = withUndo(() => Model.undoPatch(doc, id));
+  if (!ok) {
+    setStatus('这条修订没法撤销。', true);
+    return;
+  }
+  setStatus('已撤销这条修订。');
+  render({ caret: { pieceKind: 'base', offset: landing } });
 });
 
 menuEl.addEventListener('mousedown', (event) => event.preventDefault());
@@ -844,7 +947,7 @@ noteEl.addEventListener('submit', (event) => {
   event.preventDefault();
   const content = noteInput.value;
   const range = noteRange || { start: { pieceIndex: 0, offset: 0 }, end: { pieceIndex: 0, offset: 0 } };
-  const result = Model.addComment(doc, range.start, range.end, content, noteHost);
+  const result = withUndo(() => Model.addComment(doc, range.start, range.end, content, noteHost), range);
   if (!result.ok) {
     setStatus(result.error || '没能加上批注', true);
     return;
@@ -870,11 +973,24 @@ document.addEventListener('mousedown', (event) => {
 });
 
 document.addEventListener('keydown', (event) => {
-  if (event.key !== 'Escape') return;
-  hideFloat();
-  hidePop();
-  hideMenu();
-  hideNote();
+  if (event.key === 'Escape') {
+    hideFloat();
+    hidePop();
+    hideMenu();
+    hideNote();
+    return;
+  }
+  const undoKey = event.key === 'z' || event.key === 'Z';
+  if (!undoKey || event.shiftKey || event.altKey || (!event.metaKey && !event.ctrlKey)) return;
+  if (event.isComposing || composing) return;
+  const tag = event.target?.tagName;
+  if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+  event.preventDefault();
+  undoFromKeydown = true;
+  performUndo();
+  queueMicrotask(() => {
+    undoFromKeydown = false;
+  });
 });
 
 async function boot() {

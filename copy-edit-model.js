@@ -740,6 +740,19 @@
     return ids;
   }
 
+  function undoPatch(doc, id) {
+    const patch = doc.patches.find((item) => item.id === id && item.status === 'pending');
+    if (!patch || patch.type === 'comment') return false;
+    const removeIds = new Set([id]);
+    for (const item of doc.patches) {
+      if (item.status === 'pending' && item.type === 'comment' && item.hostPatchId === id) {
+        removeIds.add(item.id);
+      }
+    }
+    doc.patches = doc.patches.filter((item) => !removeIds.has(item.id));
+    return true;
+  }
+
   function acceptPatch(doc, id) {
     const patch = doc.patches.find((item) => item.id === id && item.status === 'pending');
     if (!patch) return false;
@@ -928,6 +941,7 @@
     replaceSelection,
     moveSelection,
     addComment,
+    undoPatch,
     acceptPatch,
     rejectPatch,
     acceptAll,
