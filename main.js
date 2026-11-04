@@ -42,6 +42,7 @@ const {
   normalizeDmScope,
   dmScopeRank,
 } = require('./private-channel');
+const { createMessageArchiveStore } = require('./message-archive');
 
 function isSafeExternalHttpUrl(url) {
   if (typeof url !== 'string') return false;
@@ -461,6 +462,7 @@ const SHELL_SESSION_MAIN_KEY = 'main';
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 const COPY_EDIT_STATE_PATH = path.join(app.getPath('userData'), 'copy-edit-window-state.json');
 const HISTORY_STATE_PATH = path.join(app.getPath('userData'), 'history-window-state.json');
+const messageArchive = createMessageArchiveStore(path.join(app.getPath('userData'), 'message-archive'));
 const HISTORY_MIN_WIDTH = 360;
 const HISTORY_MIN_HEIGHT = 420;
 const HISTORY_DEFAULT_WIDTH = 480;
@@ -1345,10 +1347,11 @@ async function readLocalMessagesFromMainWindow(sessionKey) {
         return [];
       }
     })()`, true);
-    return Array.isArray(messages) ? messages : [];
+    if (Array.isArray(messages) && messages.length > 0) return messages;
   } catch {
-    return [];
+    // 主窗口还没把归档放进内存时，直接读磁盘
   }
+  return messageArchive.read(key);
 }
 
 function closeHistoryWindow() {
@@ -4346,6 +4349,136 @@ async function patchSessionControls(patch = {}) {
   }
 }
 
+// Gateway 单次 chat.history 最多 1000 条，响应还有约 512KB 的页上限。
+// 不跟 hasMore 时，主界面就只剩最新一页，更早的消息只能去历史窗口。
+const CHAT_HISTORY_PAGE_LIMIT = 1000;
+const CHAT_HISTORY_PAGE_GUARD = 400;
+/** @type {Map<string, { sessionId: string, totalMessages: number | null, raw: object[] }>} */
+const chatHistoryAssemblies = new Map();
+/** @type {Map<string, Promise<object[]>>} */
+const chatHistoryAssemblyInflight = new Map();
+
+function rawChatHistoryIdentity(message) {
+  if (!message || typeof message !== 'object') return '';
+  const meta = message.__openclaw;
+  if (!meta || typeof meta !== 'object') return '';
+  if (typeof meta.id === 'string' && meta.id) return `id:${meta.id}`;
+  if (typeof meta.seq === 'number' && Number.isSafeInteger(meta.seq)) return `seq:${meta.seq}`;
+  return '';
+}
+
+function takeUnseenHistoryMessages(messages, seen) {
+  const pageCounts = new Map();
+  const fresh = [];
+  for (const message of messages) {
+    const key = rawChatHistoryIdentity(message);
+    if (!key) {
+      fresh.push(message);
+      continue;
+    }
+    const count = (pageCounts.get(key) || 0) + 1;
+    pageCounts.set(key, count);
+    if (count > (seen.get(key) || 0)) fresh.push(message);
+  }
+  for (const [key, count] of pageCounts) {
+    seen.set(key, Math.max(count, seen.get(key) || 0));
+  }
+  return fresh;
+}
+
+function spliceCachedHistoryWithTail(cachedRaw, tailMessages) {
+  const anchor = tailMessages.map(rawChatHistoryIdentity).find(Boolean);
+  if (!anchor) return null;
+  const index = cachedRaw.findIndex((message) => rawChatHistoryIdentity(message) === anchor);
+  if (index < 0) return null;
+  return cachedRaw.slice(0, index).concat(tailMessages);
+}
+
+function requestDisplayHistoryPage(client, sessionKey, offset) {
+  return client.request('chat.history', {
+    sessionKey,
+    limit: CHAT_HISTORY_PAGE_LIMIT,
+    offset,
+    maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
+  });
+}
+
+function rememberAssembledHistory(sessionKey, sessionId, totalMessages, raw) {
+  chatHistoryAssemblies.set(sessionKey, { sessionId, totalMessages, raw });
+}
+
+async function assembleDisplayChatHistory(client, sessionKey) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const tail = await requestDisplayHistoryPage(client, sessionKey, 0);
+    const tailMessages = Array.isArray(tail?.messages) ? tail.messages : [];
+    const sessionId = typeof tail?.sessionId === 'string' ? tail.sessionId : '';
+    const totalMessages = typeof tail?.totalMessages === 'number' ? tail.totalMessages : null;
+    if (!tail?.hasMore) {
+      rememberAssembledHistory(sessionKey, sessionId, totalMessages, tailMessages);
+      return tailMessages;
+    }
+
+    const cached = chatHistoryAssemblies.get(sessionKey);
+    const totalsAllowReuse = totalMessages == null
+      || cached?.totalMessages == null
+      || totalMessages >= cached.totalMessages;
+    if (cached && cached.sessionId === sessionId && totalsAllowReuse && Array.isArray(cached.raw)) {
+      const spliced = spliceCachedHistoryWithTail(cached.raw, tailMessages);
+      if (spliced) {
+        rememberAssembledHistory(sessionKey, sessionId, totalMessages, spliced);
+        return spliced;
+      }
+    }
+
+    const pages = [];
+    const seen = new Map();
+    let offset = 0;
+    let page = tail;
+    let restarted = false;
+    for (let guard = 0; guard < CHAT_HISTORY_PAGE_GUARD; guard += 1) {
+      if (guard > 0) page = await requestDisplayHistoryPage(client, sessionKey, offset);
+      const pageSessionId = typeof page?.sessionId === 'string' ? page.sessionId : '';
+      const pageTotal = typeof page?.totalMessages === 'number' ? page.totalMessages : null;
+      if ((sessionId && pageSessionId && pageSessionId !== sessionId)
+        || (totalMessages != null && pageTotal != null && pageTotal !== totalMessages)) {
+        chatHistoryAssemblies.delete(sessionKey);
+        restarted = true;
+        break;
+      }
+      const messages = Array.isArray(page?.messages) ? page.messages : [];
+      pages.push(takeUnseenHistoryMessages(messages, seen));
+      const stalled = page?.hasMore === true
+        && (typeof page.nextOffset !== 'number' || page.nextOffset <= offset);
+      if (!page?.hasMore || stalled) {
+        const raw = pages.reverse().flat();
+        rememberAssembledHistory(sessionKey, pageSessionId || sessionId, pageTotal ?? totalMessages, raw);
+        return raw;
+      }
+      offset = page.nextOffset;
+    }
+    if (restarted) continue;
+    return pages.reverse().flat();
+  }
+  const fallback = await requestDisplayHistoryPage(client, sessionKey, 0);
+  return Array.isArray(fallback?.messages) ? fallback.messages : [];
+}
+
+function loadDisplayChatHistory(client, sessionKey) {
+  const existing = chatHistoryAssemblyInflight.get(sessionKey);
+  if (existing) return existing;
+  const job = assembleDisplayChatHistory(client, sessionKey).finally(() => {
+    if (chatHistoryAssemblyInflight.get(sessionKey) === job) {
+      chatHistoryAssemblyInflight.delete(sessionKey);
+    }
+  });
+  chatHistoryAssemblyInflight.set(sessionKey, job);
+  return job;
+}
+
+function presentChatHistory(rawMessages) {
+  return dedupeForwardHistoryMessages(convertHistoryMessages(rawMessages || []));
+}
+
 async function loadChatHistoryForSession(sessionKey) {
   const key = String(sessionKey || '').trim();
   if (!key) {
@@ -4354,15 +4487,18 @@ async function loadChatHistoryForSession(sessionKey) {
   try {
     const client = ensureGateway();
     await client.waitForConnect();
-    const result = await client.request('chat.history', {
-      sessionKey: key,
-      limit: 500,
-      maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
-    });
+    // 后台预热别的通道仍只取最新一页；正在看的这一路要全量，避免转发刷新把界面又切短。
+    const rawMessages = key === getSessionKey()
+      ? await loadDisplayChatHistory(client, key)
+      : (await client.request('chat.history', {
+        sessionKey: key,
+        limit: CHAT_HISTORY_PAGE_LIMIT,
+        maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
+      }))?.messages;
     return {
       ok: true,
       sessionKey: key,
-      messages: dedupeForwardHistoryMessages(convertHistoryMessages(result?.messages || [])),
+      messages: presentChatHistory(rawMessages),
     };
   } catch (err) {
     return { ok: false, error: formatGatewayError(err) };
@@ -4374,16 +4510,12 @@ async function loadChatHistory() {
     const client = ensureGateway();
     await client.waitForConnect();
     const sessionKey = getSessionKey();
-    const result = await client.request('chat.history', {
-      sessionKey,
-      limit: 500,
-      maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
-    });
+    const rawMessages = await loadDisplayChatHistory(client, sessionKey);
     return {
       ok: true,
       sessionKey,
       sessionKeyChanged: false,
-      messages: dedupeForwardHistoryMessages(convertHistoryMessages(result?.messages || [])),
+      messages: presentChatHistory(rawMessages),
     };
   } catch (err) {
     return { ok: false, error: formatGatewayError(err) };
@@ -5918,6 +6050,31 @@ ipcMain.handle('openclaw:history:read-local', async (event, payload) => {
   if (!getAuthorizedHistoryWindow(event)) return forbiddenSenderResult();
   const messages = await readLocalMessagesFromMainWindow(payload?.sessionKey);
   return { ok: true, messages };
+});
+
+ipcMain.handle('openclaw:archive:list', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return { ok: true, archives: messageArchive.list() };
+});
+
+ipcMain.handle('openclaw:archive:read', (event, sessionKey) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const key = String(sessionKey || '').trim().slice(0, 300);
+  if (!key) return { ok: false, error: '未指定 session' };
+  return { ok: true, messages: messageArchive.read(key) };
+});
+
+ipcMain.handle('openclaw:archive:write', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  const key = String(payload?.sessionKey || '').trim().slice(0, 300);
+  if (!key) return { ok: false, error: '未指定 session' };
+  if (!Array.isArray(payload?.messages)) return { ok: false, error: '归档格式无效' };
+  try {
+    messageArchive.write(key, payload.messages);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message || '写入失败' };
+  }
 });
 
 const HISTORY_HANDOFF_ACTIONS = new Set(['quote', 'forward', 'start-meeting']);

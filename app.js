@@ -407,10 +407,11 @@ let shellMainKey = 'main';
 /** @type {Map<string, string>} */
 const shellSessionKeyByAgent = new Map();
 const STREAM_RENDER_MIN_MS = 48;
-/** 本地归档保留时长（历史窗口与本地存储） */
-const MESSAGE_RETENTION_MS = 60 * 24 * 60 * 60 * 1000;
-const MESSAGE_RETENTION_TAIL_WITHOUT_MS = 300;
 const ENABLE_LOCAL_MESSAGE_SAVE = true;
+/** @type {Map<string, object[]>} */
+const messageArchiveCache = new Map();
+/** @type {Map<string, Promise<void>>} */
+const archiveWriteChain = new Map();
 /** 与 webchat 一致：主界面以 Gateway chat.history 为准 */
 const ENABLE_GATEWAY_HISTORY_SYNC = true;
 const PASSIVE_SESSION_REFRESH_MS = 350;
@@ -2920,20 +2921,10 @@ function backfillMessageSentAtMs(msg) {
   return msg;
 }
 
-function pruneMessagesByRetention(list) {
-  if (!Array.isArray(list) || list.length === 0) return list;
-  const cutoff = Date.now() - MESSAGE_RETENTION_MS;
-  const enriched = list.map((m) => backfillMessageSentAtMs(m));
-  const tailStart = Math.max(0, enriched.length - MESSAGE_RETENTION_TAIL_WITHOUT_MS);
-  return enriched.filter((m, i) => {
-    const ms = m.sentAtMs;
-    if (typeof ms === 'number' && Number.isFinite(ms)) return ms >= cutoff;
-    return i >= tailStart;
-  });
-}
-
 function readRawStoredMessagesForSession(sessionKey) {
   if (!ENABLE_LOCAL_MESSAGE_SAVE) return [];
+  const key = String(sessionKey || '').trim();
+  if (messageArchiveCache.has(key)) return messageArchiveCache.get(key).slice();
   try {
     const storageKey = messagesStorageKey(sessionKey);
     let raw = localStorage.getItem(storageKey);
@@ -2976,13 +2967,41 @@ function archiveRecordFromMessage(msg) {
   };
 }
 
+function mergeArchiveRecords(baseMessages, extraMessages) {
+  const base = Array.isArray(baseMessages) ? baseMessages.slice() : [];
+  for (const msg of Array.isArray(extraMessages) ? extraMessages : []) {
+    if (!msg) continue;
+    if (!isKnownInHistory(msg, base)) base.push(msg);
+  }
+  return finalizeHistoryMessages(base);
+}
+
+function persistMessageArchive(sessionKey, messages) {
+  const snapshot = messages.slice();
+  const prev = archiveWriteChain.get(sessionKey) || Promise.resolve();
+  const next = prev.catch(() => {}).then(async () => {
+    if (!window.qizi?.writeMessageArchive) return;
+    const result = await window.qizi.writeMessageArchive({ sessionKey, messages: snapshot });
+    if (result && result.ok === false) {
+      console.warn('[qizi] 历史归档未能写入磁盘', result.error);
+    }
+  });
+  archiveWriteChain.set(sessionKey, next);
+  return next;
+}
+
 function writeMessageArchive(sessionKey, archive) {
   if (!ENABLE_LOCAL_MESSAGE_SAVE) return false;
   const key = String(sessionKey || '').trim();
   if (!key) return false;
-  const pruned = pruneMessagesByRetention((Array.isArray(archive) ? archive : []).filter(Boolean));
-  const payload = finalizeHistoryMessages(pruned);
-  return writeMessagesToStorageKey(key, payload);
+  let payload = finalizeHistoryMessages((Array.isArray(archive) ? archive : []).filter(Boolean));
+  const existing = messageArchiveCache.get(key);
+  if (existing && existing.length > payload.length) {
+    payload = mergeArchiveRecords(existing, payload);
+  }
+  messageArchiveCache.set(key, payload);
+  void persistMessageArchive(key, payload);
+  return true;
 }
 
 function appendCompletedMessagesToArchive(sessionKey, candidates) {
@@ -3001,7 +3020,7 @@ function appendCompletedMessagesToArchive(sessionKey, candidates) {
   }
   if (!changed) return;
   if (!writeMessageArchive(key, archive)) {
-    console.warn('[qizi] localStorage 空间不足，部分历史未能保存');
+    console.warn('[qizi] 历史归档未能保存');
   }
 }
 
@@ -3023,31 +3042,60 @@ function syncCurrentRunIdFromMessages() {
   currentRunId = max;
 }
 
-function pruneAllStoredMessageSessions() {
+function listLocalStorageArchives() {
+  const out = [];
   try {
-    const keys = [];
     for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (key && (key.startsWith(STORAGE_PREFIX) || key === LEGACY_STORAGE_KEY)) {
-        keys.push(key);
-      }
-    }
-    for (const key of keys) {
-      const raw = localStorage.getItem(key);
+      const storageKey = localStorage.key(i);
+      if (!storageKey || (!storageKey.startsWith(STORAGE_PREFIX) && storageKey !== LEGACY_STORAGE_KEY)) continue;
+      const raw = localStorage.getItem(storageKey);
       if (!raw) continue;
       const parsed = JSON.parse(raw);
       if (!Array.isArray(parsed)) continue;
-      const normalized = parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false }));
-      const sessionKey = key === LEGACY_STORAGE_KEY
+      const sessionKey = storageKey === LEGACY_STORAGE_KEY
         ? DEFAULT_SESSION_KEY
-        : key.slice(STORAGE_PREFIX.length);
-      writeMessageArchive(sessionKey, normalized);
-      if (key === LEGACY_STORAGE_KEY) {
-        localStorage.removeItem(LEGACY_STORAGE_KEY);
-      }
+        : storageKey.slice(STORAGE_PREFIX.length);
+      out.push({
+        storageKey,
+        sessionKey,
+        messages: parsed.map((m) => normalizeUserMessageRecord({ ...m, streaming: false })),
+      });
     }
   } catch (err) {
-    console.warn('[qizi] 清理本地历史归档失败', err);
+    console.warn('[qizi] 读取本地历史归档失败', err);
+  }
+  return out;
+}
+
+async function hydrateMessageArchives() {
+  if (!ENABLE_LOCAL_MESSAGE_SAVE || !window.qizi?.listMessageArchives) return;
+  try {
+    const listed = await window.qizi.listMessageArchives();
+    const diskByKey = new Map();
+    for (const entry of listed?.archives || []) {
+      if (!entry?.sessionKey || !Array.isArray(entry.messages)) continue;
+      diskByKey.set(entry.sessionKey, entry.messages);
+      messageArchiveCache.set(entry.sessionKey, entry.messages);
+    }
+    const migratedKeys = [];
+    for (const local of listLocalStorageArchives()) {
+      const disk = diskByKey.get(local.sessionKey) || [];
+      const merged = mergeArchiveRecords(disk, local.messages);
+      messageArchiveCache.set(local.sessionKey, merged);
+      if (!diskByKey.has(local.sessionKey) || merged.length !== disk.length) {
+        const result = await window.qizi.writeMessageArchive({
+          sessionKey: local.sessionKey,
+          messages: merged,
+        });
+        if (!result?.ok) continue;
+      }
+      migratedKeys.push(local.storageKey);
+    }
+    for (const storageKey of migratedKeys) {
+      localStorage.removeItem(storageKey);
+    }
+  } catch (err) {
+    console.warn('[qizi] 迁移历史归档失败', err);
   }
 }
 
@@ -3920,7 +3968,6 @@ function openMessageHistoryWindow() {
       emoji: agent.emoji || null,
       avatarDataUrl: agent.avatarDataUrl || null,
     },
-    retentionMs: MESSAGE_RETENTION_MS,
   });
 }
 
@@ -4018,23 +4065,7 @@ function setStatus(text, kind) {
 }
 
 function writeMessagesToStorageKey(sessionKey, items) {
-  const storageKey = messagesStorageKey(sessionKey);
-  let slice = Array.isArray(items) ? items : [];
-  while (slice.length > 0) {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(slice));
-      return true;
-    } catch {
-      const pruned = pruneMessagesByRetention(slice);
-      if (pruned.length < slice.length) {
-        slice = pruned;
-        continue;
-      }
-      if (slice.length <= 4) return false;
-      slice = slice.slice(Math.ceil(slice.length / 4));
-    }
-  }
-  return false;
+  return writeMessageArchive(sessionKey, items);
 }
 
 function syncMemoryToArchive(sessionKey = currentSessionKey) {
@@ -7575,7 +7606,7 @@ inputEl.addEventListener('paste', async (e) => {
       const debugInfo = await window.qizi.getDebugMode();
       applyLocalDebugMode(debugInfo?.mode || '');
     }
-    pruneAllStoredMessageSessions();
+    await hydrateMessageArchives();
     chatScopeEpoch += 1;
     currentSessionKey = await window.qizi.getSessionKey();
     currentAgentId = parseAgentIdFromSessionKey(currentSessionKey);

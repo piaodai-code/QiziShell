@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.2-1a",
+  "version": "0.2.2-1b",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -61,6 +61,7 @@
       "update-checker.js",
       "forward-format.js",
       "private-channel.js",
+      "message-archive.js",
       "meeting-forward.js",
       "meeting-*.js",
       "style.css",

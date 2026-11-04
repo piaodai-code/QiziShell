@@ -248,7 +248,7 @@
     container.classList.toggle('is-multiselect', Boolean(multiSelect));
     if (!list.length) {
       container.classList.toggle('messages--no-avatar', showAvatars !== true);
-      container.innerHTML = '<div class="msg-hint">近两个月暂无历史消息</div>';
+      container.innerHTML = '<div class="msg-hint">暂无历史消息</div>';
       return;
     }
     container.innerHTML = '';

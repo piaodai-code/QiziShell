@@ -25,6 +25,9 @@ contextBridge.exposeInMainWorld('qizi', {
   checkConnection: () => ipcRenderer.invoke('openclaw:check'),
   loadHistory: () => ipcRenderer.invoke('openclaw:history'),
   loadHistoryForSession: (payload) => ipcRenderer.invoke('openclaw:history:session', payload),
+  listMessageArchives: () => ipcRenderer.invoke('openclaw:archive:list'),
+  readMessageArchive: (sessionKey) => ipcRenderer.invoke('openclaw:archive:read', sessionKey),
+  writeMessageArchive: (payload) => ipcRenderer.invoke('openclaw:archive:write', payload),
   chatStream: (payload, runId) => ipcRenderer.invoke('openclaw:chat', { ...payload, runId }),
   onChatDelta: (callback) => {
     const handler = (_event, payload) => {
