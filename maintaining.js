@@ -23,6 +23,16 @@
   const requestEl = document.getElementById('hermes-request');
   const imgModal = document.getElementById('img-modal');
   const imgModalImg = document.getElementById('img-modal-img');
+  const composerEl = document.getElementById('composer');
+  const composerBodyEl = document.getElementById('composer-body');
+  const contextMenuEl = document.getElementById('msg-context-menu');
+  const quoteEl = document.getElementById('composer-quote');
+  const quoteTextEl = document.getElementById('composer-quote-text');
+  const quoteRemoveEl = document.getElementById('composer-quote-remove');
+  const multiselectEl = document.getElementById('composer-multiselect');
+  const multiselectHintEl = document.getElementById('multiselect-hint');
+  const multiselectCancelBtn = document.getElementById('multiselect-cancel-btn');
+  const multiselectExportBtn = document.getElementById('multiselect-export-btn');
 
   const messages = [];
   const pendingImages = [];
@@ -34,6 +44,16 @@
   let activityTimer = null;
   let activityStarted = 0;
   let activityDetail = '';
+  let pendingQuote = null;
+  let multiSelectMode = false;
+  let multiSelectedIndices = new Set();
+  let contextMenuIndex = -1;
+  let connectionLabel = { text: 'Connecting…', kind: 'pending' };
+  let statusFlashTimer = null;
+  const QUOTE_START = '【引用开始】';
+  const QUOTE_END = '【引用结束】';
+  const FORWARD_START = '【转发开始】';
+  const FORWARD_END = '【转发结束】';
 
   function escapeHtml(text) {
     return String(text)
@@ -70,9 +90,28 @@
     return escapeHtml(source);
   }
 
-  function setStatus(text, kind) {
+  function paintStatus(text, kind) {
     statusEl.textContent = text;
     statusEl.dataset.kind = kind || '';
+  }
+
+  function setStatus(text, kind) {
+    connectionLabel = { text, kind: kind || '' };
+    clearTimeout(statusFlashTimer);
+    paintStatus(text, kind);
+  }
+
+  function showPending(text) {
+    clearTimeout(statusFlashTimer);
+    paintStatus(text, 'pending');
+  }
+
+  function showTransient(text, kind) {
+    paintStatus(text, kind);
+    clearTimeout(statusFlashTimer);
+    statusFlashTimer = setTimeout(() => {
+      paintStatus(connectionLabel.text, connectionLabel.kind);
+    }, 1600);
   }
 
   function showLogin(error) {
@@ -112,13 +151,154 @@
 
   function avatarHtml(who) {
     if (who === 'me') return '<div class="msg-avatar msg-avatar-me" role="img" aria-label="Me">我</div>';
-    return '<div class="msg-avatar msg-avatar-them" role="img" aria-label="Maintaining">M</div>';
+    return '<div class="msg-avatar msg-avatar-them" role="img" aria-label="Maintaining"><img src="assets/maintaining-avatar.png" alt="Maintaining"></div>';
   }
 
-  function bubbleHtml(message) {
+  function authorLabel(message) {
+    return message?.who === 'me' ? '我' : 'Maintaining';
+  }
+
+  function extractMarkedBlock(body, startMarker, endMarker) {
+    const text = String(body || '');
+    const startIdx = text.indexOf(startMarker);
+    if (startIdx < 0) return null;
+    const contentStart = startIdx + startMarker.length;
+    const endIdx = text.lastIndexOf(endMarker);
+    if (endIdx < contentStart) return null;
+    return {
+      content: text.slice(contentStart, endIdx).trim(),
+      endIdx,
+      endMarkerLength: endMarker.length,
+    };
+  }
+
+  function parseSenderMeta(body) {
+    let label = '未知';
+    let who = 'them';
+    let time = '';
+    const match = String(body || '').match(/Sender \(untrusted metadata\):\s*```json\s*([\s\S]*?)\s*```/);
+    if (match) {
+      try {
+        const meta = JSON.parse(match[1]);
+        const replyTo = meta.replyTo && typeof meta.replyTo === 'object' ? meta.replyTo : null;
+        if (typeof replyTo?.label === 'string' && replyTo.label.trim()) label = replyTo.label.trim();
+        else if (typeof meta.label === 'string' && meta.label.trim()) label = meta.label.trim();
+        if (replyTo?.role === 'user' || meta.role === 'user') who = 'me';
+        else if (replyTo?.role === 'assistant' || meta.role === 'assistant') who = 'them';
+        if (typeof replyTo?.time === 'string' && replyTo.time.trim()) time = replyTo.time.trim();
+        else if (typeof meta.time === 'string' && meta.time.trim()) time = meta.time.trim();
+      } catch {
+        // ignore malformed metadata
+      }
+    }
+    return { authorLabel: label, who, time };
+  }
+
+  function parseStoredQuote(text) {
+    const body = String(text || '');
+    const block = extractMarkedBlock(body, QUOTE_START, QUOTE_END);
+    if (!block) return null;
+    const meta = parseSenderMeta(body);
+    let reply = '';
+    const after = block.endIdx + block.endMarkerLength;
+    const marker = body.indexOf('【回复】', after);
+    if (marker >= 0) reply = body.slice(marker + '【回复】'.length).trim();
+    return {
+      reply,
+      quote: { who: meta.who, authorLabel: meta.authorLabel, text: block.content, time: meta.time },
+    };
+  }
+
+  function parseStoredForward(text) {
+    const body = String(text || '');
+    const block = extractMarkedBlock(body, FORWARD_START, FORWARD_END);
+    if (!block) return null;
+    const meta = parseSenderMeta(body);
+    let comment = '';
+    const after = block.endIdx + block.endMarkerLength;
+    const marker = body.indexOf('【留言】', after);
+    if (marker >= 0) comment = body.slice(marker + '【留言】'.length).trim();
+    return {
+      comment,
+      forward: { who: meta.who, authorLabel: meta.authorLabel, text: block.content, time: meta.time },
+    };
+  }
+
+  function cleanText(text) {
+    return String(text || '')
+      .replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function messageView(message) {
+    if (!message) return { quote: null, forward: null, body: '' };
+    if (message.who === 'me') {
+      const forwarded = parseStoredForward(message.text);
+      if (forwarded?.forward) {
+        return {
+          quote: null,
+          forward: { ...forwarded.forward, text: cleanText(forwarded.forward.text) },
+          body: cleanText(forwarded.comment),
+        };
+      }
+      const quoted = parseStoredQuote(message.text);
+      if (quoted?.quote) {
+        return {
+          quote: { ...quoted.quote, text: cleanText(quoted.quote.text) },
+          forward: null,
+          body: cleanText(quoted.reply),
+        };
+      }
+    }
+    return { quote: null, forward: null, body: cleanText(message.text) };
+  }
+
+  function selectableText(message) {
+    if (!message || message.streaming) return '';
+    const view = messageView(message);
+    const parts = [];
+    if (view.forward?.text) parts.push(`[转发 ${view.forward.authorLabel || '未知'}]\n${view.forward.text}`);
+    else if (view.quote?.text) parts.push(`[引用 ${view.quote.authorLabel || '未知'}]\n${view.quote.text}`);
+    if (view.body) parts.push(view.body);
+    let body = parts.join('\n\n').trim();
+    if (!body && Array.isArray(message.images) && message.images.length) body = '（图片）';
+    if (!body && Array.isArray(message.files) && message.files.length) {
+      body = message.files.map((file) => file.name).filter(Boolean).join('、') || '（附件）';
+    }
+    return body;
+  }
+
+  function isSelectable(message) {
+    return Boolean(selectableText(message));
+  }
+
+  function quoteNeedsToggle(text) {
+    const body = String(text || '');
+    const lines = body.split(/\r?\n/);
+    if (lines.length > 3) return true;
+    return body.length > 120 || lines.some((line) => line.length > 42);
+  }
+
+  function renderQuoteCard(quote, index) {
+    if (!quote?.text) return '';
+    const author = escapeHtml(quote.authorLabel || '未知');
+    const fullText = escapeHtml(quote.text);
+    const needsToggle = quoteNeedsToggle(quote.text);
+    const toggle = needsToggle
+      ? `<button type="button" class="msg-quote-toggle" data-quote-key="${index}" aria-expanded="false" aria-label="展开引用">▼</button>`
+      : '';
+    const collapsed = needsToggle ? ' is-collapsed' : '';
+    return `<div class="msg-quote-card${collapsed}" data-quote-key="${index}"><div class="msg-quote-author">${author}</div><div class="msg-quote-body"><div class="msg-quote-text">${fullText}</div>${toggle}</div></div>`;
+  }
+
+  function bubbleHtml(message, index) {
+    const view = message.streaming ? { quote: null, forward: null, body: String(message.text || '') } : messageView(message);
     const images = Array.isArray(message.images) ? message.images : [];
     const files = Array.isArray(message.files) ? message.files : [];
     let html = '';
+    if (view.forward) html += renderQuoteCard(view.forward, index);
+    else if (view.quote) html += renderQuoteCard(view.quote, index);
     if (images.length) {
       html += `<div class="msg-images">${images.map((url) => `<img class="msg-image" src="${url}" alt="">`).join('')}</div>`;
     }
@@ -129,7 +309,7 @@
         return `<div class="msg-file"><span class="msg-file-name">📄 ${escapeHtml(file.name || 'file')}</span>${sizeHtml}</div>`;
       }).join('')}</div>`;
     }
-    const text = String(message.text || '');
+    const text = view.body;
     if (message.streaming) {
       html += `<pre class="msg-stream-plain">${escapeHtml(text || '…')}</pre>`;
     } else if (text) {
@@ -138,18 +318,30 @@
     return html;
   }
 
+  function selectCheckHtml(index) {
+    if (!multiSelectMode) return '';
+    const message = messages[index];
+    if (!isSelectable(message)) {
+      return '<button type="button" class="msg-select-check" hidden aria-hidden="true" tabindex="-1"></button>';
+    }
+    const selected = multiSelectedIndices.has(index);
+    return `<button type="button" class="msg-select-check${selected ? ' selected' : ''}" data-msg-index="${index}" aria-label="${selected ? '取消选择' : '选择消息'}" aria-pressed="${selected ? 'true' : 'false'}">✓</button>`;
+  }
+
   function nearBottom() {
     return messagesEl.scrollHeight - messagesEl.clientHeight - messagesEl.scrollTop <= 40;
   }
 
-  function render() {
-    const follow = pinned || nearBottom();
+  function render(options = {}) {
+    const prevScroll = messagesEl.scrollTop;
+    const follow = !options.preserveScroll && (pinned || nearBottom());
+    messagesEl.classList.toggle('is-multiselect', multiSelectMode && messages.length > 0);
     if (!messages.length) {
       messagesEl.innerHTML = '<div class="msg-hint">No messages yet</div>';
       return;
     }
     messagesEl.innerHTML = '';
-    for (const message of messages) {
+    messages.forEach((message, index) => {
       const row = document.createElement('div');
       row.className = `msg ${message.who === 'me' ? 'me' : 'them'}`;
       row.innerHTML = `
@@ -157,15 +349,26 @@
         <div class="msg-content">
           <div class="msg-bubble"></div>
           <div class="msg-meta">${escapeHtml(message.time || '')}</div>
-        </div>`;
-      row.querySelector('.msg-bubble').innerHTML = bubbleHtml(message);
+        </div>
+        ${selectCheckHtml(index)}`;
+      row.querySelector('.msg-bubble').innerHTML = bubbleHtml(message, index);
       messagesEl.appendChild(row);
-    }
+    });
     window.QiziCodeBlocks?.decorate(messagesEl);
     if (follow) messagesEl.scrollTop = messagesEl.scrollHeight;
+    else if (options.preserveScroll) messagesEl.scrollTop = prevScroll;
   }
 
   function replaceHistory(list) {
+    if (multiSelectMode) {
+      multiSelectMode = false;
+      multiSelectedIndices = new Set();
+      messagesEl.classList.remove('is-multiselect');
+      composerBodyEl.hidden = false;
+      multiselectEl.hidden = true;
+      hideContextMenu();
+      syncSendButton();
+    }
     messages.splice(0, messages.length, ...(Array.isArray(list) ? list : []));
     render();
   }
@@ -179,7 +382,13 @@
   }
 
   function syncSendButton() {
-    const canSend = connected && (inputEl.value.trim() || pendingImages.length > 0 || pendingFiles.length > 0);
+    const canSend = connected && (
+      inputEl.value.trim()
+      || pendingQuote
+      || selectionCount() > 0
+      || pendingImages.length > 0
+      || pendingFiles.length > 0
+    );
     sendBtn.disabled = busy ? false : !canSend;
     sendBtn.classList.toggle('is-stop', busy);
     sendBtn.title = busy ? 'Stop' : 'Send';
@@ -342,10 +551,15 @@
       }
       return;
     }
-    const text = inputEl.value;
+    const typed = inputEl.value;
+    const quote = pendingQuote;
+    const selection = multiSelectMode && selectionCount() > 0 ? mergedForward(multiSelectedIndices) : null;
     const images = pendingImages.splice(0, pendingImages.length);
     const files = pendingFiles.splice(0, pendingFiles.length);
     renderPending();
+    const outbound = selection?.text
+      ? formatQuote(selection, typed)
+      : (quote ? formatQuote(quote, typed) : typed);
     if (!connected) {
       pendingImages.unshift(...images);
       pendingFiles.unshift(...files);
@@ -353,28 +567,34 @@
       showLogin('Sign in to Hermes first');
       return;
     }
-    if (!text.trim() && images.length === 0 && files.length === 0) return;
+    if (!outbound.trim() && images.length === 0 && files.length === 0) return;
     messages.push({
       who: 'me',
-      text,
+      text: outbound,
       images: images.map((image) => image.dataUrl),
       files: files.map((file) => ({ name: file.name, size: file.size })),
       time: nowLabel(),
     });
     inputEl.value = '';
+    pendingQuote = null;
+    renderComposerQuote();
     busy = true;
     pinned = true;
     startWorking();
     render();
     syncSendButton();
     try {
-      const result = await window.maintaining.send({ text, images, files });
+      const result = await window.maintaining.send({ text: outbound, images, files });
       if (!result?.ok) throw new Error(result?.error || 'Send failed');
+      if (selection) exitMultiSelect();
     } catch (err) {
       messages.pop();
+      inputEl.value = typed;
+      pendingQuote = quote;
       pendingImages.unshift(...images);
       pendingFiles.unshift(...files);
       renderPending();
+      renderComposerQuote();
       render();
       busy = false;
       stopWorking();
@@ -383,8 +603,323 @@
     }
   }
 
+  function quotePreview(text) {
+    const line = String(text || '').split(/\r?\n/).find((entry) => entry.trim()) || '';
+    const trimmed = line.trim();
+    if (trimmed.length <= 96) return trimmed;
+    return `${trimmed.slice(0, 96)}…`;
+  }
+
+  function renderComposerQuote() {
+    if (!pendingQuote?.text) {
+      quoteEl.hidden = true;
+      quoteTextEl.textContent = '';
+    } else {
+      quoteTextEl.textContent = `${pendingQuote.authorLabel}：${quotePreview(pendingQuote.text)}`;
+      quoteEl.hidden = false;
+    }
+    syncSendButton();
+  }
+
+  function formatWrapped(kind, start, end, replyLabel, ref, userText) {
+    const replyTo = {
+      label: ref?.authorLabel || '未知',
+      role: ref?.who === 'me' ? 'user' : 'assistant',
+      time: ref?.time || '',
+    };
+    const meta = { label: replyTo.label, role: replyTo.role, kind, replyTo };
+    const parts = [
+      'Sender (untrusted metadata):',
+      '```json',
+      JSON.stringify(meta),
+      '```',
+      '',
+      start,
+      String(ref?.text || '').trim(),
+      end,
+    ];
+    const tail = String(userText || '').trim();
+    if (tail) parts.push('', replyLabel, tail);
+    return parts.join('\n');
+  }
+
+  function formatQuote(quote, userText) {
+    return formatWrapped('quoted-message', QUOTE_START, QUOTE_END, '【回复】', quote, userText);
+  }
+
+  function quoteMessage(message) {
+    const text = selectableText(message);
+    if (!text) {
+      showTransient('该消息没有可引用的文字', 'error');
+      return;
+    }
+    pendingQuote = {
+      who: message.who,
+      authorLabel: authorLabel(message),
+      text,
+      time: message.time || '',
+    };
+    if (multiSelectMode) exitMultiSelect();
+    renderComposerQuote();
+    inputEl.focus();
+  }
+
+  async function copyText(text) {
+    const value = String(text ?? '');
+    if (!value) return false;
+    try {
+      await navigator.clipboard.writeText(value);
+      return true;
+    } catch {
+      try {
+        const area = document.createElement('textarea');
+        area.value = value;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(area);
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  function copyPayload(message) {
+    if (!message || message.streaming) return '';
+    const parts = [];
+    const text = selectableText(message);
+    if (text) parts.push(text);
+    const images = Array.isArray(message.images) ? message.images : [];
+    if (images.length) parts.push(images.length === 1 ? '[图片]' : `[图片 x${images.length}]`);
+    const files = Array.isArray(message.files) ? message.files : [];
+    if (files.length) parts.push(`[附件] ${files.map((file) => file.name || '未命名文件').join('、')}`);
+    return parts.join('\n\n').trim();
+  }
+
+  async function copyMessage(index) {
+    const text = copyPayload(messages[index]);
+    hideContextMenu();
+    if (!text) {
+      showTransient('该消息没有可复制的内容', 'error');
+      return;
+    }
+    const ok = await copyText(text);
+    showTransient(ok ? '已复制' : '复制失败', ok ? 'ok' : 'error');
+  }
+
+  function exportEntry(message) {
+    const view = messageView(message);
+    const entry = {
+      author: authorLabel(message),
+      time: message.time || '',
+      text: String(view.body || '').replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n').trim(),
+    };
+    if (view.forward?.text) {
+      entry.forward = { authorLabel: view.forward.authorLabel || '未知', text: view.forward.text };
+    } else if (view.quote?.text) {
+      entry.quote = { authorLabel: view.quote.authorLabel || '未知', text: view.quote.text };
+    }
+    if (!entry.text && !entry.quote && !entry.forward) {
+      const fallback = selectableText(message);
+      if (fallback) entry.text = fallback;
+    }
+    return entry;
+  }
+
+  async function exportEntries(entries, { exitOnSuccess = false } = {}) {
+    const list = (entries || []).filter((entry) => entry.text || entry.quote?.text || entry.forward?.text);
+    if (!list.length) {
+      showTransient('没有可保存的文字', 'error');
+      return;
+    }
+    if (!window.maintaining?.exportMessagesWord) {
+      showTransient('保存功能不可用', 'error');
+      return;
+    }
+    showPending('正在保存…');
+    try {
+      const result = await window.maintaining.exportMessagesWord(list);
+      if (result?.cancelled) {
+        paintStatus(connectionLabel.text, connectionLabel.kind);
+        return;
+      }
+      if (!result?.ok) {
+        showTransient(result?.error || '保存失败', 'error');
+        return;
+      }
+      showTransient('已保存', 'ok');
+      if (exitOnSuccess) exitMultiSelect();
+    } catch (err) {
+      showTransient(err.message || '保存失败', 'error');
+    }
+  }
+
+  async function exportMessage(index) {
+    const message = messages[index];
+    hideContextMenu();
+    if (!isSelectable(message)) {
+      showTransient('该消息没有可保存的文字', 'error');
+      return;
+    }
+    await exportEntries([exportEntry(message)]);
+  }
+
+  function selectionCount() {
+    let count = 0;
+    for (const index of multiSelectedIndices) {
+      if (index >= 0 && index < messages.length && isSelectable(messages[index])) count += 1;
+    }
+    return count;
+  }
+
+  function updateMultiSelectBar() {
+    multiSelectedIndices = new Set([...multiSelectedIndices].filter((index) => (
+      index >= 0 && index < messages.length && isSelectable(messages[index])
+    )));
+    const count = multiSelectedIndices.size;
+    if (count > 0) {
+      const preview = quotePreview(mergedForward(multiSelectedIndices).text);
+      multiselectHintEl.textContent = preview ? `已选 ${count} 条：${preview}` : `已选 ${count} 条`;
+    } else {
+      multiselectHintEl.textContent = '请选择消息';
+    }
+    multiselectExportBtn.disabled = count === 0;
+    multiselectExportBtn.setAttribute('aria-disabled', count > 0 ? 'false' : 'true');
+    syncSendButton();
+  }
+
+  function hideContextMenu() {
+    contextMenuEl.hidden = true;
+    contextMenuIndex = -1;
+  }
+
+  function showContextMenu(x, y, index) {
+    contextMenuIndex = index;
+    contextMenuEl.hidden = false;
+    const rect = contextMenuEl.getBoundingClientRect();
+    const maxX = window.innerWidth - rect.width - 8;
+    const maxY = window.innerHeight - rect.height - 8;
+    contextMenuEl.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
+    contextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
+  }
+
+  function setMultiSelectMode(enabled) {
+    multiSelectMode = enabled;
+    if (!enabled) multiSelectedIndices = new Set();
+    if (enabled) {
+      pendingQuote = null;
+      quoteEl.hidden = true;
+      quoteTextEl.textContent = '';
+    }
+    messagesEl.classList.toggle('is-multiselect', enabled);
+    composerBodyEl.hidden = false;
+    multiselectEl.hidden = !enabled;
+    hideContextMenu();
+    updateMultiSelectBar();
+    render({ preserveScroll: true });
+    if (enabled) inputEl.focus();
+  }
+
+  function enterMultiSelect(index) {
+    multiSelectedIndices = new Set();
+    if (index >= 0 && isSelectable(messages[index])) multiSelectedIndices.add(index);
+    setMultiSelectMode(true);
+  }
+
+  function exitMultiSelect() {
+    setMultiSelectMode(false);
+  }
+
+  function toggleSelect(index) {
+    if (!multiSelectMode) return;
+    if (index < 0 || index >= messages.length || !isSelectable(messages[index])) return;
+    if (multiSelectedIndices.has(index)) multiSelectedIndices.delete(index);
+    else multiSelectedIndices.add(index);
+    updateMultiSelectBar();
+    const row = messagesEl.querySelectorAll('.msg')[index];
+    const check = row?.querySelector('.msg-select-check');
+    if (!check) {
+      render({ preserveScroll: true });
+      return;
+    }
+    const selected = multiSelectedIndices.has(index);
+    check.classList.toggle('selected', selected);
+    check.setAttribute('aria-label', selected ? '取消选择' : '选择消息');
+    check.setAttribute('aria-pressed', selected ? 'true' : 'false');
+  }
+
+  function toggleQuoteCard(card, button) {
+    const expanding = card.classList.contains('is-collapsed');
+    if (expanding) {
+      card.classList.remove('is-collapsed');
+      button.textContent = '▲';
+      button.setAttribute('aria-expanded', 'true');
+      button.setAttribute('aria-label', '收起引用');
+    } else {
+      card.classList.add('is-collapsed');
+      button.textContent = '▼';
+      button.setAttribute('aria-expanded', 'false');
+      button.setAttribute('aria-label', '展开引用');
+    }
+  }
+
+  function mergedForward(indices) {
+    const blocks = [];
+    let earliest = '';
+    for (const index of [...indices].sort((a, b) => a - b)) {
+      const message = messages[index];
+      if (!isSelectable(message)) continue;
+      const stamp = message.time ? ` · ${message.time}` : '';
+      blocks.push(`【${authorLabel(message)}${stamp}】\n${selectableText(message)}`);
+      if (!earliest && message.time) earliest = message.time;
+    }
+    return {
+      who: 'them',
+      authorLabel: `已选 ${blocks.length} 条消息`,
+      text: blocks.join('\n\n'),
+      time: earliest,
+    };
+  }
+
+  function bindComposerResize() {
+    const handle = document.getElementById('composer-resize');
+    if (!handle || !composerEl) return;
+    let startY = 0;
+    let startH = 0;
+    handle.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      event.preventDefault();
+      startY = event.clientY;
+      startH = composerEl.offsetHeight;
+      document.addEventListener('mousemove', onDrag);
+      document.addEventListener('mouseup', onUp);
+    });
+    function applyHeight(clientY) {
+      const next = Math.max(120, Math.min(startH + (startY - clientY), window.innerHeight * 0.6));
+      composerEl.classList.add('composer--resized');
+      composerEl.style.height = `${next}px`;
+      inputEl.style.height = '';
+      inputEl.style.maxHeight = '';
+    }
+    function onDrag(event) {
+      applyHeight(event.clientY);
+    }
+    function onUp(event) {
+      if (typeof event.clientY === 'number') applyHeight(event.clientY);
+      document.removeEventListener('mousemove', onDrag);
+      document.removeEventListener('mouseup', onUp);
+    }
+  }
+
+  bindComposerResize();
+
   messagesEl.addEventListener('scroll', () => {
     pinned = nearBottom();
+    hideContextMenu();
   });
 
   inputEl.addEventListener('input', syncSendButton);
@@ -486,6 +1021,7 @@
   });
   document.addEventListener('click', (event) => {
     if (!attachPopup.hidden && !event.target.closest('.attach-picker-wrap')) hideAttach();
+    if (!contextMenuEl.hidden && !event.target.closest('#msg-context-menu')) hideContextMenu();
   });
   requestEl.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-choice]');
@@ -494,18 +1030,95 @@
     const input = document.getElementById('hermes-request-input');
     answerRequest(choice === '__text__' ? '' : choice, input?.value || '');
   });
+  messagesEl.addEventListener('contextmenu', (event) => {
+    const row = event.target.closest('.msg');
+    if (!row || !messagesEl.contains(row)) return;
+    event.preventDefault();
+    const index = [...messagesEl.querySelectorAll('.msg')].indexOf(row);
+    if (index < 0 || index >= messages.length) return;
+    if (messages[index].streaming) {
+      showTransient('生成中，暂不可操作', 'error');
+      return;
+    }
+    showContextMenu(event.clientX, event.clientY, index);
+  });
   messagesEl.addEventListener('click', (event) => {
+    const selectBtn = event.target.closest('.msg-select-check');
+    if (selectBtn && multiSelectMode) {
+      event.preventDefault();
+      const index = Number(selectBtn.dataset.msgIndex);
+      if (Number.isFinite(index)) toggleSelect(index);
+      return;
+    }
+    const toggleBtn = event.target.closest('.msg-quote-toggle');
+    if (toggleBtn) {
+      event.preventDefault();
+      toggleQuoteCard(toggleBtn.closest('.msg-quote-card'), toggleBtn);
+      return;
+    }
+    if (multiSelectMode) {
+      const row = event.target.closest('.msg');
+      if (row && !event.target.closest('.msg-quote-toggle, a, .msg-code-btn, .msg-bubble img')) {
+        const index = [...messagesEl.querySelectorAll('.msg')].indexOf(row);
+        if (index >= 0) {
+          event.preventDefault();
+          toggleSelect(index);
+          return;
+        }
+      }
+    }
     const image = event.target.closest('.msg-image');
     if (!image) return;
     imgModalImg.src = image.src;
     imgModal.hidden = false;
+  });
+  contextMenuEl.addEventListener('click', (event) => {
+    const item = event.target.closest('[data-action]');
+    if (!item) return;
+    const index = contextMenuIndex;
+    const message = messages[index];
+    const action = item.dataset.action;
+    if (action === 'copy') {
+      void copyMessage(index);
+      return;
+    }
+    if (action === 'quote') {
+      hideContextMenu();
+      if (message) quoteMessage(message);
+      return;
+    }
+    if (action === 'multiselect') {
+      enterMultiSelect(index);
+      return;
+    }
+    if (action === 'export') void exportMessage(index);
+  });
+  quoteRemoveEl.addEventListener('click', () => {
+    pendingQuote = null;
+    renderComposerQuote();
+    inputEl.focus();
+  });
+  multiselectCancelBtn.addEventListener('click', exitMultiSelect);
+  multiselectExportBtn.addEventListener('click', () => {
+    if (!selectionCount() || multiselectExportBtn.disabled) return;
+    const entries = [...multiSelectedIndices].sort((a, b) => a - b).map((index) => exportEntry(messages[index]));
+    void exportEntries(entries, { exitOnSuccess: true });
   });
   imgModal.addEventListener('click', () => {
     imgModal.hidden = true;
     imgModalImg.src = '';
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !imgModal.hidden) {
+    if (event.key !== 'Escape') return;
+    if (multiSelectMode) {
+      exitMultiSelect();
+      return;
+    }
+    if (!contextMenuEl.hidden) {
+      hideContextMenu();
+      return;
+    }
+    if (!imgModal.hidden) {
       imgModal.hidden = true;
       imgModalImg.src = '';
     }

@@ -6274,7 +6274,7 @@ ipcMain.handle('openclaw:pickImages', async (event) => {
 });
 
 ipcMain.handle('openclaw:export:word', async (event, payload) => {
-  const win = getAuthorizedMainWindow(event) || getAuthorizedHistoryWindow(event);
+  const win = getAuthorizedMainWindow(event) || getAuthorizedHistoryWindow(event) || getAuthorizedMaintainingWindow(event);
   if (!win) return forbiddenSenderResult();
   const entries = Array.isArray(payload?.entries) ? payload.entries : [];
   if (!entries.length) return { ok: false, error: '没有可导出的消息' };

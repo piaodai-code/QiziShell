@@ -11,7 +11,17 @@
   <div class="app">
     <header class="titlebar">
       <div class="titlebar-left"></div>
-      <div class="maintaining-title">Maintaining</div>
+      <div class="titlebar-center">
+        <div class="titlebar-identity">
+          <div class="titlebar-agent-btn maintaining-avatar" role="img" aria-label="Maintaining">
+            <span class="titlebar-agent-avatar">
+              <span class="agent-avatar agent-avatar-titlebar">
+                <img src="assets/maintaining-avatar.png" alt="Maintaining">
+              </span>
+            </span>
+          </div>
+        </div>
+      </div>
       <div class="titlebar-right">
         <span class="status-pill" id="status" data-kind="pending">Connecting…</span>
         <button type="button" class="icon-btn" id="menu-btn" title="Sign in" aria-label="Sign in">⋯</button>
@@ -23,12 +33,14 @@
       </main>
     </section>
     <footer class="composer" id="composer">
+      <div class="composer-resize" id="composer-resize"></div>
       <div class="hermes-activity" id="hermes-activity" hidden>
         <span class="hermes-activity-main">Working</span>
         <span class="hermes-activity-time" id="hermes-activity-time"></span>
         <div class="hermes-activity-detail" id="hermes-activity-detail" hidden></div>
       </div>
       <div class="hermes-request" id="hermes-request" hidden></div>
+      <div class="composer-body" id="composer-body">
       <div class="composer-tools">
         <div class="composer-tools-left">
           <div class="attach-picker-wrap">
@@ -53,6 +65,17 @@
         </div>
       </div>
       <div class="composer-pending" id="composer-pending" hidden></div>
+      <div class="composer-quote" id="composer-quote" hidden>
+        <button type="button" class="composer-quote-remove" id="composer-quote-remove" title="移除引用" aria-label="移除引用">×</button>
+        <span class="composer-quote-text" id="composer-quote-text"></span>
+      </div>
+      <div class="composer-multiselect" id="composer-multiselect" hidden>
+        <span class="composer-multiselect-hint" id="multiselect-hint">请选择消息</span>
+        <div class="composer-multiselect-actions">
+          <button type="button" class="multiselect-btn" id="multiselect-cancel-btn">取消</button>
+          <button type="button" class="multiselect-btn" id="multiselect-export-btn" disabled>保存</button>
+        </div>
+      </div>
       <div class="composer-input-wrap">
         <textarea id="input" placeholder="Message" rows="1"></textarea>
         <button type="button" class="composer-send-btn" id="send-btn" title="Send" aria-label="Send" disabled>
@@ -63,6 +86,7 @@
             <rect fill="currentColor" x="4" y="4" width="8" height="8" rx="1.2"/>
           </svg>
         </button>
+      </div>
       </div>
     </footer>
   </div>
@@ -95,6 +119,24 @@
   <div class="img-modal" id="img-modal" hidden role="dialog" aria-modal="true">
     <button class="img-modal-close" type="button" title="Close">×</button>
     <img class="img-modal-img" id="img-modal-img" alt="">
+  </div>
+  <div class="msg-context-menu" id="msg-context-menu" hidden role="menu">
+    <button type="button" class="msg-context-item" data-action="copy" role="menuitem">
+      <img src="assets/icons/copy.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>复制</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="quote" role="menuitem">
+      <img src="assets/icons/quotation.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>引用</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="multiselect" role="menuitem">
+      <img src="assets/icons/selection.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>多选</span>
+    </button>
+    <button type="button" class="msg-context-item" data-action="export" role="menuitem">
+      <img src="assets/icons/word.png" alt="" class="msg-context-icon" aria-hidden="true">
+      <span>保存</span>
+    </button>
   </div>
   <script src="marked.min.js"></script>
   <script src="dompurify.min.js"></script>

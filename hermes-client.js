@@ -1,7 +1,12 @@
 const http = require('http');
 const https = require('https');
 const { EventEmitter } = require('events');
+const WebSocket = require('ws');
 const { rejectUnauthorizedForUrl } = require('./tls-policy');
+
+// Node's built-in WebSocket rejects a decompressed frame above 4 MB and drops
+// the socket. A long Hermes session.resume is larger than that; web chat is not.
+const SOCKET_MAX_PAYLOAD = 128 * 1024 * 1024;
 
 const RPC_TIMEOUT_MS = 90 * 1000;
 const HTTP_TIMEOUT_MS = 20 * 1000;
@@ -323,9 +328,6 @@ class HermesClient extends EventEmitter {
   }
 
   openSocket(wsUrl) {
-    if (typeof WebSocket !== 'function') {
-      return Promise.reject(new Error('WebSocket is not available'));
-    }
     const generation = ++this.generation;
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -337,7 +339,11 @@ class HermesClient extends EventEmitter {
         reject(err instanceof Error ? err : new Error(String(err || 'Connection failed')));
       };
       this.socketReject = fail;
-      const ws = new WebSocket(wsUrl);
+      const ws = new WebSocket(wsUrl, {
+        maxPayload: SOCKET_MAX_PAYLOAD,
+        handshakeTimeout: 15_000,
+        rejectUnauthorized: rejectUnauthorizedForUrl(wsUrl),
+      });
       this.ws = ws;
       const readyTimer = setTimeout(() => {
         if (!ready) fail(new Error('Hermes chat channel did not become ready'));
@@ -401,7 +407,13 @@ class HermesClient extends EventEmitter {
     if (stored) {
       try {
         opened = await this.rpc('session.resume', { session_id: stored }, RPC_TIMEOUT_MS);
-      } catch {
+      } catch (err) {
+        if (!this.ws || this.ws.readyState !== 1) {
+          const detail = err?.message && err.message !== 'Disconnected' && err.message !== 'Not connected'
+            ? err.message
+            : 'Chat connection closed while loading the session';
+          throw new Error(detail);
+        }
         opened = null;
       }
     }

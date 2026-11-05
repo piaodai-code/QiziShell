@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('maintaining', {
   captureScreenshot: () => ipcRenderer.invoke('hermes:screenshot'),
   pickImages: () => ipcRenderer.invoke('hermes:pick-images'),
   pickFiles: () => ipcRenderer.invoke('hermes:pick-files'),
+  exportMessagesWord: (entries) => ipcRenderer.invoke('openclaw:export:word', { entries }),
   onStatus: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('hermes:status', handler);

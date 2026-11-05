@@ -1,14 +1,8 @@
-.maintaining-title {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  height: var(--titlebar-height);
-  transform: translateX(-50%);
-  display: flex;
-  align-items: center;
-  font-size: 13px;
-  font-weight: 600;
-  pointer-events: none;
+.maintaining-avatar {
+  cursor: default;
+}
+.maintaining-avatar:hover {
+  box-shadow: 0 3px 14px rgba(0, 0, 0, 0.16);
 }
 .hermes-activity {
   display: flex;
@@ -160,4 +154,26 @@
 .hermes-login-submit:disabled {
   opacity: 0.55;
   cursor: default;
+}
+.hermes-activity,
+.hermes-request,
+.composer-quote,
+.composer-pending,
+.composer-multiselect {
+  flex-shrink: 0;
+}
+#composer .composer-multiselect {
+  border-top: none;
+  padding: 8px 12px 0 16px;
+  gap: 8px;
+}
+#composer .composer-multiselect-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#composer .multiselect-btn {
+  padding: 4px 12px;
 }
