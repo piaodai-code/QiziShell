@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('qizi', {
   },
   openHistory: (context) => ipcRenderer.invoke('openclaw:history:open', context),
   openCopyEdit: (payload) => ipcRenderer.invoke('copy-edit:open', payload),
+  openAgentFiles: (payload) => ipcRenderer.invoke('agent-files:open', payload),
   listCopyEditDrafts: () => ipcRenderer.invoke('copy-edit:drafts:list'),
   deleteCopyEditDraft: (id) => ipcRenderer.invoke('copy-edit:drafts:delete', id),
   openCopyEditDraft: (id) => ipcRenderer.invoke('copy-edit:drafts:open', id),

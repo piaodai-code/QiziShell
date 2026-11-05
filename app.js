@@ -7441,8 +7441,9 @@ function insertEmojiAtCursor(emoji) {
 }
 
 function positionEmojiPicker() {
-  if (!emojiBtn || !emojiPickerEl || emojiPickerEl.hidden) return;
-  const rect = emojiBtn.getBoundingClientRect();
+  const anchor = (emojiBtn && !emojiBtn.closest('[hidden]')) ? emojiBtn : attachPickerBtn;
+  if (!anchor || !emojiPickerEl || emojiPickerEl.hidden) return;
+  const rect = anchor.getBoundingClientRect();
   const panelW = emojiPickerEl.offsetWidth;
   const panelH = emojiPickerEl.offsetHeight;
   const gap = 6;
@@ -7490,7 +7491,20 @@ buildEmojiPicker();
 if (emojiBtn) {
   emojiBtn.addEventListener('click', (e) => {
     e.stopPropagation();
+    hideAttachPopup();
     toggleEmojiPicker();
+  });
+}
+
+const agentFilesBtn = document.getElementById('agent-files-btn');
+if (agentFilesBtn) {
+  agentFilesBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const agent = getCurrentAgentInfo();
+    void window.qizi.openAgentFiles({
+      agentId: agent.id || currentAgentId,
+      agentLabel: agent.label || '',
+    });
   });
 }
 
@@ -7747,7 +7761,7 @@ document.addEventListener('click', (e) => {
     if (!e.target.closest('.attach-picker-wrap')) hideAttachPopup();
   }
   if (emojiPickerEl && !emojiPickerEl.hidden) {
-    if (!e.target.closest('.emoji-picker-wrap') && !e.target.closest('.emoji-picker')) {
+    if (!e.target.closest('#emoji-btn') && !e.target.closest('.emoji-picker')) {
       hideEmojiPicker();
     }
   }

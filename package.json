@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.2-1b",
+  "version": "0.2.3",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -73,6 +73,12 @@
       "tool-stream.js",
       "chat-timeline.js",
       "code-block.js",
+      "agent-files.js",
+      "agent-files.html",
+      "agent-files.css",
+      "agent-files-view.js",
+      "agent-files-preload.js",
+      "vendor/codemirror-markdown.js",
       "marked.min.js",
       "dompurify.min.js",
       "assets/icons/**",
@@ -83,8 +89,14 @@
     ]
   },
   "devDependencies": {
+    "@codemirror/commands": "^6.11.1",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.15",
+    "codemirror": "^6.0.2",
     "electron": "^42.3.3",
-    "electron-builder": "^26.8.1"
+    "electron-builder": "^26.8.1",
+    "esbuild": "^0.28.2"
   },
   "dependencies": {
     "dompurify": "^3.4.9",

@@ -31,6 +31,11 @@ const {
 } = require('./meeting-preset-doc');
 const { prepareReadingReportPath, isMissingGatewayMethod } = require('./meeting-report-file');
 const {
+  listAgentFileCatalog,
+  readAgentFile,
+  saveAgentFile,
+} = require('./agent-files');
+const {
   findModeratorFinalMessage,
   buildMeetingForwardPayload,
   isMeetingClosingStub,
@@ -414,6 +419,8 @@ let meetingHelpWindow = null;
 let historyWindow = null;
 let historyWindowContext = null;
 let copyEditWindow = null;
+let agentFilesWindow = null;
+let agentFilesContext = null;
 let copyEditPayload = null;
 let updateWindow = null;
 let pendingUpdateInfo = null;
@@ -1643,6 +1650,216 @@ function openCopyEditWindow(payload) {
     copyEditWindow = null;
   });
   return { ok: true };
+}
+
+const AGENT_FILES_MIN_HEIGHT = 560;
+const AGENT_FILES_EDITOR_MIN = 320;
+
+let agentFilesEditorOpen = false;
+let agentFilesPreviewWidth = 0;
+let agentFilesPreviewX = 0;
+let agentFilesWidthTimer = null;
+let agentFilesAnimateToken = 0;
+let agentFilesAnimateResolve = null;
+
+function agentFilesWorkArea(bounds) {
+  const anchor = bounds
+    || (agentFilesWindow && !agentFilesWindow.isDestroyed() ? agentFilesWindow.getBounds() : null)
+    || (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null);
+  const display = anchor ? screen.getDisplayMatching(anchor) : screen.getPrimaryDisplay();
+  return display.workArea;
+}
+
+function agentFilesHalfScreenBounds() {
+  const area = agentFilesWorkArea();
+  return {
+    x: area.x,
+    y: area.y,
+    width: Math.max(1, Math.round(area.width / 2)),
+    height: Math.max(AGENT_FILES_MIN_HEIGHT, area.height),
+  };
+}
+
+function applyAgentFilesSizeLimits() {
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+  const area = agentFilesWorkArea();
+  const half = Math.max(1, Math.round(area.width / 2));
+  const maxHeight = Math.max(AGENT_FILES_MIN_HEIGHT, area.height);
+  if (agentFilesEditorOpen) {
+    const minWidth = Math.min(area.width, agentFilesPreviewWidth + AGENT_FILES_EDITOR_MIN);
+    agentFilesWindow.setMaximumSize(area.width, maxHeight);
+    agentFilesWindow.setMinimumSize(minWidth, AGENT_FILES_MIN_HEIGHT);
+    return;
+  }
+  agentFilesWindow.setMinimumSize(Math.min(640, half), AGENT_FILES_MIN_HEIGHT);
+  agentFilesWindow.setMaximumSize(half, maxHeight);
+}
+
+function stopAgentFilesAnimation() {
+  agentFilesAnimateToken += 1;
+  if (agentFilesWidthTimer) {
+    clearTimeout(agentFilesWidthTimer);
+    agentFilesWidthTimer = null;
+  }
+  const resolve = agentFilesAnimateResolve;
+  agentFilesAnimateResolve = null;
+  if (resolve) resolve(false);
+}
+
+function animateAgentFilesBounds(target) {
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return Promise.resolve(false);
+  if (agentFilesWidthTimer) {
+    clearTimeout(agentFilesWidthTimer);
+    agentFilesWidthTimer = null;
+  }
+  const token = ++agentFilesAnimateToken;
+  const previous = agentFilesAnimateResolve;
+  const start = agentFilesWindow.getBounds();
+  const fromX = start.x;
+  const fromWidth = start.width;
+  const began = Date.now();
+  const duration = 220;
+  return new Promise((resolve) => {
+    agentFilesAnimateResolve = resolve;
+    if (previous) previous(false);
+    const step = () => {
+      if (token !== agentFilesAnimateToken) return;
+      if (!agentFilesWindow || agentFilesWindow.isDestroyed()) {
+        agentFilesWidthTimer = null;
+        agentFilesAnimateResolve = null;
+        resolve(false);
+        return;
+      }
+      const t = Math.min(1, (Date.now() - began) / duration);
+      const eased = 1 - ((1 - t) ** 3);
+      const current = agentFilesWindow.getBounds();
+      agentFilesWindow.setBounds({
+        x: Math.round(fromX + (target.x - fromX) * eased),
+        y: current.y,
+        width: Math.max(1, Math.round(fromWidth + (target.width - fromWidth) * eased)),
+        height: current.height,
+      });
+      if (t < 1) {
+        agentFilesWidthTimer = setTimeout(step, 16);
+        return;
+      }
+      agentFilesWidthTimer = null;
+      agentFilesAnimateResolve = null;
+      resolve(true);
+    };
+    step();
+  });
+}
+
+function resetAgentFilesWindowBounds() {
+  stopAgentFilesAnimation();
+  agentFilesEditorOpen = false;
+  agentFilesPreviewWidth = 0;
+  agentFilesPreviewX = 0;
+  const bounds = agentFilesHalfScreenBounds();
+  applyAgentFilesSizeLimits();
+  if (agentFilesWindow && !agentFilesWindow.isDestroyed()) agentFilesWindow.setBounds(bounds);
+  return bounds;
+}
+
+async function setAgentFilesEditorPane(open) {
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return { ok: false };
+  if (agentFilesEditorOpen === open) return { ok: true };
+  const current = agentFilesWindow.getBounds();
+  const area = agentFilesWorkArea(current);
+  const maxHeight = Math.max(AGENT_FILES_MIN_HEIGHT, area.height);
+  if (open) {
+    agentFilesPreviewWidth = current.width;
+    agentFilesPreviewX = current.x;
+    agentFilesEditorOpen = true;
+    agentFilesWindow.setMaximumSize(area.width, maxHeight);
+    const right = area.x + area.width;
+    let width = Math.min(area.width, right - current.x);
+    let x = current.x;
+    if (width < current.width + AGENT_FILES_EDITOR_MIN) {
+      width = Math.min(area.width, current.width + AGENT_FILES_EDITOR_MIN);
+      x = Math.max(area.x, right - width);
+    }
+    const finished = await animateAgentFilesBounds({ x, width });
+    if (!finished) return { ok: true };
+    applyAgentFilesSizeLimits();
+    return { ok: true };
+  }
+  const half = Math.max(1, Math.round(area.width / 2));
+  agentFilesWindow.setMinimumSize(Math.min(640, half), AGENT_FILES_MIN_HEIGHT);
+  const width = agentFilesPreviewWidth || half;
+  const x = Number.isFinite(agentFilesPreviewX) ? agentFilesPreviewX : current.x;
+  const finished = await animateAgentFilesBounds({ x, width });
+  if (!finished) return { ok: true };
+  agentFilesEditorOpen = false;
+  agentFilesPreviewWidth = 0;
+  agentFilesPreviewX = 0;
+  applyAgentFilesSizeLimits();
+  return { ok: true };
+}
+
+function getAuthorizedAgentFilesWindow(event) {
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return null;
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (win !== agentFilesWindow) return null;
+  return agentFilesWindow;
+}
+
+function openAgentFilesWindow(payload) {
+  const agentId = String(payload?.agentId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(agentId)) return { ok: false, error: '未指定 Agent' };
+  const agentLabel = String(payload?.agentLabel || agentId).trim().slice(0, 80) || agentId;
+  agentFilesContext = { agentId, agentLabel };
+  const title = `${agentLabel} · 配置与技能`;
+  if (agentFilesWindow && !agentFilesWindow.isDestroyed()) {
+    agentFilesWindow.setTitle(title);
+    resetAgentFilesWindowBounds();
+    safeSendTo(agentFilesWindow.webContents, 'agent-files:reload');
+    agentFilesWindow.show();
+    agentFilesWindow.focus();
+    return { ok: true };
+  }
+  const bounds = agentFilesHalfScreenBounds();
+  const options = {
+    ...bounds,
+    minWidth: Math.min(640, bounds.width),
+    minHeight: AGENT_FILES_MIN_HEIGHT,
+    maxWidth: bounds.width,
+    maxHeight: bounds.height,
+    resizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    title,
+    backgroundColor: '#f2f2f2',
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'agent-files-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  };
+  agentFilesWindow = new BrowserWindow(options);
+  agentFilesWindow.setMenu(null);
+  applyAgentFilesSizeLimits();
+  agentFilesWindow.on('move', () => {
+    if (agentFilesWidthTimer) return;
+    applyAgentFilesSizeLimits();
+  });
+  agentFilesWindow.once('ready-to-show', () => {
+    agentFilesWindow.show();
+    agentFilesWindow.focus();
+  });
+  agentFilesWindow.loadFile(path.join(__dirname, 'agent-files.html'));
+  agentFilesWindow.on('closed', () => {
+    agentFilesWindow = null;
+  });
+  return { ok: true };
+}
+
+async function agentFilesGateway() {
+  const client = ensureGateway();
+  await client.waitForConnect();
+  return (method, params) => client.request(method, params);
 }
 
 function openMeetingHelp() {
@@ -6155,6 +6372,57 @@ ipcMain.handle('copy-edit:open', (event, payload) => {
   const clean = sanitizeCopyEditPayload(payload);
   if (!clean) return { ok: false, error: '没有可编辑的文字' };
   return openCopyEditWindow(clean);
+});
+
+ipcMain.handle('agent-files:open', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return openAgentFilesWindow(payload || {});
+});
+
+ipcMain.handle('agent-files:context', (event) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
+  return agentFilesContext || { agentId: '', agentLabel: '' };
+});
+
+ipcMain.handle('agent-files:editor-pane', async (event, open) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
+  return setAgentFilesEditorPane(open === true);
+});
+
+ipcMain.handle('agent-files:list', async (event) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
+  try {
+    const request = await agentFilesGateway();
+    return await listAgentFileCatalog(request, agentFilesContext?.agentId);
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err), memories: [], skills: { global: [], private: [] } };
+  }
+});
+
+ipcMain.handle('agent-files:read', async (event, file) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
+  try {
+    const request = await agentFilesGateway();
+    return await readAgentFile(request, { ...(file || {}), agentId: agentFilesContext?.agentId });
+  } catch (err) {
+    if (err?.clientError) return { ok: false, error: err.message };
+    return { ok: false, error: formatGatewayError(err) };
+  }
+});
+
+ipcMain.handle('agent-files:save', async (event, payload) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
+  try {
+    const request = await agentFilesGateway();
+    return await saveAgentFile(
+      request,
+      { ...(payload || {}), agentId: agentFilesContext?.agentId },
+      path.join(app.getPath('userData'), 'agent-file-backups'),
+    );
+  } catch (err) {
+    if (err?.clientError) return { ok: false, error: err.message };
+    return { ok: false, error: formatGatewayError(err) };
+  }
 });
 
 ipcMain.handle('copy-edit:open-from-history', (event, payload) => {
