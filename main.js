@@ -420,6 +420,10 @@ let historyWindow = null;
 let historyWindowContext = null;
 let copyEditWindow = null;
 let agentFilesWindow = null;
+let agentFilesClosing = false;
+let agentFilesClosePrompt = false;
+let agentFilesDirty = false;
+let agentFilesSaveWait = null;
 let agentFilesContext = null;
 let copyEditPayload = null;
 let updateWindow = null;
@@ -1661,6 +1665,7 @@ let agentFilesPreviewX = 0;
 let agentFilesWidthTimer = null;
 let agentFilesAnimateToken = 0;
 let agentFilesAnimateResolve = null;
+let agentFilesAdjusting = false;
 
 function agentFilesWorkArea(bounds) {
   const anchor = bounds
@@ -1681,18 +1686,41 @@ function agentFilesHalfScreenBounds() {
 }
 
 function applyAgentFilesSizeLimits() {
-  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed() || agentFilesAdjusting) return;
   const area = agentFilesWorkArea();
   const half = Math.max(1, Math.round(area.width / 2));
   const maxHeight = Math.max(AGENT_FILES_MIN_HEIGHT, area.height);
-  if (agentFilesEditorOpen) {
-    const minWidth = Math.min(area.width, agentFilesPreviewWidth + AGENT_FILES_EDITOR_MIN);
+  const minWidth = agentFilesEditorOpen
+    ? Math.min(area.width, Math.max(320, (agentFilesPreviewWidth || half) + AGENT_FILES_EDITOR_MIN))
+    : Math.min(640, half);
+  const maxWidth = agentFilesEditorOpen ? area.width : half;
+  agentFilesAdjusting = true;
+  try {
+    // 先把两边都放松，避免最小宽度大于最大宽度时窗口被撑飞。
+    agentFilesWindow.setMinimumSize(200, 200);
     agentFilesWindow.setMaximumSize(area.width, maxHeight);
-    agentFilesWindow.setMinimumSize(minWidth, AGENT_FILES_MIN_HEIGHT);
-    return;
+    agentFilesWindow.setMinimumSize(Math.min(minWidth, maxWidth), AGENT_FILES_MIN_HEIGHT);
+    agentFilesWindow.setMaximumSize(Math.max(minWidth, maxWidth), maxHeight);
+  } finally {
+    agentFilesAdjusting = false;
   }
-  agentFilesWindow.setMinimumSize(Math.min(640, half), AGENT_FILES_MIN_HEIGHT);
-  agentFilesWindow.setMaximumSize(half, maxHeight);
+}
+
+function clampAgentFilesWindow() {
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed() || agentFilesAdjusting) return;
+  const area = agentFilesWorkArea();
+  const bounds = agentFilesWindow.getBounds();
+  const width = Math.min(Math.max(bounds.width, 480), area.width);
+  const height = Math.min(Math.max(bounds.height, AGENT_FILES_MIN_HEIGHT), area.height);
+  const x = Math.min(Math.max(bounds.x, area.x), area.x + area.width - width);
+  const y = Math.min(Math.max(bounds.y, area.y), area.y + area.height - height);
+  if (x === bounds.x && y === bounds.y && width === bounds.width && height === bounds.height) return;
+  agentFilesAdjusting = true;
+  try {
+    agentFilesWindow.setBounds({ x, y, width, height });
+  } finally {
+    agentFilesAdjusting = false;
+  }
 }
 
 function stopAgentFilesAnimation() {
@@ -1733,12 +1761,17 @@ function animateAgentFilesBounds(target) {
       const t = Math.min(1, (Date.now() - began) / duration);
       const eased = 1 - ((1 - t) ** 3);
       const current = agentFilesWindow.getBounds();
-      agentFilesWindow.setBounds({
-        x: Math.round(fromX + (target.x - fromX) * eased),
-        y: current.y,
-        width: Math.max(1, Math.round(fromWidth + (target.width - fromWidth) * eased)),
-        height: current.height,
-      });
+      agentFilesAdjusting = true;
+      try {
+        agentFilesWindow.setBounds({
+          x: Math.round(fromX + (target.x - fromX) * eased),
+          y: current.y,
+          width: Math.max(1, Math.round(fromWidth + (target.width - fromWidth) * eased)),
+          height: current.height,
+        });
+      } finally {
+        agentFilesAdjusting = false;
+      }
       if (t < 1) {
         agentFilesWidthTimer = setTimeout(step, 16);
         return;
@@ -1764,36 +1797,50 @@ function resetAgentFilesWindowBounds() {
 
 async function setAgentFilesEditorPane(open) {
   if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return { ok: false };
-  if (agentFilesEditorOpen === open) return { ok: true };
   const current = agentFilesWindow.getBounds();
   const area = agentFilesWorkArea(current);
   const maxHeight = Math.max(AGENT_FILES_MIN_HEIGHT, area.height);
   if (open) {
-    agentFilesPreviewWidth = current.width;
-    agentFilesPreviewX = current.x;
+    if (!agentFilesEditorOpen || !agentFilesPreviewWidth) {
+      agentFilesPreviewWidth = current.width;
+      agentFilesPreviewX = current.x;
+    }
     agentFilesEditorOpen = true;
-    agentFilesWindow.setMaximumSize(area.width, maxHeight);
+    agentFilesAdjusting = true;
+    try {
+      agentFilesWindow.setMinimumSize(200, 200);
+      agentFilesWindow.setMaximumSize(area.width, maxHeight);
+    } finally {
+      agentFilesAdjusting = false;
+    }
+    const previewWidth = agentFilesPreviewWidth || current.width;
     const right = area.x + area.width;
-    let width = Math.min(area.width, right - current.x);
+    let width = area.width;
     let x = current.x;
-    if (width < current.width + AGENT_FILES_EDITOR_MIN) {
-      width = Math.min(area.width, current.width + AGENT_FILES_EDITOR_MIN);
-      x = Math.max(area.x, right - width);
+    if (previewWidth + AGENT_FILES_EDITOR_MIN > width) {
+      width = Math.min(area.width, previewWidth + AGENT_FILES_EDITOR_MIN);
+    }
+    if (x + width > right) x = Math.max(area.x, right - width);
+    if (Math.abs(width - current.width) < 2 && Math.abs(x - current.x) < 2) {
+      applyAgentFilesSizeLimits();
+      return { ok: true };
     }
     const finished = await animateAgentFilesBounds({ x, width });
     if (!finished) return { ok: true };
     applyAgentFilesSizeLimits();
     return { ok: true };
   }
+  if (!agentFilesEditorOpen && !agentFilesPreviewWidth) return { ok: true };
+  agentFilesEditorOpen = false;
   const half = Math.max(1, Math.round(area.width / 2));
   agentFilesWindow.setMinimumSize(Math.min(640, half), AGENT_FILES_MIN_HEIGHT);
   const width = agentFilesPreviewWidth || half;
   const x = Number.isFinite(agentFilesPreviewX) ? agentFilesPreviewX : current.x;
   const finished = await animateAgentFilesBounds({ x, width });
-  if (!finished) return { ok: true };
-  agentFilesEditorOpen = false;
+  if (agentFilesEditorOpen) return { ok: true };
   agentFilesPreviewWidth = 0;
   agentFilesPreviewX = 0;
+  if (!finished) return { ok: true };
   applyAgentFilesSizeLimits();
   return { ok: true };
 }
@@ -1805,12 +1852,65 @@ function getAuthorizedAgentFilesWindow(event) {
   return agentFilesWindow;
 }
 
+function requestAgentFilesSave(win) {
+  return new Promise((resolve) => {
+    if (agentFilesSaveWait) agentFilesSaveWait(false);
+    const timer = setTimeout(() => {
+      if (agentFilesSaveWait !== finish) return;
+      agentFilesSaveWait = null;
+      resolve(false);
+    }, 20000);
+    const finish = (ok) => {
+      clearTimeout(timer);
+      resolve(ok === true);
+    };
+    agentFilesSaveWait = finish;
+    win.webContents.send('agent-files:request-save');
+  });
+}
+
+async function confirmAgentFilesClose(win) {
+  if (!win || win.isDestroyed() || agentFilesClosing || agentFilesClosePrompt) return;
+  if (!agentFilesDirty) {
+    agentFilesClosing = true;
+    win.close();
+    return;
+  }
+  agentFilesClosePrompt = true;
+  try {
+    win.show();
+    const { response } = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['保存', '不保存', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      message: '这些修改还没保存。',
+      detail: '要保存后再关闭吗？',
+    });
+    if (win.isDestroyed() || response === 2) return;
+    if (response === 0) {
+      const saved = await requestAgentFilesSave(win);
+      if (!saved || win.isDestroyed()) return;
+    }
+    agentFilesDirty = false;
+    agentFilesClosing = true;
+    win.close();
+  } catch {
+    agentFilesDirty = false;
+    agentFilesClosing = true;
+    if (!win.isDestroyed()) win.destroy();
+  } finally {
+    agentFilesClosePrompt = false;
+  }
+}
+
 function openAgentFilesWindow(payload) {
   const agentId = String(payload?.agentId || '').trim();
   if (!/^[A-Za-z0-9_-]{1,80}$/.test(agentId)) return { ok: false, error: '未指定 Agent' };
   const agentLabel = String(payload?.agentLabel || agentId).trim().slice(0, 80) || agentId;
   agentFilesContext = { agentId, agentLabel };
-  const title = `${agentLabel} · 配置与技能`;
+  const title = `${agentLabel} · 头脑与技能`;
   if (agentFilesWindow && !agentFilesWindow.isDestroyed()) {
     agentFilesWindow.setTitle(title);
     resetAgentFilesWindowBounds();
@@ -1840,18 +1940,53 @@ function openAgentFilesWindow(payload) {
   };
   agentFilesWindow = new BrowserWindow(options);
   agentFilesWindow.setMenu(null);
+  agentFilesEditorOpen = false;
+  agentFilesPreviewWidth = 0;
+  agentFilesPreviewX = 0;
+  agentFilesDirty = false;
+  agentFilesClosing = false;
   applyAgentFilesSizeLimits();
   agentFilesWindow.on('move', () => {
-    if (agentFilesWidthTimer) return;
+    if (agentFilesWidthTimer || agentFilesAdjusting) return;
     applyAgentFilesSizeLimits();
   });
   agentFilesWindow.once('ready-to-show', () => {
+    if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+    clampAgentFilesWindow();
     agentFilesWindow.show();
     agentFilesWindow.focus();
   });
+  agentFilesWindow.webContents.on('render-process-gone', () => {
+    agentFilesDirty = false;
+    agentFilesClosePrompt = false;
+    if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+    agentFilesWindow.webContents.reload();
+  });
   agentFilesWindow.loadFile(path.join(__dirname, 'agent-files.html'));
+  agentFilesWindow.on('close', (event) => {
+    if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+    if (agentFilesClosing || !agentFilesDirty) return;
+    if (agentFilesClosePrompt) {
+      agentFilesDirty = false;
+      agentFilesClosing = true;
+      agentFilesWindow.destroy();
+      return;
+    }
+    event.preventDefault();
+    void confirmAgentFilesClose(agentFilesWindow);
+  });
   agentFilesWindow.on('closed', () => {
     agentFilesWindow = null;
+    agentFilesClosing = false;
+    agentFilesDirty = false;
+    agentFilesEditorOpen = false;
+    agentFilesPreviewWidth = 0;
+    agentFilesPreviewX = 0;
+    if (agentFilesSaveWait) {
+      const wait = agentFilesSaveWait;
+      agentFilesSaveWait = null;
+      wait(false);
+    }
   });
   return { ok: true };
 }
@@ -6382,6 +6517,18 @@ ipcMain.handle('agent-files:open', (event, payload) => {
 ipcMain.handle('agent-files:context', (event) => {
   if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
   return agentFilesContext || { agentId: '', agentLabel: '' };
+});
+
+ipcMain.on('agent-files:dirty', (event, dirty) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return;
+  agentFilesDirty = dirty === true;
+});
+
+ipcMain.on('agent-files:save-result', (event, ok) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return;
+  const wait = agentFilesSaveWait;
+  agentFilesSaveWait = null;
+  if (wait) wait(ok === true);
 });
 
 ipcMain.handle('agent-files:editor-pane', async (event, open) => {

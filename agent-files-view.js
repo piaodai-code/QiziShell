@@ -84,7 +84,8 @@ function showToast(message) {
 }
 
 function setDirty(next) {
-  dirty = next;
+  dirty = Boolean(next);
+  window.qiziAgentFiles?.setDirty?.(dirty);
   saveBtn.disabled = !loaded;
   saveBtn.classList.toggle('is-dirty', Boolean(loaded) && dirty);
 }
@@ -118,19 +119,31 @@ function layoutPanes() {
   shell.style.setProperty('--editor', `${Math.max(0, window.innerWidth - paneWidth)}px`);
 }
 
+function editorColumnWidth() {
+  if (!paneWidth) return 0;
+  return Math.max(0, window.innerWidth - paneWidth);
+}
+
+function revealEditor() {
+  if (!paneWidth) return;
+  if (editorColumnWidth() < 320) paneWidth = Math.max(280, window.innerWidth - 320);
+  layoutPanes();
+}
+
 function setEditorOpen(open) {
-  if (open === editorOpen) return Promise.resolve();
+  if (open === editorOpen && (!open || editorColumnWidth() >= 320)) return Promise.resolve();
   const token = ++paneToken;
   editorOpen = open;
   syncEditButton();
   if (open) {
-    paneWidth = window.innerWidth;
+    if (!paneWidth) paneWidth = window.innerWidth;
     layoutPanes();
     return window.qiziAgentFiles.setEditorPane(true).then(() => {
-    if (token !== paneToken) return;
-    editor?.relayout?.();
-    syncEditorFromPreview();
-    editor?.focus();
+      if (token !== paneToken) return;
+      revealEditor();
+      editor?.relayout?.();
+      syncEditorFromPreview();
+      editor?.focus();
     });
   }
   return window.qiziAgentFiles.setEditorPane(false).finally(() => {
@@ -296,7 +309,7 @@ function renderEmpty(message) {
   previewBody.replaceChildren();
   const empty = document.createElement('p');
   empty.className = 'af-empty';
-  empty.textContent = message || '请从左侧选择一个记忆文件或技能进行查看';
+  empty.textContent = message || '请从左侧选择一份头脑记忆或技能进行查看';
   previewBody.appendChild(empty);
   editBtn.hidden = true;
 }
@@ -428,7 +441,7 @@ function renderMemory(memories) {
   group.className = 'af-group';
   const title = document.createElement('div');
   title.className = 'af-section-title';
-  title.textContent = '记忆文件';
+  title.textContent = '头脑记忆';
   group.appendChild(title);
   memories.forEach((file) => {
     const button = document.createElement('button');
@@ -483,28 +496,37 @@ function renderSidebar() {
 }
 
 async function loadCatalog() {
-  const context = await window.qiziAgentFiles.getContext();
-  agentId = context?.agentId || '';
-  agentLabel = context?.agentLabel || agentId || '当前 Agent';
-  agentEl.textContent = agentLabel;
-  document.title = `${agentLabel} · 配置与技能`;
-  sideScroll.innerHTML = '<p class="af-status">正在读取…</p>';
-  const result = await window.qiziAgentFiles.list();
-  if (!result?.ok) {
+  try {
+    const context = await window.qiziAgentFiles.getContext();
+    agentId = context?.agentId || '';
+    agentLabel = context?.agentLabel || agentId || '当前 Agent';
+    agentEl.textContent = agentLabel;
+    document.title = `${agentLabel} · 头脑与技能`;
+    sideScroll.innerHTML = '<p class="af-status">正在读取…</p>';
+    const result = await window.qiziAgentFiles.list();
+    if (!result?.ok) {
+      catalog = null;
+      sideScroll.replaceChildren();
+      const failed = document.createElement('p');
+      failed.className = 'af-status';
+      failed.textContent = result?.error || '读取失败';
+      sideScroll.appendChild(failed);
+      return;
+    }
+    catalog = result;
+    renderSidebar();
+  } catch (err) {
     catalog = null;
     sideScroll.replaceChildren();
     const failed = document.createElement('p');
     failed.className = 'af-status';
-    failed.textContent = result?.error || '读取失败';
+    failed.textContent = err?.message || '读取失败';
     sideScroll.appendChild(failed);
-    return;
   }
-  catalog = result;
-  renderSidebar();
 }
 
 async function save() {
-  if (!loaded) return;
+  if (!loaded) return false;
   const content = editorOpen && editor ? editor.getDoc() : draft;
   saveBtn.disabled = true;
   const result = await window.qiziAgentFiles.save({
@@ -519,7 +541,7 @@ async function save() {
       dirty = true;
       setDirty(true);
     }
-    return;
+    return false;
   }
   loaded.hash = result.hash || loaded.hash;
   loaded.content = content;
@@ -533,6 +555,7 @@ async function save() {
   }
   showToast(result.backupName ? `已保存。上一版备份为 ${result.backupName}` : '已保存');
   if (editorOpen) await setEditorOpen(false);
+  return true;
 }
 
 function ensureEditor() {
@@ -558,22 +581,23 @@ function ensureEditor() {
 
 sideToggle.addEventListener('click', () => setSidebar(!sidebarOpen));
 editBtn.addEventListener('click', () => {
-  if (paneWidth) {
-    if (editorOpen) abandonEdit();
+  if ((editorOpen || paneWidth) && editorColumnWidth() >= 80) {
+    abandonEdit();
     return;
   }
   const first = !editor;
-  void setEditorOpen(true);
-  requestAnimationFrame(() => requestAnimationFrame(() => {
+  void setEditorOpen(true).then(() => {
+    if (!editorOpen) return;
     if (!ensureEditor()) {
       showToast('编辑器没有加载起来');
       void setEditorOpen(false);
       return;
     }
     if (first) editor.setDoc(draft);
+    revealEditor();
     editor.relayout?.();
     editor.focus();
-  }));
+  });
 });
 window.addEventListener('resize', () => {
   if (paneWidth) layoutPanes();
@@ -599,10 +623,9 @@ document.addEventListener('keydown', (event) => {
     void save();
   }
 });
-window.addEventListener('beforeunload', (event) => {
-  if (!dirty) return;
-  event.preventDefault();
-  event.returnValue = '';
+window.qiziAgentFiles.onRequestSave(async () => {
+  const ok = await save();
+  window.qiziAgentFiles.saveResult(ok);
 });
 
 window.qiziAgentFiles.onReload(() => {

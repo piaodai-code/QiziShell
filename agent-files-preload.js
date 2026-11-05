@@ -6,6 +6,13 @@ contextBridge.exposeInMainWorld('qiziAgentFiles', {
   read: (file) => ipcRenderer.invoke('agent-files:read', file),
   save: (payload) => ipcRenderer.invoke('agent-files:save', payload),
   setEditorPane: (open) => ipcRenderer.invoke('agent-files:editor-pane', open),
+  setDirty: (dirty) => ipcRenderer.send('agent-files:dirty', dirty === true),
+  onRequestSave: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('agent-files:request-save', handler);
+    return () => ipcRenderer.removeListener('agent-files:request-save', handler);
+  },
+  saveResult: (ok) => ipcRenderer.send('agent-files:save-result', ok === true),
   onReload: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('agent-files:reload', handler);
