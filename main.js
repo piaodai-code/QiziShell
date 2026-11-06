@@ -1869,6 +1869,36 @@ function requestAgentFilesSave(win) {
   });
 }
 
+function agentFilesChoiceLabel(agent) {
+  const label = typeof agent?.label === 'string' ? agent.label.trim() : '';
+  if (label) return label.slice(0, 80);
+  const id = String(agent?.id || '');
+  if (id === 'main') return '启孜';
+  return id.slice(0, 80) || 'Agent';
+}
+
+async function settleAgentFilesUnsaved(win, detail) {
+  if (!win || win.isDestroyed()) return 'cancel';
+  if (!agentFilesDirty) return 'proceed';
+  win.show();
+  const { response } = await dialog.showMessageBox(win, {
+    type: 'question',
+    buttons: ['保存', '不保存', '取消'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true,
+    message: '这些修改还没保存。',
+    detail,
+  });
+  if (win.isDestroyed() || response === 2) return 'cancel';
+  if (response === 0) {
+    const saved = await requestAgentFilesSave(win);
+    if (!saved || win.isDestroyed()) return 'cancel';
+  }
+  agentFilesDirty = false;
+  return 'proceed';
+}
+
 async function confirmAgentFilesClose(win) {
   if (!win || win.isDestroyed() || agentFilesClosing || agentFilesClosePrompt) return;
   if (!agentFilesDirty) {
@@ -1878,22 +1908,8 @@ async function confirmAgentFilesClose(win) {
   }
   agentFilesClosePrompt = true;
   try {
-    win.show();
-    const { response } = await dialog.showMessageBox({
-      type: 'question',
-      buttons: ['保存', '不保存', '取消'],
-      defaultId: 0,
-      cancelId: 2,
-      noLink: true,
-      message: '这些修改还没保存。',
-      detail: '要保存后再关闭吗？',
-    });
-    if (win.isDestroyed() || response === 2) return;
-    if (response === 0) {
-      const saved = await requestAgentFilesSave(win);
-      if (!saved || win.isDestroyed()) return;
-    }
-    agentFilesDirty = false;
+    const decision = await settleAgentFilesUnsaved(win, '要保存后再关闭吗？');
+    if (decision !== 'proceed' || win.isDestroyed()) return;
     agentFilesClosing = true;
     win.close();
   } catch {
@@ -6517,6 +6533,48 @@ ipcMain.handle('agent-files:open', (event, payload) => {
 ipcMain.handle('agent-files:context', (event) => {
   if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
   return agentFilesContext || { agentId: '', agentLabel: '' };
+});
+
+ipcMain.handle('agent-files:agents', async (event) => {
+  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
+  try {
+    const listed = await listAgents();
+    if (!listed?.ok) return { ok: false, error: listed?.error || '读取 Agent 失败', agents: [] };
+    const agents = [];
+    for (const agent of listed.agents || []) {
+      const id = String(agent?.id || '').trim();
+      if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) continue;
+      agents.push({ id, label: agentFilesChoiceLabel(agent) });
+    }
+    return { ok: true, agents };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err), agents: [] };
+  }
+});
+
+ipcMain.handle('agent-files:switch', async (event, payload) => {
+  const win = getAuthorizedAgentFilesWindow(event);
+  if (!win) return forbiddenSenderResult();
+  const agentId = String(payload?.agentId || '').trim();
+  if (!/^[A-Za-z0-9_-]{1,80}$/.test(agentId)) return { ok: false, error: '未指定 Agent' };
+  if (agentId === agentFilesContext?.agentId) return { ok: true, unchanged: true };
+  if (agentFilesClosePrompt) return { ok: false, cancelled: true };
+  agentFilesClosePrompt = true;
+  try {
+    const listed = await listAgents();
+    const found = listed?.ok ? (listed.agents || []).find((agent) => agent.id === agentId) : null;
+    if (!found) return { ok: false, error: listed?.error || '未找到这个 Agent' };
+    const decision = await settleAgentFilesUnsaved(win, '要保存后再换 Agent 吗？');
+    if (decision !== 'proceed' || win.isDestroyed()) return { ok: false, cancelled: true };
+    const agentLabel = agentFilesChoiceLabel(found);
+    agentFilesContext = { agentId, agentLabel };
+    win.setTitle(`${agentLabel} · 头脑与技能`);
+    return { ok: true, agentId, agentLabel };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  } finally {
+    agentFilesClosePrompt = false;
+  }
 });
 
 ipcMain.on('agent-files:dirty', (event, dirty) => {

@@ -23,6 +23,8 @@ assert.strictEqual(doc.originalText, '你好世界');
 assert.strictEqual(doc.patches.filter((patch) => patch.type === 'insert').length, 1);
 const afterFirst = Model.placeCaret(Model.buildPieces(doc), spec);
 spec = Model.insertText(doc, afterFirst, '很');
+const emptySpec = Model.insertText(doc, afterFirst, '');
+assert.deepStrictEqual(Model.placeCaret(Model.buildPieces(doc), emptySpec), afterFirst);
 assert.strictEqual(doc.patches.filter((patch) => patch.type === 'insert' && patch.status === 'pending').length, 1);
 assert.strictEqual(Model.finalText(doc), '你好，很世界');
 

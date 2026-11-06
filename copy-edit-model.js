@@ -415,8 +415,8 @@
 
   function insertText(doc, pos, text) {
     const value = String(text ?? '').replace(/\r\n/g, '\n');
-    if (!value) return { pieceKind: 'base', offset: 0 };
     const pieces = buildPieces(doc);
+    if (!value) return resolvePos(pieces, pos);
     let caret = resolvePos(pieces, pos);
     let piece = pieces[caret.pieceIndex];
     if (piece.kind === 'base' && caret.offset === 0 && caret.pieceIndex > 0) {

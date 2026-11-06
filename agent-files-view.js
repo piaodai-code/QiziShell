@@ -2,6 +2,8 @@ const shell = document.getElementById('af-shell');
 const sideScroll = document.getElementById('af-side-scroll');
 const statusEl = document.getElementById('af-status');
 const agentEl = document.getElementById('af-agent');
+const agentLabelEl = document.getElementById('af-agent-label');
+const agentMenu = document.getElementById('af-agent-menu');
 const sideToggle = document.getElementById('af-side-toggle');
 const previewTitle = document.getElementById('af-preview-title');
 const previewBody = document.getElementById('af-preview-body');
@@ -38,6 +40,8 @@ let paneToken = 0;
 let sidebarOpen = true;
 const expandedFolders = new Set();
 let toastTimer = 0;
+let agentMenuOpen = false;
+let switchingAgent = false;
 
 function fileKey(file) {
   if (!file) return '';
@@ -500,7 +504,8 @@ async function loadCatalog() {
     const context = await window.qiziAgentFiles.getContext();
     agentId = context?.agentId || '';
     agentLabel = context?.agentLabel || agentId || '当前 Agent';
-    agentEl.textContent = agentLabel;
+    agentLabelEl.textContent = agentLabel;
+    agentEl.title = `换一个 Agent · ${agentLabel}`;
     document.title = `${agentLabel} · 头脑与技能`;
     sideScroll.innerHTML = '<p class="af-status">正在读取…</p>';
     const result = await window.qiziAgentFiles.list();
@@ -579,7 +584,97 @@ function ensureEditor() {
   return true;
 }
 
-sideToggle.addEventListener('click', () => setSidebar(!sidebarOpen));
+function closeAgentMenu() {
+  agentMenuOpen = false;
+  agentMenu.hidden = true;
+  agentEl.setAttribute('aria-expanded', 'false');
+}
+
+function fillAgentMenu(result) {
+  agentMenu.replaceChildren();
+  const agents = Array.isArray(result?.agents) ? result.agents : [];
+  if (!result?.ok || !agents.length) {
+    const empty = document.createElement('p');
+    empty.className = 'af-agent-empty';
+    empty.textContent = result?.error || '没有可选的 Agent';
+    agentMenu.appendChild(empty);
+    return;
+  }
+  for (const agent of agents) {
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'af-agent-item';
+    item.setAttribute('role', 'option');
+    item.textContent = agent.label || agent.id;
+    if (agent.id === agentId) {
+      item.classList.add('is-current');
+      item.setAttribute('aria-selected', 'true');
+    }
+    item.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void chooseAgent(agent);
+    });
+    agentMenu.appendChild(item);
+  }
+}
+
+async function openAgentMenu() {
+  if (agentMenuOpen) {
+    closeAgentMenu();
+    return;
+  }
+  agentMenuOpen = true;
+  agentMenu.hidden = false;
+  agentEl.setAttribute('aria-expanded', 'true');
+  agentMenu.replaceChildren();
+  const loading = document.createElement('p');
+  loading.className = 'af-agent-empty';
+  loading.textContent = '正在读取…';
+  agentMenu.appendChild(loading);
+  let result = { ok: false, error: '读取 Agent 失败', agents: [] };
+  try {
+    result = await window.qiziAgentFiles.listAgents();
+  } catch (err) {
+    result = { ok: false, error: err?.message || '读取 Agent 失败', agents: [] };
+  }
+  if (!agentMenuOpen) return;
+  fillAgentMenu(result);
+}
+
+async function chooseAgent(agent) {
+  closeAgentMenu();
+  if (switchingAgent || !agent?.id || agent.id === agentId) return;
+  switchingAgent = true;
+  try {
+    const result = await window.qiziAgentFiles.switchAgent({
+      agentId: agent.id,
+      agentLabel: agent.label || agent.id,
+    });
+    if (!result?.ok) {
+      if (result?.error && !result.cancelled) showToast(result.error);
+      return;
+    }
+    if (result.unchanged) return;
+    loaded = null;
+    activeKey = '';
+    draft = '';
+    setDirty(false);
+    await setEditorOpen(false);
+    renderEmpty();
+    await loadCatalog();
+  } finally {
+    switchingAgent = false;
+  }
+}
+
+sideToggle.addEventListener('click', () => {
+  closeAgentMenu();
+  setSidebar(!sidebarOpen);
+});
+agentEl.addEventListener('click', (event) => {
+  event.stopPropagation();
+  void openAgentMenu();
+});
 editBtn.addEventListener('click', () => {
   if ((editorOpen || paneWidth) && editorColumnWidth() >= 80) {
     abandonEdit();
@@ -613,11 +708,17 @@ helpBtn.addEventListener('click', (event) => {
 });
 saveBtn.addEventListener('click', () => { void save(); });
 document.addEventListener('click', (event) => {
+  if (agentMenuOpen && !event.target.closest('#af-agent-wrap')) closeAgentMenu();
   if (!helpCard.hidden && !event.target.closest('#af-help') && !event.target.closest('#af-help-btn')) {
     helpCard.hidden = true;
   }
 });
 document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && agentMenuOpen) {
+    event.preventDefault();
+    closeAgentMenu();
+    return;
+  }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
     event.preventDefault();
     void save();

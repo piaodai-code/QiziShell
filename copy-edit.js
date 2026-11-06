@@ -159,6 +159,17 @@ function visibleLength(node) {
 
 function posFromNode(node, offset) {
   if (!node) return null;
+  if (node === editor) {
+    if (!editor.childNodes.length) return null;
+    if (offset <= 0) {
+      const first = editor.querySelector('[data-i]');
+      return first ? { pieceIndex: Number(first.dataset.i), offset: 0 } : null;
+    }
+    const before = editor.childNodes[Math.min(offset, editor.childNodes.length) - 1];
+    const span = before?.nodeType === 1 ? before.closest?.('[data-i]') : before?.parentElement?.closest?.('[data-i]');
+    if (!span || !editor.contains(span)) return null;
+    return { pieceIndex: Number(span.dataset.i), offset: visibleLength(span) };
+  }
   const el = node.nodeType === 1 ? node : node.parentElement;
   const span = el?.closest?.('[data-i]');
   if (!span || !editor.contains(span)) return null;
@@ -216,24 +227,103 @@ function pointInPiece(span, offset) {
   return span.firstChild ? { node: span.firstChild, offset: 0 } : null;
 }
 
-function setDomCaret(spec) {
+let caretEpoch = 0;
+let caretHold = null;
+let renderingEditor = false;
+
+function caretPoint(spec) {
   const pieces = Model.buildPieces(doc);
   const placed = Model.placeCaret(pieces, spec);
   const span = editor.querySelector(`[data-i="${placed.pieceIndex}"]`);
-  if (!span) return;
-  const range = document.createRange();
+  if (!span) return null;
   if (span.dataset.empty === '1') {
-    if (!span.firstChild) return;
-    range.setStart(span.firstChild, 0);
-  } else {
-    const point = pointInPiece(span, placed.offset);
-    if (!point) return;
-    range.setStart(point.node, point.offset);
+    if (!span.firstChild) return null;
+    return { node: span.firstChild, offset: 0, placed };
   }
-  range.collapse(true);
+  const point = pointInPiece(span, placed.offset);
+  if (!point) return null;
+  return { node: point.node, offset: point.offset, placed };
+}
+
+function setDomCaret(spec) {
+  const point = caretPoint(spec);
   const selection = window.getSelection();
-  selection.removeAllRanges();
-  selection.addRange(range);
+  if (!point || !selection) return false;
+  try {
+    selection.setBaseAndExtent(point.node, point.offset, point.node, point.offset);
+  } catch (err) {
+    return false;
+  }
+  if (caretMatches(spec)) return true;
+  try {
+    const range = document.createRange();
+    range.setStart(point.node, point.offset);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  } catch (err) {
+    return false;
+  }
+  return true;
+}
+
+function caretMatches(spec) {
+  const point = caretPoint(spec);
+  const current = readRange();
+  if (!point || !current?.collapsed) return false;
+  return current.start.pieceIndex === point.placed.pieceIndex
+    && current.start.offset === point.placed.offset;
+}
+
+function releaseCaretHold() {
+  caretEpoch += 1;
+  caretHold = null;
+}
+
+function pinHeldCaret() {
+  if (!caretHold || composing || pointerDrag || restoringSelection) return;
+  if (document.activeElement !== editor) return;
+  const current = readRange();
+  if (current && !current.collapsed) return;
+  const point = caretPoint(caretHold.spec);
+  const atHome = !current || (current.collapsed && current.start.pieceIndex === 0 && current.start.offset === 0);
+  const intendHome = !point || (point.placed.pieceIndex === 0 && point.placed.offset === 0);
+  if (!atHome || intendHome) return;
+  restoringSelection = true;
+  setDomCaret(caretHold.spec);
+  restoringSelection = false;
+}
+
+function settleCaret(spec) {
+  const epoch = ++caretEpoch;
+  caretHold = { epoch, spec, tries: 0 };
+  if (document.activeElement !== editor) editor.focus({ preventScroll: true });
+  const apply = () => {
+    if (epoch !== caretEpoch || composing || pointerDrag || restoringSelection) return;
+    if (document.activeElement !== editor) return;
+    if (caretMatches(spec)) return;
+    setDomCaret(spec);
+  };
+  apply();
+  queueMicrotask(apply);
+  setTimeout(apply, 0);
+  requestAnimationFrame(apply);
+}
+
+function restoreHeldCaret() {
+  if (!caretHold || caretHold.epoch !== caretEpoch || composing || pointerDrag || restoringSelection) return false;
+  if (renderingEditor || document.activeElement !== editor) return false;
+  if (caretMatches(caretHold.spec)) return false;
+  const point = caretPoint(caretHold.spec);
+  const current = readRange();
+  const atHome = !current || (current.collapsed && current.start.pieceIndex === 0 && current.start.offset === 0);
+  const intendHome = point?.placed.pieceIndex === 0 && point?.placed.offset === 0;
+  if (!atHome || intendHome || caretHold.tries >= 4) return false;
+  caretHold.tries += 1;
+  restoringSelection = true;
+  setDomCaret(caretHold.spec);
+  restoringSelection = false;
+  return true;
 }
 
 function renderCommentedText(piece) {
@@ -260,7 +350,7 @@ function renderPiece(piece, index) {
   return `<span class="${classes.join(' ')}" data-i="${index}" data-kind="${piece.kind}"${patchAttr}${emptyAttr}>${text}</span>`;
 }
 
-function renderEditor(caret) {
+function renderEditor() {
   const scrollTop = editor.scrollTop;
   editor.classList.toggle('is-readonly', view !== 'markup');
   editor.contentEditable = view === 'markup' ? 'true' : 'false';
@@ -278,7 +368,6 @@ function renderEditor(caret) {
       : '<span class="ce-placeholder">原稿是空的</span>';
   }
   editor.scrollTop = scrollTop;
-  if (caret && view === 'markup') setDomCaret(caret);
 }
 
 function patchPreview(patch) {
@@ -339,10 +428,16 @@ function hideNote() {
 
 function render(options = {}) {
   lastSelection = null;
-  renderEditor(options.caret);
-  renderSidebar();
-  updateChrome();
-  if (options.caret) editor.focus();
+  const caret = options.caret && view === 'markup' ? options.caret : null;
+  renderingEditor = true;
+  try {
+    renderEditor();
+    renderSidebar();
+    updateChrome();
+  } finally {
+    renderingEditor = false;
+  }
+  if (caret) settleCaret(caret);
 }
 
 function placeFlyout(el, x, y) {
@@ -560,12 +655,14 @@ editor.addEventListener('beforeinput', (event) => {
   }
   if (!type.startsWith('insert') && !type.startsWith('delete')) return;
   event.preventDefault();
+  pinHeldCaret();
   const range = readRange();
   if (!range) return;
   hideNote();
   let caret = null;
   if (type === 'insertText') {
     const text = event.data || '';
+    if (!text) return;
     caret = withUndo(() => (
       range.collapsed
         ? Model.insertText(doc, range.start, text)
@@ -601,6 +698,7 @@ editor.addEventListener('paste', (event) => {
   event.preventDefault();
   if (inputJustHandled()) return;
   const text = event.clipboardData?.getData('text/plain') || '';
+  pinHeldCaret();
   const range = readRange();
   if (!range || !text) return;
   markInputHandled();
@@ -616,6 +714,7 @@ editor.addEventListener('paste', (event) => {
 
 editor.addEventListener('cut', (event) => {
   if (view !== 'markup') return;
+  pinHeldCaret();
   const range = readRange();
   if (!range || range.collapsed) return;
   event.preventDefault();
@@ -628,6 +727,8 @@ editor.addEventListener('cut', (event) => {
 });
 
 editor.addEventListener('compositionstart', () => {
+  if (view === 'markup') pinHeldCaret();
+  releaseCaretHold();
   if (view !== 'markup') return;
   composing = true;
   composeRange = readRange();
@@ -641,7 +742,11 @@ editor.addEventListener('compositionend', (event) => {
   const text = event.data || '';
   const range = composeRange || readRange();
   composeRange = null;
-  if (!range || !text) {
+  if (!text) {
+    render(range ? { caret: range.start } : {});
+    return;
+  }
+  if (!range) {
     render();
     return;
   }
@@ -658,6 +763,10 @@ editor.addEventListener('keydown', (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
     event.preventDefault();
     sendBtn.click();
+    return;
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight' || event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'Home' || event.key === 'End' || event.key === 'PageUp' || event.key === 'PageDown') {
+    releaseCaretHold();
   }
 });
 
@@ -785,6 +894,7 @@ function finishPointerDrag(event) {
 }
 
 editor.addEventListener('pointerdown', (event) => {
+  releaseCaretHold();
   if (event.button !== 0 || view !== 'markup') return;
   const live = selectionSnapshot();
   if (live) lastSelection = live;
@@ -847,10 +957,12 @@ editor.addEventListener('pointercancel', (event) => {
 });
 
 document.addEventListener('selectionchange', () => {
+  if (renderingEditor) return;
   if (pointerDrag) {
     restoreDragSelection();
     return;
   }
+  if (restoreHeldCaret()) return;
   rememberSelection();
 });
 

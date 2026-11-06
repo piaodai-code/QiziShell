@@ -10,7 +10,13 @@
   <div class="af-shell" id="af-shell">
     <aside class="af-side" id="af-side">
       <div class="af-side-head">
-        <div class="af-agent" id="af-agent">当前 Agent</div>
+        <div class="af-agent-wrap" id="af-agent-wrap">
+          <button type="button" class="af-agent" id="af-agent" aria-haspopup="listbox" aria-expanded="false" title="换一个 Agent">
+            <span id="af-agent-label">当前 Agent</span>
+            <span class="af-agent-caret" aria-hidden="true">▾</span>
+          </button>
+          <div class="af-agent-menu" id="af-agent-menu" hidden role="listbox" aria-label="选择 Agent"></div>
+        </div>
         <button type="button" class="af-icon-btn" id="af-side-toggle" title="收起侧栏" aria-label="收起侧栏" aria-expanded="true">
           <img src="assets/icons/agent-files-sidebar.png" alt="">
         </button>
