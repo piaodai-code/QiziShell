@@ -12,10 +12,50 @@ function createMessageArchiveStore(dirPath) {
     return path.join(resolveDir(), `${hash}.json`);
   }
 
+  function userMessageKey(message) {
+    if (!message || message.who !== 'me' || message.sentAtMs == null) return '';
+    return `${message.sentAtMs}\0${String(message.text || '').trim()}`;
+  }
+
+  function dedupeMessages(messages) {
+    const seen = new Set();
+    const out = [];
+    for (const message of messages) {
+      const key = userMessageKey(message);
+      if (key) {
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      out.push(message);
+    }
+    return out;
+  }
+
+  function writeParsed(filePath, parsed) {
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, JSON.stringify({
+      version: 1,
+      sessionKey: parsed.sessionKey,
+      messages: parsed.messages,
+    }));
+    fs.renameSync(tmp, filePath);
+  }
+
   function readFile(filePath) {
     try {
       const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
       if (!parsed || typeof parsed.sessionKey !== 'string' || !Array.isArray(parsed.messages)) return null;
+      const messages = dedupeMessages(parsed.messages);
+      if (messages.length !== parsed.messages.length) {
+        parsed.messages = messages;
+        try {
+          writeParsed(filePath, parsed);
+        } catch {
+          // 读路径上的压缩失败不影响这次返回
+        }
+      }
       return parsed;
     } catch {
       return null;
@@ -34,12 +74,8 @@ function createMessageArchiveStore(dirPath) {
     const key = String(sessionKey || '').trim();
     if (!key) throw new Error('未指定 session');
     if (!Array.isArray(messages)) throw new Error('归档格式无效');
-    const dir = resolveDir();
-    fs.mkdirSync(dir, { recursive: true });
     const target = fileFor(key);
-    const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.tmp`);
-    fs.writeFileSync(tmp, JSON.stringify({ version: 1, sessionKey: key, messages }));
-    fs.renameSync(tmp, target);
+    writeParsed(target, { sessionKey: key, messages: dedupeMessages(messages) });
   }
 
   function list() {

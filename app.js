@@ -1360,14 +1360,20 @@ function userMessagesSameEvent(a, b) {
   if (messageIsForward(a) || messageIsForward(b)) {
     return historyForwardFingerprintsMatch(a, b);
   }
-  if (!userMessageTextsMatch(a.text, b.text)) return false;
   const aMs = a.sentAtMs;
   const bMs = b.sentAtMs;
-  if (aMs != null && bMs != null) {
-    if (aMs === bMs) return true;
-    return Math.abs(aMs - bMs) < 2000;
+  if (userMessageTextsMatch(a.text, b.text)) {
+    if (aMs != null && bMs != null) {
+      if (aMs === bMs) return true;
+      return Math.abs(aMs - bMs) < 2000;
+    }
+    return false;
   }
-  return false;
+  // 纯图片消息正文是空的。空正文配不上 userMessageTextsMatch，
+  // 同步就会把同一条（连同图片）再追加一遍。时间戳相同才算同一条。
+  const aText = normalizeUserMessagePlainText(a.text);
+  const bText = normalizeUserMessagePlainText(b.text);
+  return !aText && !bText && aMs != null && bMs != null && aMs === bMs;
 }
 
 function userMessagesEquivalent(a, b) {
