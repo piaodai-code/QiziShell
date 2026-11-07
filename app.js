@@ -424,6 +424,9 @@ let currentAgentId = 'main';
 let chatScopeEpoch = 0;
 let sessionSwitchSettling = false;
 let agentSwitchToken = 0;
+let channelSwitchToken = 0;
+/** 通道按钮先显示用户刚选的项，避免慢一拍的目录刷新把旧名字盖回来 */
+let channelLabelHold = null;
 /** 切走后仍在更新的会话视图。键是 sessionKey，值是当时的消息数组。 */
 const liveSessionSnapshots = new Map();
 /** @type {Map<string, object>} */
@@ -4555,8 +4558,11 @@ async function syncHistoryFromGatewayOnce(options = {}) {
   if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (sessionSwitchSettling && options.duringSwitch !== true) return;
   if (!window.qizi.loadHistory) return;
+  const epochAtStart = chatScopeEpoch;
+  const sessionAtStart = currentSessionKey;
   try {
     const result = await window.qizi.loadHistory();
+    if (epochAtStart !== chatScopeEpoch || sessionAtStart !== currentSessionKey) return;
     if (!result?.ok || !Array.isArray(result.messages)) return;
 
     if (applyLoadedSessionKey(result)) {
@@ -4591,7 +4597,7 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     if (result.messages.length === 0 && messages.length > 0 && options.allowEmptyServer !== true) return;
 
     const priorInflight = messages.filter((m) => m.streaming);
-    const nextMessages = buildDisplayHistoryFromGateway(result.messages, messages);
+    let nextMessages = buildDisplayHistoryFromGateway(result.messages, messages);
     if (priorInflight.length > 0) {
       nextMessages = reattachInFlightStreaming(nextMessages, priorInflight);
     }
@@ -5217,6 +5223,10 @@ function applyCachedAgentChrome(agentId) {
   updateAgentTitleLabel(agent);
   const modelLabel = formatAgentCurrentModel(agent);
   if (modelLabel && modelLabel !== '—') setModelBadgeText(modelLabel);
+  if (channelLabelHold?.agentId === agentId) {
+    setChannelPickerLabel(channelLabelHold.label);
+    return;
+  }
   const cachedChannel = channelCatalogByAgent.get(agentId);
   if (!cachedChannel) return;
   const selected = (cachedChannel.options || []).find((option) => option.id === cachedChannel.selectedId);
@@ -5278,6 +5288,8 @@ async function switchToAgent(agentId) {
   if (multiSelectMode) exitMultiSelectMode();
 
   const token = ++agentSwitchToken;
+  channelSwitchToken += 1;
+  if (channelLabelHold) clearChannelPickerLabelHold();
   sessionSwitchSettling = true;
   hideAgentPopup();
   dismissBtwSideCard();
@@ -6889,9 +6901,10 @@ if (window.qizi.onPrivateChannelUpdated) {
     const agentId = currentAgentId;
     void window.qizi.getPrivateChannel(agentId).then((result) => {
       if (!result?.ok || channelPopup.hidden || agentId !== currentAgentId) return;
-      rememberChannelCatalog(agentId, result);
-      channelPopupCatalog = result;
-      renderChannelPopup(result);
+      const display = applyPrivateChannelCatalog(agentId, result);
+      if (!display) return;
+      channelPopupCatalog = display;
+      renderChannelPopup(display);
     }).catch(() => {});
   });
 }
@@ -8662,7 +8675,6 @@ async function testSettingsConnection() {
 }
 
 let channelPopupCatalog = null;
-let channelPopupBusy = false;
 let channelPickerLabelEpoch = 0;
 /** @type {Map<string, object>} */
 const channelCatalogByAgent = new Map();
@@ -8680,6 +8692,43 @@ function setChannelPickerLabel(text) {
   channelPickerBtn.setAttribute('aria-label', `哪一通道，当前 ${name}`);
 }
 
+function pinChannelPickerLabel(agentId, option) {
+  const label = option?.shortLabel || option?.label || 'Webchat';
+  channelPickerLabelEpoch += 1;
+  channelLabelHold = {
+    agentId: String(agentId || '').trim(),
+    choiceId: option?.id || 'mac',
+    label,
+  };
+  setChannelPickerLabel(label);
+}
+
+function clearChannelPickerLabelHold() {
+  channelLabelHold = null;
+  channelPickerLabelEpoch += 1;
+}
+
+function applyPrivateChannelCatalog(agentId, catalog, { updateLabel = false } = {}) {
+  if (!catalog?.ok) return null;
+  const id = String(agentId || '').trim();
+  const hold = channelLabelHold;
+  const holdHere = Boolean(hold && hold.agentId === id);
+  const serverAgrees = holdHere && catalog.selectedId === hold.choiceId;
+  if (serverAgrees) channelLabelHold = null;
+  const display = holdHere && !serverAgrees
+    ? { ...catalog, selectedId: hold.choiceId }
+    : catalog;
+  rememberChannelCatalog(id, display);
+  if (updateLabel) {
+    if (holdHere && !serverAgrees) setChannelPickerLabel(hold.label);
+    else {
+      const selected = (display.options || []).find((option) => option.id === display.selectedId);
+      setChannelPickerLabel(selected?.shortLabel || selected?.label);
+    }
+  }
+  return display;
+}
+
 async function refreshChannelPickerLabel() {
   if (!channelPickerBtn || !window.qizi?.getPrivateChannel) return;
   const epoch = ++channelPickerLabelEpoch;
@@ -8687,9 +8736,8 @@ async function refreshChannelPickerLabel() {
   try {
     const result = await window.qizi.getPrivateChannel(agentId);
     if (epoch !== channelPickerLabelEpoch || agentId !== currentAgentId) return;
-    if (result?.ok) rememberChannelCatalog(agentId, result);
-    const selected = (result?.options || []).find((option) => option.id === result?.selectedId);
-    setChannelPickerLabel(selected?.shortLabel || selected?.label);
+    if (!result?.ok) return;
+    applyPrivateChannelCatalog(agentId, result, { updateLabel: true });
   } catch {
     if (epoch !== channelPickerLabelEpoch) return;
   }
@@ -8811,103 +8859,157 @@ async function showChannelPopup() {
       if (!cached) renderChannelPopup(null, result?.error || '读取失败');
       return;
     }
-    rememberChannelCatalog(agentId, result);
-    channelPopupCatalog = result;
-    renderChannelPopup(result);
-    const selected = (result.options || []).find((option) => option.id === result.selectedId);
-    setChannelPickerLabel(selected?.shortLabel || selected?.label);
+    const display = applyPrivateChannelCatalog(agentId, result, { updateLabel: true });
+    channelPopupCatalog = display;
+    renderChannelPopup(display);
   } catch (err) {
     if (channelPopup.hidden || cached) return;
     renderChannelPopup(null, err.message || '读取失败');
   }
 }
 
-async function adoptShellSession(nextSessionKey) {
-  if (!nextSessionKey || nextSessionKey === currentSessionKey) return;
+function beginShellSessionView(nextSessionKey) {
+  if (!nextSessionKey || nextSessionKey === currentSessionKey) return false;
   if (multiSelectMode) exitMultiSelectMode();
   dismissBtwSideCard();
   clearPendingOutbound();
+  if (currentSessionKey) liveSessionSnapshots.set(currentSessionKey, messages);
   chatScopeEpoch += 1;
   resetChatTimeline();
-  messages = [];
   pendingImages = [];
   pendingFiles = [];
+  renderPendingAttachments();
   activeRunId = null;
   userAborted = false;
   currentSessionKey = nextSessionKey;
   currentAgentId = parseAgentIdFromSessionKey(nextSessionKey);
-  loadMessages();
-  messages = finalizeHistoryMessages(messages);
+  showSessionMessages(nextSessionKey);
+  stampMessagesToCurrentScope(messages);
   syncCurrentRunIdFromMessages();
   render({ scrollToBottom: true });
-  if (ENABLE_GATEWAY_HISTORY_SYNC) {
-    lastSyncedHistorySignature = '';
-    lastSessionSyncAt = 0;
-    await syncHistoryFromGateway();
-    const sessionInfo = await window.qizi.getSessionInfo();
-    if (sessionInfo?.ok && sessionInfo.hasActiveRun && !window.MeetingView?.isVisible?.()) {
-      await resumeInterruptedSession();
+  return true;
+}
+
+async function settleShellSessionView(nextSessionKey, token) {
+  try {
+    if (ENABLE_GATEWAY_HISTORY_SYNC) {
+      lastSyncedHistorySignature = '';
+      lastSessionSyncAt = 0;
+      await syncHistoryFromGateway({ duringSwitch: true });
+      if (token !== channelSwitchToken || currentSessionKey !== nextSessionKey) return;
+      if (isLocalOwnedActiveRun()) return;
+      const sessionInfo = await window.qizi.getSessionInfo();
+      if (token !== channelSwitchToken || currentSessionKey !== nextSessionKey) return;
+      if (isLocalOwnedActiveRun()) return;
+      if (sessionInfo?.ok && sessionInfo.hasActiveRun && !window.MeetingView?.isVisible?.()) {
+        await resumeInterruptedSession();
+      } else {
+        clearStaleStreamingState({ force: true });
+      }
     } else {
       clearStaleStreamingState({ force: true });
     }
-  } else {
-    clearStaleStreamingState({ force: true });
+    if (token !== channelSwitchToken || currentSessionKey !== nextSessionKey) return;
+    if (!isLocalOwnedActiveRun()) resetOutboundChatState({ clearQueue: true });
+    void refreshCurrentModelBadge();
+    void refreshSessionInfo();
+  } finally {
+    if (token === channelSwitchToken) sessionSwitchSettling = false;
   }
-  resetOutboundChatState({ clearQueue: true });
-  await refreshCurrentModelBadge();
-  await refreshSessionInfo();
+}
+
+function restoreShellSessionKey(agentId, sessionKey) {
+  const id = String(agentId || '').trim();
+  if (!id) return;
+  const stored = String(sessionKey || '').trim();
+  if (stored) shellSessionKeyByAgent.set(id, stored);
+  else shellSessionKeyByAgent.delete(id);
 }
 
 async function selectPrivateChannel(option) {
-  if (!option || option.selectable !== true || channelPopupBusy) return;
-  if (option.id === (channelPopupCatalog?.selectedId || 'mac')) {
+  if (!option || option.selectable !== true) return;
+  const selectedId = channelPopupCatalog?.selectedId
+    || channelCatalogByAgent.get(currentAgentId)?.selectedId
+    || 'mac';
+  if (option.id === selectedId) {
     hideChannelPopup();
     return;
   }
   if (!window.qizi?.setPrivateChannel) return;
-  channelPopupBusy = true;
-  if (channelPickerBtn) channelPickerBtn.classList.add('is-pending');
+
+  const token = ++channelSwitchToken;
+  const agentId = currentAgentId;
+  const prevLabel = channelPickerBtn?.textContent || 'Webchat';
+  const prevSessionKey = currentSessionKey;
+  const prevShellKey = shellSessionKeyByAgent.get(agentId) || '';
+  const cached = channelCatalogByAgent.get(agentId) || null;
+
+  pinChannelPickerLabel(agentId, option);
+  if (cached) rememberChannelCatalog(agentId, { ...cached, selectedId: option.id });
+  hideChannelPopup();
+  setStatus('正在切换通道…', 'pending');
+
   const meetingOpen = Boolean(window.MeetingView?.isVisible?.());
-  if (!meetingOpen && busy) {
+  const shouldAbort = !meetingOpen && busy;
+  if (shouldAbort) {
     userAborted = true;
-    try {
-      await window.qizi.abortChat();
-    } catch {
-      // 旧的这一轮停不掉也不挡住切换
-    }
     stopStreamHistoryPoll();
     setBusy(false);
     activeRunId = null;
   }
+  sessionSwitchSettling = true;
+  const targetKey = String(option.sessionKey || '').trim();
+  if (targetKey) beginShellSessionView(targetKey);
+  const abortPromise = shouldAbort
+    ? window.qizi.abortChat({ sessionKey: prevSessionKey }).catch(() => {})
+    : null;
+
+  const revert = () => {
+    clearChannelPickerLabelHold();
+    setChannelPickerLabel(prevLabel);
+    if (cached) rememberChannelCatalog(agentId, cached);
+    restoreShellSessionKey(agentId, prevShellKey);
+    if (currentSessionKey !== prevSessionKey) beginShellSessionView(prevSessionKey);
+    if (token === channelSwitchToken) sessionSwitchSettling = false;
+  };
+
   try {
+    if (abortPromise) await abortPromise;
+    if (token !== channelSwitchToken) return;
+    if (!busy) userAborted = false;
     const result = await window.qizi.setPrivateChannel({
-      agentId: currentAgentId,
+      agentId,
       choiceId: option.id,
     });
+    if (token !== channelSwitchToken) return;
     if (!result?.ok) {
-      renderChannelPopup(channelPopupCatalog, result?.error || '切换失败');
+      revert();
+      setStatus(result?.error || '切换失败', 'error');
       return;
     }
     if (result.shellSessionKeys) rememberShellMainKey({ shellSessionKeys: result.shellSessionKeys });
-    if (result.appliedToOpenChat && result.sessionKey) {
-      await adoptShellSession(result.sessionKey);
-    }
-    hideChannelPopup();
-    const cached = channelCatalogByAgent.get(currentAgentId);
-    if (cached) {
-      rememberChannelCatalog(currentAgentId, { ...cached, selectedId: option.id });
-    }
+    clearChannelPickerLabelHold();
     setChannelPickerLabel(option.shortLabel || result.label);
     const phrase = result.label === 'Webchat'
       ? '已改成 Webchat'
       : `已改成${result.label || '这条通道'}`;
     const extra = result.scopeChanged ? '之后各聊天软件的新私聊会分开。' : '';
     setStatus(`${phrase}。${extra}`, 'ok');
+    if (!result.appliedToOpenChat) {
+      if (currentSessionKey !== prevSessionKey) beginShellSessionView(prevSessionKey);
+      if (token === channelSwitchToken) sessionSwitchSettling = false;
+      return;
+    }
+    const sessionKey = String(result.sessionKey || targetKey || '').trim();
+    if (sessionKey && sessionKey !== currentSessionKey) {
+      restoreShellSessionKey(agentId, sessionKey);
+      beginShellSessionView(sessionKey);
+    }
+    void settleShellSessionView(currentSessionKey, token);
   } catch (err) {
-    renderChannelPopup(channelPopupCatalog, err.message || '切换失败');
-  } finally {
-    channelPopupBusy = false;
-    if (channelPickerBtn) channelPickerBtn.classList.remove('is-pending');
+    if (token !== channelSwitchToken) return;
+    revert();
+    setStatus(err.message || '切换失败', 'error');
   }
 }
 

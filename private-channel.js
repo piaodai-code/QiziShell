@@ -392,6 +392,7 @@ function publicChannelOption(option) {
     shortLabel: option.shortLabel || option.label,
     detail: option.detail || '',
     selectable: option.selectable === true,
+    sessionKey: option.sessionKey || '',
   };
 }
 

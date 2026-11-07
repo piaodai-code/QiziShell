@@ -9,6 +9,7 @@ const {
   buildChannelSessionKey,
   createPrivateChannelStore,
   buildPrivateChannelCatalog,
+  publicChannelOption,
 } = require('../private-channel');
 
 assert.equal(effectiveDmScope(undefined, 5), 'per-account-channel-peer');
@@ -98,6 +99,7 @@ assert.equal(mainCatalog.options.find((option) => option.channel === 'whatsapp')
 const mainTelegram = mainCatalog.options.find((option) => option.sessionKey === sessionKey);
 assert.ok(mainTelegram);
 assert.equal(mainTelegram.originatingTo, 'telegram:7044906239');
+assert.equal(publicChannelOption(mainTelegram).sessionKey, sessionKey);
 assert.equal(mainCatalog.options.some((option) => option.accountId === 'mo_bao'), false);
 
 const otherCatalog = buildPrivateChannelCatalog({

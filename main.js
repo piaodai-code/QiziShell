@@ -5816,9 +5816,11 @@ const CHANNEL_SOURCE_FRESH_MS = 60 * 1000;
 const CHANNEL_SOURCE_STALE_MS = 10 * 60 * 1000;
 let channelSourceCache = { at: 0, source: null };
 let channelSourceInflight = null;
+let channelSourceGeneration = 0;
 
 async function refreshPrivateChannelSource(client) {
   if (channelSourceInflight) return channelSourceInflight;
+  const generation = channelSourceGeneration;
   channelSourceInflight = (async () => {
     await client.waitForConnect();
     const [status, cfg, agents] = await Promise.all([
@@ -5847,6 +5849,7 @@ async function refreshPrivateChannelSource(client) {
       defaultAgentId: agents?.defaultId || 'main',
       mainKey: agents?.mainKey || SHELL_SESSION_MAIN_KEY,
     };
+    if (generation !== channelSourceGeneration) return source;
     channelSourceCache = { at: Date.now(), source };
     broadcastToRenderers('openclaw:private-channel-updated', { at: channelSourceCache.at });
     return source;
@@ -5856,10 +5859,11 @@ async function refreshPrivateChannelSource(client) {
   return channelSourceInflight;
 }
 
-async function loadPrivateChannelSource(client) {
+async function loadPrivateChannelSource(client, options = {}) {
+  const allowStale = Boolean(options && typeof options === 'object' && options.allowStale === true);
   const age = channelSourceCache.source ? Date.now() - channelSourceCache.at : Infinity;
   if (channelSourceCache.source && age < CHANNEL_SOURCE_FRESH_MS) return channelSourceCache.source;
-  if (channelSourceCache.source && age < CHANNEL_SOURCE_STALE_MS) {
+  if (channelSourceCache.source && (age < CHANNEL_SOURCE_STALE_MS || allowStale)) {
     void refreshPrivateChannelSource(client);
     return channelSourceCache.source;
   }
@@ -6054,7 +6058,7 @@ async function setPrivateChannelChoice(agentId, choiceId) {
   if (!id || !picked) return { ok: false, error: '请选择一个私聊通道' };
   try {
     const client = ensureGateway();
-    const source = await loadPrivateChannelSource(client, id);
+    const source = await loadPrivateChannelSource(client, { allowStale: true });
     const catalog = buildPrivateChannelCatalog({
       agentId: id,
       defaultAgentId: source.defaultAgentId,
@@ -6086,12 +6090,15 @@ async function setPrivateChannelChoice(agentId, choiceId) {
     } else {
       getPrivateChannels().setChoice(id, null);
     }
-    if (scopeChanged) channelSourceCache = { at: 0, source: null };
+    if (scopeChanged) {
+      channelSourceGeneration += 1;
+      channelSourceCache = { at: 0, source: null };
+    }
     const sessionKey = shellSessionKeyForAgent(id, source.mainKey);
     const viewingThisAgent = parseAgentIdFromSessionKey(getSessionKey()) === id;
     if (viewingThisAgent) {
       persistSessionKey(sessionKey);
-      await ensureGatewaySessionSubscription(client);
+      void ensureGatewaySessionSubscription(client);
     }
     return {
       ok: true,
@@ -6125,9 +6132,16 @@ ipcMain.handle('openclaw:private-channel:get', (event, agentId) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return getPrivateChannelCatalog(agentId);
 });
+let privateChannelSetTail = Promise.resolve();
+
 ipcMain.handle('openclaw:private-channel:set', (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
-  return setPrivateChannelChoice(payload?.agentId, payload?.choiceId);
+  const run = privateChannelSetTail.then(
+    () => setPrivateChannelChoice(payload?.agentId, payload?.choiceId),
+    () => setPrivateChannelChoice(payload?.agentId, payload?.choiceId),
+  );
+  privateChannelSetTail = run.then(() => {}, () => {});
+  return run;
 });
 ipcMain.handle('openclaw:forward', (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
@@ -6177,11 +6191,15 @@ ipcMain.handle('openclaw:session:permission:set', (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return setSessionPermission(payload?.mode);
 });
-ipcMain.handle('openclaw:abort', async (event) => {
+ipcMain.handle('openclaw:abort', async (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   const client = gateway;
-  const sessionKey = getSessionKey();
-  const runs = [...activeRuns.entries()].filter(([, run]) => !run.sessionKey || run.sessionKey === sessionKey);
+  const requested = String(payload?.sessionKey || '').trim();
+  const sessionKey = requested || getSessionKey();
+  const runs = [...activeRuns.entries()].filter(([, run]) => {
+    if (requested) return run.sessionKey === requested;
+    return !run.sessionKey || run.sessionKey === sessionKey;
+  });
 
   if (client?.connected) {
     if (runs.length > 0) {

@@ -95,7 +95,7 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:private-channel-updated', handler);
     return () => ipcRenderer.removeListener('openclaw:private-channel-updated', handler);
   },
-  abortChat: () => ipcRenderer.invoke('openclaw:abort'),
+  abortChat: (payload) => ipcRenderer.invoke('openclaw:abort', payload),
   getSessionKey: () => ipcRenderer.invoke('openclaw:getSessionKey'),
   listAgents: () => ipcRenderer.invoke('openclaw:agents:list'),
   forwardMessage: (payload) => ipcRenderer.invoke('openclaw:forward', payload),
