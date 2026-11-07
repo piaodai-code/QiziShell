@@ -32,6 +32,7 @@ let view = 'markup';
 let meta = { agentLabel: '', sessionKey: '' };
 let draftId = '';
 let busy = false;
+let reportedDirty = null;
 let composing = false;
 let composeRange = null;
 let composeDoneAt = 0;
@@ -406,6 +407,7 @@ function updateChrome() {
   stashBtn.disabled = busy || !touched;
   discardBtn.disabled = busy || !touched;
   sendBtn.disabled = busy || pending === 0;
+  reportDirty();
   document.querySelectorAll('.ce-view').forEach((button) => {
     const active = button.dataset.view === view;
     button.classList.toggle('is-active', active);
@@ -521,6 +523,41 @@ function draftSnapshot() {
 
 function isDirty() {
   return doc.baseText !== doc.originalText || Model.pendingCount(doc) > 0;
+}
+
+function reportDirty() {
+  const next = isDirty();
+  if (next === reportedDirty) return;
+  reportedDirty = next;
+  window.qiziCopyEdit?.setDirty?.(next);
+}
+
+async function handleCloseAction(action) {
+  if (busy) {
+    window.qiziCopyEdit.closeActionResult(false);
+    return;
+  }
+  const discarding = action === 'discard';
+  busy = true;
+  hideFloat();
+  hidePop();
+  hideMenu();
+  hideNote();
+  setStatus(discarding ? '正在放弃…' : '正在暂存…');
+  updateChrome();
+  try {
+    const result = discarding
+      ? await window.qiziCopyEdit.discard({ draftId })
+      : await window.qiziCopyEdit.stash(draftSnapshot());
+    if (!result?.ok) setStatus(result?.error || '操作失败', true);
+    window.qiziCopyEdit.closeActionResult(result?.ok === true);
+  } catch (err) {
+    setStatus(err?.message || '操作失败', true);
+    window.qiziCopyEdit.closeActionResult(false);
+  } finally {
+    busy = false;
+    updateChrome();
+  }
 }
 
 function locatePatch(id) {
@@ -1106,6 +1143,9 @@ document.addEventListener('keydown', (event) => {
 });
 
 async function boot() {
+  window.qiziCopyEdit.onCloseAction?.((action) => {
+    void handleCloseAction(action);
+  });
   const payload = await window.qiziCopyEdit.getPayload();
   applyPayload(payload || {});
   window.qiziCopyEdit.onPayload((next) => {

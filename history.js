@@ -657,14 +657,14 @@ async function runHistoryMenuAction(action) {
       return;
     }
     if (!window.qiziHistory?.openCopyEdit) {
-      setHistoryStatus('文案编辑不可用', 'error');
+      setHistoryStatus('文案修订不可用', 'error');
       return;
     }
     try {
       const result = await window.qiziHistory.openCopyEdit({ text });
-      if (!result?.ok) setHistoryStatus(result?.error || '打不开文案编辑', 'error');
+      if (!result?.ok) setHistoryStatus(result?.error || '打不开文案修订', 'error');
     } catch (err) {
-      setHistoryStatus(err?.message || '打不开文案编辑', 'error');
+      setHistoryStatus(err?.message || '打不开文案修订', 'error');
     }
     return;
   }

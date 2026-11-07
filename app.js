@@ -2208,7 +2208,7 @@ async function openCopyEditFromMessage(index) {
     sessionKey: currentSessionKey,
     agentLabel: formatAgentLabel(getCurrentAgentInfo()),
   });
-  if (result?.ok === false) setStatus(result.error || '打不开文案编辑', 'error');
+  if (result?.ok === false) setStatus(result.error || '打不开文案修订', 'error');
 }
 
 function visibleCopyEditDrafts() {

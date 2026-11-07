@@ -419,6 +419,10 @@ let meetingHelpWindow = null;
 let historyWindow = null;
 let historyWindowContext = null;
 let copyEditWindow = null;
+let copyEditClosing = false;
+let copyEditClosePrompt = false;
+let copyEditDirty = false;
+let copyEditCloseWait = null;
 let agentFilesWindow = null;
 let agentFilesClosing = false;
 let agentFilesClosePrompt = false;
@@ -1594,9 +1598,58 @@ function removeCopyEditDraft(id) {
 }
 
 function closeCopyEditWindowSoon() {
+  copyEditClosing = true;
   setTimeout(() => {
     if (copyEditWindow && !copyEditWindow.isDestroyed()) copyEditWindow.close();
   }, 0);
+}
+
+function requestCopyEditCloseAction(win, action) {
+  return new Promise((resolve) => {
+    if (copyEditCloseWait) copyEditCloseWait(false);
+    const timer = setTimeout(() => {
+      if (copyEditCloseWait !== finish) return;
+      copyEditCloseWait = null;
+      resolve(false);
+    }, 20000);
+    const finish = (ok) => {
+      clearTimeout(timer);
+      resolve(ok === true);
+    };
+    copyEditCloseWait = finish;
+    win.webContents.send('copy-edit:close-action', action);
+  });
+}
+
+async function confirmCopyEditClose(win) {
+  if (!win || win.isDestroyed() || copyEditClosing || copyEditClosePrompt) return;
+  if (!copyEditDirty) {
+    copyEditClosing = true;
+    win.close();
+    return;
+  }
+  copyEditClosePrompt = true;
+  try {
+    win.show();
+    const { response } = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['暂存修改', '放弃修改', '取消'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      message: '这些修改还没处理完。',
+      detail: '要先暂存再关闭吗？',
+    });
+    if (win.isDestroyed() || response === 2) return;
+    const ok = await requestCopyEditCloseAction(win, response === 0 ? 'stash' : 'discard');
+    if (!ok && !win.isDestroyed()) return;
+  } catch {
+    copyEditDirty = false;
+    copyEditClosing = true;
+    if (!win.isDestroyed()) win.destroy();
+  } finally {
+    copyEditClosePrompt = false;
+  }
 }
 
 function getAuthorizedCopyEditWindow(event) {
@@ -1608,7 +1661,7 @@ function getAuthorizedCopyEditWindow(event) {
 
 function openCopyEditWindow(payload) {
   copyEditPayload = payload;
-  const title = payload.agentLabel ? `文案编辑 · ${payload.agentLabel}` : '文案编辑';
+  const title = payload.agentLabel ? `文案修订 · ${payload.agentLabel}` : '文案修订';
   if (copyEditWindow && !copyEditWindow.isDestroyed()) {
     copyEditWindow.setTitle(title);
     safeSendTo(copyEditWindow.webContents, 'copy-edit:load', copyEditPayload);
@@ -1637,11 +1690,26 @@ function openCopyEditWindow(payload) {
     options.y = state.y;
   }
   const mainRef = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  copyEditDirty = false;
+  copyEditClosing = false;
+  copyEditClosePrompt = false;
   copyEditWindow = new BrowserWindow(options);
   copyEditWindow.setMenu(null);
   copyEditWindow.on('resize', saveCopyEditWindowState);
   copyEditWindow.on('move', saveCopyEditWindowState);
-  copyEditWindow.on('close', saveCopyEditWindowState);
+  copyEditWindow.on('close', (event) => {
+    saveCopyEditWindowState();
+    if (!copyEditWindow || copyEditWindow.isDestroyed()) return;
+    if (copyEditClosing || !copyEditDirty) return;
+    if (copyEditClosePrompt) {
+      copyEditDirty = false;
+      copyEditClosing = true;
+      copyEditWindow.destroy();
+      return;
+    }
+    event.preventDefault();
+    void confirmCopyEditClose(copyEditWindow);
+  });
   copyEditWindow.once('ready-to-show', () => {
     if (state.x == null && mainRef && !mainRef.isDestroyed()) {
       centerAuxiliaryWindowOnParent(copyEditWindow, mainRef);
@@ -1652,6 +1720,14 @@ function openCopyEditWindow(payload) {
   copyEditWindow.loadFile(path.join(__dirname, 'copy-edit.html'));
   copyEditWindow.on('closed', () => {
     copyEditWindow = null;
+    copyEditClosing = false;
+    copyEditDirty = false;
+    copyEditClosePrompt = false;
+    if (copyEditCloseWait) {
+      const wait = copyEditCloseWait;
+      copyEditCloseWait = null;
+      wait(false);
+    }
   });
   return { ok: true };
 }
@@ -6649,7 +6725,7 @@ ipcMain.handle('agent-files:save', async (event, payload) => {
 });
 
 ipcMain.handle('copy-edit:open-from-history', (event, payload) => {
-  if (!getAuthorizedHistoryWindow(event)) return { ok: false, error: '无权打开文案编辑' };
+  if (!getAuthorizedHistoryWindow(event)) return { ok: false, error: '无权打开文案修订' };
   const clean = sanitizeCopyEditPayload(payload, {
     sessionKey: historyWindowContext?.sessionKey || '',
     agentLabel: historyWindowContext?.agentLabel || '',
@@ -6661,6 +6737,18 @@ ipcMain.handle('copy-edit:open-from-history', (event, payload) => {
 ipcMain.handle('copy-edit:payload', (event) => {
   if (!getAuthorizedCopyEditWindow(event)) return null;
   return copyEditPayload;
+});
+
+ipcMain.on('copy-edit:dirty', (event, dirty) => {
+  if (!getAuthorizedCopyEditWindow(event)) return;
+  copyEditDirty = dirty === true;
+});
+
+ipcMain.on('copy-edit:close-action-result', (event, ok) => {
+  if (!getAuthorizedCopyEditWindow(event)) return;
+  const wait = copyEditCloseWait;
+  copyEditCloseWait = null;
+  if (wait) wait(ok === true);
 });
 
 ipcMain.handle('copy-edit:send', async (event, payload) => {
