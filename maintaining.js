@@ -436,6 +436,73 @@
     syncSendButton();
   }
 
+  const IMAGE_DROP_MIMES = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp', 'image/heic', 'image/heif'];
+  const IMAGE_DROP_EXTENSIONS = /\.(png|jpe?g|gif|webp|heic|heif)$/i;
+  const MAX_DROPPED_FILE_BYTES = 20 * 1024 * 1024;
+
+  function isImageDropFile(file) {
+    const mime = (file?.type || '').toLowerCase();
+    const name = file?.name || '';
+    return Boolean((mime && IMAGE_DROP_MIMES.includes(mime)) || IMAGE_DROP_EXTENSIONS.test(name));
+  }
+
+  function filesFromDataTransfer(dataTransfer) {
+    const items = Array.from(dataTransfer?.items || []);
+    const files = [];
+    let directories = 0;
+    if (items.some((item) => item.kind === 'file')) {
+      for (const item of items) {
+        if (item.kind !== 'file') continue;
+        const entry = item.webkitGetAsEntry?.();
+        if (entry?.isDirectory) {
+          directories += 1;
+          continue;
+        }
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+      return { files, directories };
+    }
+    return { files: Array.from(dataTransfer?.files || []), directories };
+  }
+
+  function readDroppedFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function addDroppedFile(file) {
+    if (!file) return 'skip';
+    if (isImageDropFile(file)) {
+      try {
+        const dataUrl = await readDroppedFile(file);
+        addImages([{ dataUrl, name: file.name || 'image.png' }]);
+        return 'image';
+      } catch (err) {
+        console.error('[maintaining] could not read dropped image', err);
+        return 'skip';
+      }
+    }
+    if (file.size > MAX_DROPPED_FILE_BYTES) return 'large';
+    try {
+      const dataUrl = await readDroppedFile(file);
+      addFiles([{
+        dataUrl,
+        name: file.name || 'file',
+        size: file.size || 0,
+        mimeType: file.type || 'application/octet-stream',
+      }]);
+      return 'file';
+    } catch (err) {
+      console.error('[maintaining] could not read dropped file', err);
+      return 'skip';
+    }
+  }
+
   function choiceLabel(choice) {
     if (choice === 'once') return 'Allow once';
     if (choice === 'session') return 'Allow for this session';
@@ -1022,6 +1089,63 @@
   document.addEventListener('click', (event) => {
     if (!attachPopup.hidden && !event.target.closest('.attach-picker-wrap')) hideAttach();
     if (!contextMenuEl.hidden && !event.target.closest('#msg-context-menu')) hideContextMenu();
+  });
+
+  let dragCounter = 0;
+  function isFileDrag(event) {
+    return Array.from(event.dataTransfer?.types || []).includes('Files');
+  }
+  document.addEventListener('dragenter', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragCounter += 1;
+    document.body.classList.add('drag-over');
+  });
+  document.addEventListener('dragleave', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragCounter -= 1;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      document.body.classList.remove('drag-over');
+    }
+  });
+  document.addEventListener('dragover', (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+  });
+  document.addEventListener('drop', async (event) => {
+    if (!isFileDrag(event)) return;
+    event.preventDefault();
+    dragCounter = 0;
+    document.body.classList.remove('drag-over');
+    const { files, directories } = filesFromDataTransfer(event.dataTransfer);
+    let images = 0;
+    let attached = 0;
+    let skipped = directories;
+    let oversized = 0;
+    for (const file of files) {
+      const result = await addDroppedFile(file);
+      if (result === 'image') images += 1;
+      else if (result === 'file') attached += 1;
+      else if (result === 'large') oversized += 1;
+      else skipped += 1;
+    }
+    const added = images + attached;
+    if (added > 0) inputEl.focus();
+    const parts = [];
+    if (images) parts.push(images === 1 ? '1 image' : `${images} images`);
+    if (attached) parts.push(attached === 1 ? '1 file' : `${attached} files`);
+    if (added > 0 && oversized > 0) {
+      setStatus(`Added ${parts.join(' and ')}. A file over 20 MB was left out.`, 'error');
+    } else if (added > 0) {
+      setStatus(`Added ${parts.join(' and ')}`, 'ok');
+    } else if (oversized > 0) {
+      setStatus('That file is larger than 20 MB', 'error');
+    } else if (skipped > 0) {
+      setStatus('That can’t be attached', 'error');
+    }
   });
   requestEl.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-choice]');

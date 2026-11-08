@@ -6,7 +6,6 @@
   --text: #222;
   --muted: #888;
   --side: 248px;
-  --editor: 0px;
 }
 
 * { box-sizing: border-box; }
@@ -23,13 +22,10 @@ button { font: inherit; color: inherit; }
 
 .af-shell {
   display: grid;
-  grid-template-columns: var(--side) minmax(0, 1fr) var(--editor);
+  grid-template-columns: var(--side) minmax(0, 1fr);
   height: 100%;
 }
 
-.af-shell.is-editor-open {
-  grid-template-columns: var(--side) calc(var(--pane) - var(--side)) var(--editor);
-}
 .af-shell.is-side-closed { --side: 44px; }
 
 .af-side, .af-preview, .af-editor {
@@ -46,13 +42,15 @@ button { font: inherit; color: inherit; }
 
 .af-preview { display: flex; flex-direction: column; }
 .af-editor {
-  border-left: 1px solid var(--border);
+  flex: 1;
   display: flex;
   flex-direction: column;
   position: relative;
   overflow: hidden;
 }
-.af-editor[hidden] { display: none !important; }
+.af-editor[hidden],
+.af-preview-body[hidden],
+.af-bar-actions [hidden] { display: none !important; }
 
 .af-side-head, .af-bar {
   display: flex;
@@ -333,6 +331,7 @@ button { font: inherit; color: inherit; }
 }
 
 .af-bar-actions { display: flex; align-items: center; gap: 4px; }
+.af-editor .af-readonly-note { margin: 8px 10px 0; }
 .af-editor-host {
   position: relative;
   flex: 1;
@@ -345,7 +344,7 @@ button { font: inherit; color: inherit; }
 
 .af-help {
   position: absolute;
-  top: 46px;
+  top: 8px;
   right: 10px;
   width: 280px;
   max-height: calc(100% - 60px);

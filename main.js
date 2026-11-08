@@ -387,10 +387,132 @@ function shellWindowVisible(win) {
   return Boolean(win && !win.isDestroyed() && win.isVisible());
 }
 
+function dockWanted() {
+  return shellWindowVisible(mainWindow)
+    || shellWindowVisible(maintainingWindow)
+    || shellWindowVisible(controlUiWindow);
+}
+
+// 状态栏点击还在跟踪时切 NSApplicationActivationPolicy，macOS 会把这次点击
+// 算进程序坞：Dock 被唤出，访达停在放大状态，窗口也抢不到最前。等点击结束后再改。
+const STATUS_ITEM_SETTLE_MS = 160;
+const DOCK_HIDE_GAP_MS = 1100;
+let dockSyncTimer = null;
+let dockShowInflight = null;
+let lastDockHideAt = 0;
+let statusItemBusyUntil = 0;
+/** @type {WeakMap<Electron.BrowserWindow, number>} */
+const presentTokens = new WeakMap();
+
+function nextPresentToken(win) {
+  const token = (presentTokens.get(win) || 0) + 1;
+  presentTokens.set(win, token);
+  return token;
+}
+
+function presentStillValid(win, token) {
+  return Boolean(win && !win.isDestroyed() && presentTokens.get(win) === token);
+}
+
+function cancelPresent(win) {
+  if (!win || win.isDestroyed()) return;
+  nextPresentToken(win);
+}
+
+function cancelScheduledDockSync() {
+  if (!dockSyncTimer) return;
+  clearTimeout(dockSyncTimer);
+  dockSyncTimer = null;
+}
+
+function ensureDockShown() {
+  if (process.platform !== 'darwin' || !app.dock) return Promise.resolve();
+  if (app.dock.isVisible()) return Promise.resolve();
+  if (!dockShowInflight) {
+    dockShowInflight = Promise.resolve()
+      .then(() => app.dock.show())
+      .finally(() => {
+        dockShowInflight = null;
+      });
+  }
+  return dockShowInflight;
+}
+
+function applyDockVisibility() {
+  dockSyncTimer = null;
+  if (process.platform !== 'darwin' || !app.dock) return;
+  if (dockWanted()) {
+    if (!app.dock.isVisible()) void ensureDockShown();
+    return;
+  }
+  if (dockShowInflight) {
+    void dockShowInflight.then(() => syncDockVisibility());
+    return;
+  }
+  if (!app.dock.isVisible()) return;
+  const wait = DOCK_HIDE_GAP_MS - (Date.now() - lastDockHideAt);
+  if (lastDockHideAt && wait > 0) {
+    dockSyncTimer = setTimeout(applyDockVisibility, wait);
+    return;
+  }
+  app.dock.hide();
+  lastDockHideAt = Date.now();
+}
+
+function markStatusItemInteraction() {
+  statusItemBusyUntil = Date.now() + STATUS_ITEM_SETTLE_MS;
+}
+
 function syncDockVisibility() {
   if (process.platform !== 'darwin' || !app.dock) return;
-  if (shellWindowVisible(mainWindow) || shellWindowVisible(maintainingWindow)) app.dock.show();
-  else app.dock.hide();
+  cancelScheduledDockSync();
+  const delay = Math.max(0, statusItemBusyUntil - Date.now());
+  dockSyncTimer = setTimeout(applyDockVisibility, delay);
+}
+
+function raiseBrowserWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  if (win.isMinimized()) win.restore();
+  const alreadyFront = win.isVisible()
+    && process.platform === 'darwin'
+    && app.isActive()
+    && BrowserWindow.getFocusedWindow() === win;
+  if (alreadyFront) return;
+  if (!win.isVisible()) win.show();
+  win.moveTop();
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  win.focus();
+}
+
+function presentNeedsDefer() {
+  if (process.platform !== 'darwin') return false;
+  // 菜单栏点击刚发生：等跟踪结束再 orderFront，否则菜单关闭会把窗口压回去。
+  if (Date.now() < statusItemBusyUntil) return true;
+  if (app.dock && !app.dock.isVisible()) return true;
+  if (!app.isActive()) return true;
+  return false;
+}
+
+function presentWindow(win, { dock = false } = {}) {
+  if (!win || win.isDestroyed()) return;
+  const token = nextPresentToken(win);
+  const defer = presentNeedsDefer();
+  const run = () => {
+    if (!presentStillValid(win, token)) return;
+    const finish = () => {
+      if (!presentStillValid(win, token)) return;
+      raiseBrowserWindow(win);
+      if (dock) syncDockVisibility();
+    };
+    if (dock && process.platform === 'darwin' && app.dock && !app.dock.isVisible()) {
+      cancelScheduledDockSync();
+      void ensureDockShown().then(finish, finish);
+      return;
+    }
+    finish();
+  };
+  if (defer) setTimeout(run, STATUS_ITEM_SETTLE_MS);
+  else run();
 }
 
 function forbiddenSenderResult() {
@@ -477,6 +599,7 @@ const SHELL_SESSION_MAIN_KEY = 'main';
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 const COPY_EDIT_STATE_PATH = path.join(app.getPath('userData'), 'copy-edit-window-state.json');
 const HISTORY_STATE_PATH = path.join(app.getPath('userData'), 'history-window-state.json');
+const AGENT_FILES_STATE_PATH = path.join(app.getPath('userData'), 'agent-files-window-state.json');
 const messageArchive = createMessageArchiveStore(path.join(app.getPath('userData'), 'message-archive'));
 const HISTORY_MIN_WIDTH = 360;
 const HISTORY_MIN_HEIGHT = 420;
@@ -524,10 +647,7 @@ function shouldIgnoreAppActivate() {
 
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) createWindow();
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  if (!mainWindow.isVisible()) mainWindow.show();
-  mainWindow.focus();
-  syncDockVisibility();
+  presentWindow(mainWindow, { dock: true });
 }
 
 function getSessionKeyPath() {
@@ -1313,9 +1433,9 @@ function createAuxiliaryModalWindow(options) {
   win.setMenu(null);
   setMainWindowAuxModalDim(true);
   win.once('ready-to-show', () => {
+    if (win.isDestroyed()) return;
     centerAuxiliaryWindowOnParent(win, parent);
-    win.show();
-    win.focus();
+    presentWindow(win, { dock: false });
   });
   win.on('closed', () => {
     setMainWindowAuxModalDim(false);
@@ -1732,193 +1852,73 @@ function openCopyEditWindow(payload) {
   return { ok: true };
 }
 
+const AGENT_FILES_MIN_WIDTH = 480;
 const AGENT_FILES_MIN_HEIGHT = 560;
-const AGENT_FILES_EDITOR_MIN = 320;
 
-let agentFilesEditorOpen = false;
-let agentFilesPreviewWidth = 0;
-let agentFilesPreviewX = 0;
-let agentFilesWidthTimer = null;
-let agentFilesAnimateToken = 0;
-let agentFilesAnimateResolve = null;
-let agentFilesAdjusting = false;
+let agentFilesStateTimer = null;
 
-function agentFilesWorkArea(bounds) {
-  const anchor = bounds
-    || (agentFilesWindow && !agentFilesWindow.isDestroyed() ? agentFilesWindow.getBounds() : null)
-    || (mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null);
+function agentFilesWorkArea() {
+  const anchor = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : null;
   const display = anchor ? screen.getDisplayMatching(anchor) : screen.getPrimaryDisplay();
   return display.workArea;
 }
 
-function agentFilesHalfScreenBounds() {
+function agentFilesDefaultBounds() {
   const area = agentFilesWorkArea();
   return {
     x: area.x,
     y: area.y,
-    width: Math.max(1, Math.round(area.width / 2)),
+    width: Math.max(AGENT_FILES_MIN_WIDTH, Math.round(area.width / 2)),
     height: Math.max(AGENT_FILES_MIN_HEIGHT, area.height),
   };
 }
 
-function applyAgentFilesSizeLimits() {
-  if (!agentFilesWindow || agentFilesWindow.isDestroyed() || agentFilesAdjusting) return;
-  const area = agentFilesWorkArea();
-  const half = Math.max(1, Math.round(area.width / 2));
-  const maxHeight = Math.max(AGENT_FILES_MIN_HEIGHT, area.height);
-  const minWidth = agentFilesEditorOpen
-    ? Math.min(area.width, Math.max(320, (agentFilesPreviewWidth || half) + AGENT_FILES_EDITOR_MIN))
-    : Math.min(640, half);
-  const maxWidth = agentFilesEditorOpen ? area.width : half;
-  agentFilesAdjusting = true;
+function loadAgentFilesWindowState() {
+  const fallback = agentFilesDefaultBounds();
   try {
-    // 先把两边都放松，避免最小宽度大于最大宽度时窗口被撑飞。
-    agentFilesWindow.setMinimumSize(200, 200);
-    agentFilesWindow.setMaximumSize(area.width, maxHeight);
-    agentFilesWindow.setMinimumSize(Math.min(minWidth, maxWidth), AGENT_FILES_MIN_HEIGHT);
-    agentFilesWindow.setMaximumSize(Math.max(minWidth, maxWidth), maxHeight);
-  } finally {
-    agentFilesAdjusting = false;
+    const saved = JSON.parse(fs.readFileSync(AGENT_FILES_STATE_PATH, 'utf8'));
+    const width = Math.max(AGENT_FILES_MIN_WIDTH, Math.min(6000, Number(saved.width) || fallback.width));
+    const height = Math.max(AGENT_FILES_MIN_HEIGHT, Math.min(4000, Number(saved.height) || fallback.height));
+    const x = Number(saved.x);
+    const y = Number(saved.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return { ...fallback, width, height };
+    const visible = screen.getAllDisplays().some((display) => {
+      const area = display.workArea;
+      return x < area.x + area.width - 80
+        && x + width > area.x + 80
+        && y < area.y + area.height - 40
+        && y + 48 > area.y;
+    });
+    if (!visible) return { ...fallback, width, height };
+    return { x, y, width, height };
+  } catch {
+    return fallback;
   }
 }
 
-function clampAgentFilesWindow() {
-  if (!agentFilesWindow || agentFilesWindow.isDestroyed() || agentFilesAdjusting) return;
-  const area = agentFilesWorkArea();
-  const bounds = agentFilesWindow.getBounds();
-  const width = Math.min(Math.max(bounds.width, 480), area.width);
-  const height = Math.min(Math.max(bounds.height, AGENT_FILES_MIN_HEIGHT), area.height);
-  const x = Math.min(Math.max(bounds.x, area.x), area.x + area.width - width);
-  const y = Math.min(Math.max(bounds.y, area.y), area.y + area.height - height);
-  if (x === bounds.x && y === bounds.y && width === bounds.width && height === bounds.height) return;
-  agentFilesAdjusting = true;
+function saveAgentFilesWindowState() {
+  if (agentFilesStateTimer) {
+    clearTimeout(agentFilesStateTimer);
+    agentFilesStateTimer = null;
+  }
+  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+  if (agentFilesWindow.isMinimized() || agentFilesWindow.isFullScreen()) return;
   try {
-    agentFilesWindow.setBounds({ x, y, width, height });
-  } finally {
-    agentFilesAdjusting = false;
+    const bounds = agentFilesWindow.getBounds();
+    fs.writeFileSync(AGENT_FILES_STATE_PATH, JSON.stringify({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }));
+  } catch {
+    // non-fatal
   }
 }
 
-function stopAgentFilesAnimation() {
-  agentFilesAnimateToken += 1;
-  if (agentFilesWidthTimer) {
-    clearTimeout(agentFilesWidthTimer);
-    agentFilesWidthTimer = null;
-  }
-  const resolve = agentFilesAnimateResolve;
-  agentFilesAnimateResolve = null;
-  if (resolve) resolve(false);
-}
-
-function animateAgentFilesBounds(target) {
-  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return Promise.resolve(false);
-  if (agentFilesWidthTimer) {
-    clearTimeout(agentFilesWidthTimer);
-    agentFilesWidthTimer = null;
-  }
-  const token = ++agentFilesAnimateToken;
-  const previous = agentFilesAnimateResolve;
-  const start = agentFilesWindow.getBounds();
-  const fromX = start.x;
-  const fromWidth = start.width;
-  const began = Date.now();
-  const duration = 220;
-  return new Promise((resolve) => {
-    agentFilesAnimateResolve = resolve;
-    if (previous) previous(false);
-    const step = () => {
-      if (token !== agentFilesAnimateToken) return;
-      if (!agentFilesWindow || agentFilesWindow.isDestroyed()) {
-        agentFilesWidthTimer = null;
-        agentFilesAnimateResolve = null;
-        resolve(false);
-        return;
-      }
-      const t = Math.min(1, (Date.now() - began) / duration);
-      const eased = 1 - ((1 - t) ** 3);
-      const current = agentFilesWindow.getBounds();
-      agentFilesAdjusting = true;
-      try {
-        agentFilesWindow.setBounds({
-          x: Math.round(fromX + (target.x - fromX) * eased),
-          y: current.y,
-          width: Math.max(1, Math.round(fromWidth + (target.width - fromWidth) * eased)),
-          height: current.height,
-        });
-      } finally {
-        agentFilesAdjusting = false;
-      }
-      if (t < 1) {
-        agentFilesWidthTimer = setTimeout(step, 16);
-        return;
-      }
-      agentFilesWidthTimer = null;
-      agentFilesAnimateResolve = null;
-      resolve(true);
-    };
-    step();
-  });
-}
-
-function resetAgentFilesWindowBounds() {
-  stopAgentFilesAnimation();
-  agentFilesEditorOpen = false;
-  agentFilesPreviewWidth = 0;
-  agentFilesPreviewX = 0;
-  const bounds = agentFilesHalfScreenBounds();
-  applyAgentFilesSizeLimits();
-  if (agentFilesWindow && !agentFilesWindow.isDestroyed()) agentFilesWindow.setBounds(bounds);
-  return bounds;
-}
-
-async function setAgentFilesEditorPane(open) {
-  if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return { ok: false };
-  const current = agentFilesWindow.getBounds();
-  const area = agentFilesWorkArea(current);
-  const maxHeight = Math.max(AGENT_FILES_MIN_HEIGHT, area.height);
-  if (open) {
-    if (!agentFilesEditorOpen || !agentFilesPreviewWidth) {
-      agentFilesPreviewWidth = current.width;
-      agentFilesPreviewX = current.x;
-    }
-    agentFilesEditorOpen = true;
-    agentFilesAdjusting = true;
-    try {
-      agentFilesWindow.setMinimumSize(200, 200);
-      agentFilesWindow.setMaximumSize(area.width, maxHeight);
-    } finally {
-      agentFilesAdjusting = false;
-    }
-    const previewWidth = agentFilesPreviewWidth || current.width;
-    const right = area.x + area.width;
-    let width = area.width;
-    let x = current.x;
-    if (previewWidth + AGENT_FILES_EDITOR_MIN > width) {
-      width = Math.min(area.width, previewWidth + AGENT_FILES_EDITOR_MIN);
-    }
-    if (x + width > right) x = Math.max(area.x, right - width);
-    if (Math.abs(width - current.width) < 2 && Math.abs(x - current.x) < 2) {
-      applyAgentFilesSizeLimits();
-      return { ok: true };
-    }
-    const finished = await animateAgentFilesBounds({ x, width });
-    if (!finished) return { ok: true };
-    applyAgentFilesSizeLimits();
-    return { ok: true };
-  }
-  if (!agentFilesEditorOpen && !agentFilesPreviewWidth) return { ok: true };
-  agentFilesEditorOpen = false;
-  const half = Math.max(1, Math.round(area.width / 2));
-  agentFilesWindow.setMinimumSize(Math.min(640, half), AGENT_FILES_MIN_HEIGHT);
-  const width = agentFilesPreviewWidth || half;
-  const x = Number.isFinite(agentFilesPreviewX) ? agentFilesPreviewX : current.x;
-  const finished = await animateAgentFilesBounds({ x, width });
-  if (agentFilesEditorOpen) return { ok: true };
-  agentFilesPreviewWidth = 0;
-  agentFilesPreviewX = 0;
-  if (!finished) return { ok: true };
-  applyAgentFilesSizeLimits();
-  return { ok: true };
+function scheduleAgentFilesWindowState() {
+  if (agentFilesStateTimer) clearTimeout(agentFilesStateTimer);
+  agentFilesStateTimer = setTimeout(saveAgentFilesWindowState, 300);
 }
 
 function getAuthorizedAgentFilesWindow(event) {
@@ -2005,21 +2005,18 @@ function openAgentFilesWindow(payload) {
   const title = `${agentLabel} · 头脑与技能`;
   if (agentFilesWindow && !agentFilesWindow.isDestroyed()) {
     agentFilesWindow.setTitle(title);
-    resetAgentFilesWindowBounds();
     safeSendTo(agentFilesWindow.webContents, 'agent-files:reload');
     agentFilesWindow.show();
     agentFilesWindow.focus();
     return { ok: true };
   }
-  const bounds = agentFilesHalfScreenBounds();
+  const bounds = loadAgentFilesWindowState();
   const options = {
     ...bounds,
-    minWidth: Math.min(640, bounds.width),
+    minWidth: AGENT_FILES_MIN_WIDTH,
     minHeight: AGENT_FILES_MIN_HEIGHT,
-    maxWidth: bounds.width,
-    maxHeight: bounds.height,
     resizable: true,
-    maximizable: false,
+    maximizable: true,
     fullscreenable: false,
     title,
     backgroundColor: '#f2f2f2',
@@ -2032,19 +2029,12 @@ function openAgentFilesWindow(payload) {
   };
   agentFilesWindow = new BrowserWindow(options);
   agentFilesWindow.setMenu(null);
-  agentFilesEditorOpen = false;
-  agentFilesPreviewWidth = 0;
-  agentFilesPreviewX = 0;
   agentFilesDirty = false;
   agentFilesClosing = false;
-  applyAgentFilesSizeLimits();
-  agentFilesWindow.on('move', () => {
-    if (agentFilesWidthTimer || agentFilesAdjusting) return;
-    applyAgentFilesSizeLimits();
-  });
+  agentFilesWindow.on('resize', scheduleAgentFilesWindowState);
+  agentFilesWindow.on('move', scheduleAgentFilesWindowState);
   agentFilesWindow.once('ready-to-show', () => {
     if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
-    clampAgentFilesWindow();
     agentFilesWindow.show();
     agentFilesWindow.focus();
   });
@@ -2057,6 +2047,7 @@ function openAgentFilesWindow(payload) {
   agentFilesWindow.loadFile(path.join(__dirname, 'agent-files.html'));
   agentFilesWindow.on('close', (event) => {
     if (!agentFilesWindow || agentFilesWindow.isDestroyed()) return;
+    saveAgentFilesWindowState();
     if (agentFilesClosing || !agentFilesDirty) return;
     if (agentFilesClosePrompt) {
       agentFilesDirty = false;
@@ -2071,9 +2062,10 @@ function openAgentFilesWindow(payload) {
     agentFilesWindow = null;
     agentFilesClosing = false;
     agentFilesDirty = false;
-    agentFilesEditorOpen = false;
-    agentFilesPreviewWidth = 0;
-    agentFilesPreviewX = 0;
+    if (agentFilesStateTimer) {
+      clearTimeout(agentFilesStateTimer);
+      agentFilesStateTimer = null;
+    }
     if (agentFilesSaveWait) {
       const wait = agentFilesSaveWait;
       agentFilesSaveWait = null;
@@ -2092,7 +2084,7 @@ async function agentFilesGateway() {
 function openMeetingHelp() {
   if (meetingHelpWindow && !meetingHelpWindow.isDestroyed()) {
     showMainWindow();
-    meetingHelpWindow.focus();
+    presentWindow(meetingHelpWindow, { dock: false });
     return;
   }
   meetingHelpWindow = createAuxiliaryModalWindow({
@@ -2117,7 +2109,7 @@ function openMeetingHelp() {
 function openAbout() {
   if (aboutWindow && !aboutWindow.isDestroyed()) {
     showMainWindow();
-    aboutWindow.focus();
+    presentWindow(aboutWindow, { dock: false });
     return;
   }
   const { version } = require('./package.json');
@@ -2144,7 +2136,7 @@ function getAuthorizedUpdateWindow(event) {
 function openUpdate() {
   if (updateWindow && !updateWindow.isDestroyed()) {
     showMainWindow();
-    updateWindow.focus();
+    presentWindow(updateWindow, { dock: false });
     safeSendTo(updateWindow.webContents, 'qizi-update:recheck');
     return;
   }
@@ -2226,11 +2218,11 @@ function openOpenClawControl() {
   }
 
   if (controlUiWindow && !controlUiWindow.isDestroyed()) {
-    controlUiWindow.focus();
     if (controlUiLaunchUrl !== controlUrl) {
       controlUiLaunchUrl = controlUrl;
       void controlUiWindow.loadURL(controlUrl);
     }
+    presentWindow(controlUiWindow, { dock: true });
     return { ok: true, url: gatewayWsUrlToControlHttpUrl(wsUrl) };
   }
 
@@ -2241,6 +2233,7 @@ function openOpenClawControl() {
     minWidth: 900,
     minHeight: 600,
     title: 'OpenClaw Control',
+    show: false,
     backgroundColor: '#111111',
     webPreferences: {
       nodeIntegration: false,
@@ -2272,10 +2265,15 @@ function openOpenClawControl() {
       event.preventDefault();
     }
   });
+  controlUiWindow.once('ready-to-show', () => {
+    presentWindow(controlUiWindow, { dock: true });
+  });
   void controlUiWindow.loadURL(controlUrl);
   controlUiWindow.on('closed', () => {
+    cancelPresent(controlUiWindow);
     controlUiWindow = null;
     controlUiLaunchUrl = null;
+    syncDockVisibility();
   });
   return { ok: true, url: gatewayWsUrlToControlHttpUrl(wsUrl) };
 }
@@ -4108,6 +4106,7 @@ function createWindow() {
     // 拦截「红点关闭」→ 隐藏而不是退出（菜单栏应用习惯）
     if (!isQuitting) {
       event.preventDefault();
+      cancelPresent(mainWindow);
       mainWindow.hide();
       syncDockVisibility();
     }
@@ -4154,6 +4153,7 @@ function createWindow() {
 function toggleMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
+    cancelPresent(mainWindow);
     mainWindow.hide();
     syncDockVisibility();
   } else {
@@ -4186,13 +4186,20 @@ function trayMenuIcon(filename) {
   }
 }
 
+function onTrayMenuAction(fn) {
+  return () => {
+    markStatusItemInteraction();
+    fn();
+  };
+}
+
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
-    { label: 'Settings', icon: trayMenuIcon('gear.png'), click: () => openSettings() },
-    { label: 'Maintaining', icon: trayMenuIcon('tools-wrench.png'), click: () => openMaintainingWindow() },
-    { label: 'Openclaw Control', icon: trayMenuIcon('openclaw-control.png'), click: () => openOpenClawControl() },
-    { label: 'Update', icon: trayMenuIcon('update-menu.png'), click: () => openUpdate() },
-    { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: () => openAbout() },
+    { label: 'Settings', icon: trayMenuIcon('gear.png'), click: onTrayMenuAction(() => openSettings()) },
+    { label: 'Maintaining', icon: trayMenuIcon('tools-wrench.png'), click: onTrayMenuAction(() => openMaintainingWindow()) },
+    { label: 'Openclaw Control', icon: trayMenuIcon('openclaw-control.png'), click: onTrayMenuAction(() => openOpenClawControl()) },
+    { label: 'Update', icon: trayMenuIcon('update-menu.png'), click: onTrayMenuAction(() => openUpdate()) },
+    { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: onTrayMenuAction(() => openAbout()) },
     { type: 'separator' },
     { label: 'Quit', icon: trayMenuIcon('exit.png'), click: () => {
       isQuitting = true;
@@ -4212,6 +4219,7 @@ function createTray() {
     tray.on('click', (event) => {
       if (event.ctrlKey || event.metaKey) return;
       markTrayClick();
+      markStatusItemInteraction();
       toggleMainWindow();
     });
     tray.on('right-click', () => {
@@ -6683,11 +6691,6 @@ ipcMain.on('agent-files:save-result', (event, ok) => {
   if (wait) wait(ok === true);
 });
 
-ipcMain.handle('agent-files:editor-pane', async (event, open) => {
-  if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
-  return setAgentFilesEditorPane(open === true);
-});
-
 ipcMain.handle('agent-files:list', async (event) => {
   if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
   try {
@@ -6931,10 +6934,7 @@ function saveMaintainingWindowState() {
 
 function openMaintainingWindow() {
   if (maintainingWindow && !maintainingWindow.isDestroyed()) {
-    if (maintainingWindow.isMinimized()) maintainingWindow.restore();
-    if (!maintainingWindow.isVisible()) maintainingWindow.show();
-    maintainingWindow.focus();
-    syncDockVisibility();
+    presentWindow(maintainingWindow, { dock: true });
     return;
   }
   const state = loadMaintainingWindowState();
@@ -6967,16 +6967,14 @@ function openMaintainingWindow() {
     saveMaintainingWindowState();
     if (!isQuitting) {
       event.preventDefault();
+      cancelPresent(maintainingWindow);
       maintainingWindow.hide();
       syncDockVisibility();
     }
   });
   maintainingWindow.on('show', () => syncDockVisibility());
   maintainingWindow.once('ready-to-show', () => {
-    if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
-    maintainingWindow.show();
-    maintainingWindow.focus();
-    syncDockVisibility();
+    presentWindow(maintainingWindow, { dock: true });
   });
   maintainingWindow.on('closed', () => {
     maintainingWindow = null;

@@ -504,13 +504,62 @@ function addPendingFileEntry(entry) {
   return true;
 }
 
+const MAX_DROPPED_FILE_BYTES = 20 * 1024 * 1024;
+
+function isImageDropFile(file) {
+  const mime = (file?.type || '').toLowerCase();
+  const name = file?.name || '';
+  return Boolean((mime && ALLOWED_IMAGE_MIMES.includes(mime)) || IMAGE_FILE_EXTENSIONS.test(name));
+}
+
+function filesFromDataTransfer(dataTransfer) {
+  const items = Array.from(dataTransfer?.items || []);
+  const files = [];
+  let directories = 0;
+  if (items.some((item) => item.kind === 'file')) {
+    for (const item of items) {
+      if (item.kind !== 'file') continue;
+      const entry = item.webkitGetAsEntry?.();
+      if (entry?.isDirectory) {
+        directories += 1;
+        continue;
+      }
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+    return { files, directories };
+  }
+  return { files: Array.from(dataTransfer?.files || []), directories };
+}
+
+async function addDroppedFile(file) {
+  if (!file) return 'skip';
+  if (isImageDropFile(file)) {
+    return (await addPendingImage(file)) ? 'image' : 'skip';
+  }
+  if (file.size > MAX_DROPPED_FILE_BYTES) return 'large';
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    const ok = addPendingFileEntry({
+      dataUrl,
+      name: file.name || '未命名文件',
+      mimeType: file.type || 'application/octet-stream',
+      size: file.size || 0,
+    });
+    return ok ? 'file' : 'skip';
+  } catch (err) {
+    console.error('[qizi] 读文件失败', err);
+    return 'skip';
+  }
+}
+
 // 加一张待发图片 File
 async function addPendingImage(file) {
   if (!file) return false;
   const mime = (file.type || '').toLowerCase();
   const name = file.name || '';
   const mimeOk = mime && ALLOWED_IMAGE_MIMES.includes(mime);
-  const extOk = !mime && IMAGE_FILE_EXTENSIONS.test(name);
+  const extOk = IMAGE_FILE_EXTENSIONS.test(name);
   if (!mimeOk && !extOk) {
     return false;
   }
@@ -3326,41 +3375,95 @@ function rebuildMessagesFromGateway(serverMessages, localMessages) {
   return buildDisplayHistoryFromGateway(serverMessages, localMessages);
 }
 
+function localMessageHasAttachments(message) {
+  return message?.who === 'me' && (
+    (Array.isArray(message.images) && message.images.length > 0)
+    || (Array.isArray(message.files) && message.files.length > 0)
+  );
+}
+
+function attachmentNames(message) {
+  return (Array.isArray(message?.files) ? message.files : [])
+    .map((file) => String(file?.name || ''))
+    .filter(Boolean);
+}
+
+function sameAttachmentNames(a, b) {
+  const left = attachmentNames(a);
+  const right = attachmentNames(b);
+  return left.length > 0 && left.length === right.length && left.every((name, index) => name === right[index]);
+}
+
+function sentTimesClose(a, b) {
+  if (a?.sentAtMs == null || b?.sentAtMs == null) return false;
+  return Math.abs(Number(a.sentAtMs) - Number(b.sentAtMs)) < 10000;
+}
+
 function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages) {
   if (!Array.isArray(serverMessages)) return [];
   const localList = Array.isArray(localMessages) ? localMessages : [];
-  const localAttachmentUsers = localList.filter(
-    (m) => m.who === 'me' && (
-      (Array.isArray(m.images) && m.images.length > 0)
-      || (Array.isArray(m.files) && m.files.length > 0)
-    ),
-  );
-  let attachmentUserIdx = 0;
+  const used = new Set();
+
+  function claim(predicate) {
+    for (let index = 0; index < localList.length; index += 1) {
+      if (used.has(index) || !predicate(localList[index])) continue;
+      used.add(index);
+      return localList[index];
+    }
+    return null;
+  }
+
+  function claimBest(scoreOf) {
+    let bestIndex = -1;
+    let bestScore = Infinity;
+    for (let index = 0; index < localList.length; index += 1) {
+      if (used.has(index)) continue;
+      const score = scoreOf(localList[index]);
+      if (score == null || score >= bestScore) continue;
+      bestScore = score;
+      bestIndex = index;
+    }
+    if (bestIndex < 0) return null;
+    used.add(bestIndex);
+    return localList[bestIndex];
+  }
 
   return serverMessages.map((server) => {
     const serverText = String(server?.text || '').trim();
-    let local = findLocalUserMessageForServer(server, localList);
-
-    if (!local && server.who === 'me' && !messageIsForward(server)) {
-      for (const candidate of localList) {
-        if (candidate.who !== 'me' || messageIsForward(candidate)) continue;
-        const localText = (candidate.text || '').trim();
-        if (localText && serverText && localText === serverText) {
-          local = candidate;
-          break;
+    let local = null;
+    // 只带文件、正文为空的新消息，不能去配历史里第一条带图的旧消息。
+    // 旧消息的文字会被抄上来，刚传的文件就从气泡里消失。
+    if (server?.who === 'me' && !messageIsForward(server)) {
+      local = claimBest((candidate) => {
+        if (!localMessageHasAttachments(candidate) || messageIsForward(candidate)) return null;
+        if (sameAttachmentNames(server, candidate)) return 0;
+        if (
+          sentTimesClose(server, candidate)
+          && (
+            isAttachmentPlaceholder(serverText)
+            || String(candidate.text || '').trim() === serverText
+          )
+        ) {
+          return Math.abs(Number(server.sentAtMs) - Number(candidate.sentAtMs));
         }
-      }
+        return null;
+      });
+    }
+    if (!local) {
+      local = claim((candidate) => Boolean(findLocalUserMessageForServer(server, [candidate])));
+    }
+    if (!local && server?.who === 'me' && !messageIsForward(server) && isAttachmentPlaceholder(serverText)) {
+      local = claim((candidate) => (
+        localMessageHasAttachments(candidate)
+        && !messageIsForward(candidate)
+        && isAttachmentPlaceholder(candidate.text)
+      ));
+    }
+    if (!local && localList.length === 1 && server?.who === 'me' && localMessageHasAttachments(localList[0])) {
+      local = localList[0];
     }
 
-    let copy = normalizeUserMessageRecord(server, local);
-
-    if (!local && copy.who === 'me' && isAttachmentPlaceholder(serverText)) {
-      while (attachmentUserIdx < localAttachmentUsers.length) {
-        local = localAttachmentUsers[attachmentUserIdx++];
-        break;
-      }
-    }
-
+    const copy = normalizeUserMessageRecord(server, local);
     if (local?.images?.length) copy.images = local.images;
     if (local?.files?.length) {
       copy.files = local.files.map(({ name, mimeType, size, dataUrl }) => ({
@@ -3370,10 +3473,15 @@ function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages)
         ...(dataUrl ? { dataUrl } : {}),
       }));
     }
-    if (isAttachmentPlaceholder(copy.text) && (local?.text || '').trim()) {
+    const localText = String(local?.text || '').trim();
+    const sameSend = Boolean(local) && (
+      sameAttachmentNames(server, local)
+      || sentTimesClose(server, local)
+      || (localList.length === 1 && local === localList[0])
+    );
+    if (sameSend && isAttachmentPlaceholder(serverText) && localText && !isAttachmentPlaceholder(localText)) {
       copy.text = local.text;
     }
-
     return copy;
   });
 }
@@ -7562,7 +7670,7 @@ if (agentFilesBtn) {
 resetInputHeight();
 updateComposerSendBtn();
 
-// ===== 拖拽图片到输入区 =====
+// ===== 拖拽图片或文件到窗口 =====
 let dragCounter = 0;
 function isFileDrag(e) {
   if (!e.dataTransfer) return false;
@@ -7597,17 +7705,31 @@ document.addEventListener('drop', async (e) => {
   e.preventDefault();
   dragCounter = 0;
   document.body.classList.remove('drag-over');
-  const files = Array.from(e.dataTransfer.files || []);
-  let added = 0;
-  let skipped = 0;
+  const { files, directories } = filesFromDataTransfer(e.dataTransfer);
+  let images = 0;
+  let attached = 0;
+  let skipped = directories;
+  let oversized = 0;
   for (const file of files) {
-    const ok = await addPendingImage(file);
-    if (ok) added++;
-    else skipped++;
+    const result = await addDroppedFile(file);
+    if (result === 'image') images += 1;
+    else if (result === 'file') attached += 1;
+    else if (result === 'large') oversized += 1;
+    else skipped += 1;
   }
+  const added = images + attached;
   if (added > 0) inputEl.focus();
-  if (skipped > 0) {
-    console.warn(`[qizi] 跳过 ${skipped} 个不支持的文件（支持 PNG/JPG/GIF/WebP/HEIC）`);
+  const parts = [];
+  if (images) parts.push(`${images} 张图片`);
+  if (attached) parts.push(`${attached} 个文件`);
+  if (added > 0 && oversized > 0) {
+    setStatus(`已加入 ${parts.join('、')}，另有文件超过 20MB 未加入`, 'error');
+  } else if (added > 0) {
+    setStatus(`已加入 ${parts.join('、')}`, 'ok');
+  } else if (oversized > 0) {
+    setStatus('有文件超过 20MB，未加入', 'error');
+  } else if (skipped > 0) {
+    setStatus('这些内容不能作为附件加入', 'error');
   }
 });
 
@@ -7754,6 +7876,16 @@ if (attachPopup) {
     e.stopPropagation();
     hideAttachPopup();
     item.click();
+    // 菜单在 mousedown 时收起后，这次点击的 mouseup 会落在菜单下面的元素上。
+    // 表情窗刚打开就会被这次 click 当成“点到外面”而关掉。
+    const swallowClick = (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    document.addEventListener('click', swallowClick, true);
+    document.addEventListener('mouseup', () => {
+      setTimeout(() => document.removeEventListener('click', swallowClick, true), 0);
+    }, { capture: true, once: true });
   });
   attachPopup.addEventListener('click', (e) => {
     e.stopPropagation();

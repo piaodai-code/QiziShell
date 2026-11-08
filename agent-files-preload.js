@@ -7,7 +7,6 @@ contextBridge.exposeInMainWorld('qiziAgentFiles', {
   list: () => ipcRenderer.invoke('agent-files:list'),
   read: (file) => ipcRenderer.invoke('agent-files:read', file),
   save: (payload) => ipcRenderer.invoke('agent-files:save', payload),
-  setEditorPane: (open) => ipcRenderer.invoke('agent-files:editor-pane', open),
   setDirty: (dirty) => ipcRenderer.send('agent-files:dirty', dirty === true),
   onRequestSave: (callback) => {
     const handler = () => callback();

@@ -12,6 +12,7 @@ const editIcon = document.getElementById('af-edit-icon');
 const editLabel = document.getElementById('af-edit-label');
 const editorPane = document.getElementById('af-editor');
 const editorHost = document.getElementById('af-editor-host');
+const editorNote = document.getElementById('af-editor-note');
 const helpBtn = document.getElementById('af-help-btn');
 const helpCard = document.getElementById('af-help');
 const saveBtn = document.getElementById('af-save-btn');
@@ -35,8 +36,6 @@ let draft = '';
 let dirty = false;
 let editor = null;
 let editorOpen = false;
-let paneWidth = 0;
-let paneToken = 0;
 let sidebarOpen = true;
 const expandedFolders = new Set();
 let toastTimer = 0;
@@ -102,61 +101,45 @@ function setSidebar(open) {
   sideToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
 }
 
+function wantsLive(file) {
+  return Boolean(file) && !isCodeSupport(file);
+}
+
 function syncEditButton() {
-  const showCancel = Boolean(loaded) && (editorOpen || paneWidth > 0);
-  editIcon.src = showCancel ? 'assets/icons/agent-files-cancel.png' : 'assets/icons/agent-files-edit.png';
-  editLabel.textContent = showCancel ? '放弃编辑' : '编辑';
+  const editing = Boolean(loaded) && editorOpen;
+  editBtn.hidden = !loaded;
+  editIcon.src = editing ? 'assets/icons/agent-files-cancel.png' : 'assets/icons/agent-files-edit.png';
+  editLabel.textContent = editing ? '放弃编辑' : '编辑';
   editBtn.title = editLabel.textContent;
+  helpBtn.hidden = !editing;
+  saveBtn.hidden = !editing;
+  if (!editing) helpCard.hidden = true;
 }
 
-function layoutPanes() {
-  if (!paneWidth) {
-    shell.classList.remove('is-editor-open');
-    shell.style.removeProperty('--pane');
-    shell.style.setProperty('--editor', '0px');
-    editorPane.hidden = true;
-    return;
-  }
-  shell.classList.add('is-editor-open');
-  editorPane.hidden = false;
-  shell.style.setProperty('--pane', `${paneWidth}px`);
-  shell.style.setProperty('--editor', `${Math.max(0, window.innerWidth - paneWidth)}px`);
+function syncEditorNote() {
+  const note = editorOpen ? readOnlyNote(loaded) : '';
+  editorNote.hidden = !note;
+  editorNote.textContent = note;
 }
 
-function editorColumnWidth() {
-  if (!paneWidth) return 0;
-  return Math.max(0, window.innerWidth - paneWidth);
-}
-
-function revealEditor() {
-  if (!paneWidth) return;
-  if (editorColumnWidth() < 320) paneWidth = Math.max(280, window.innerWidth - 320);
-  layoutPanes();
+function syncEditorMode() {
+  const live = wantsLive(loaded);
+  editorPane.classList.toggle('is-live', editorOpen && live);
+  editor?.setMode?.(live);
 }
 
 function setEditorOpen(open) {
-  if (open === editorOpen && (!open || editorColumnWidth() >= 320)) return Promise.resolve();
-  const token = ++paneToken;
-  editorOpen = open;
+  const next = Boolean(open) && Boolean(loaded);
+  const was = editorOpen;
+  editorOpen = next;
+  editorPane.hidden = !next;
+  previewBody.hidden = next;
+  syncEditorMode();
   syncEditButton();
-  if (open) {
-    if (!paneWidth) paneWidth = window.innerWidth;
-    layoutPanes();
-    return window.qiziAgentFiles.setEditorPane(true).then(() => {
-      if (token !== paneToken) return;
-      revealEditor();
-      editor?.relayout?.();
-      syncEditorFromPreview();
-      editor?.focus();
-    });
-  }
-  return window.qiziAgentFiles.setEditorPane(false).finally(() => {
-    if (token !== paneToken) return;
-    paneWidth = 0;
-    layoutPanes();
-    syncEditButton();
-    editor?.relayout?.();
-  });
+  syncEditorNote();
+  if (!next && was && loaded) renderPreview(draft, readOnlyNote(loaded));
+  if (next) editor?.relayout?.();
+  return Promise.resolve();
 }
 
 function abandonEdit() {
@@ -164,44 +147,12 @@ function abandonEdit() {
   draft = loaded?.content || '';
   if (editor) editor.setDoc(draft);
   setDirty(false);
-  if (loaded) renderPreview(draft, readOnlyNote(loaded));
   setEditorOpen(false);
 }
 
 function confirmDiscard() {
   if (!dirty) return true;
   return window.confirm('当前修改还没保存，要离开这个文件吗？');
-}
-
-function blockStartLines(text) {
-  const lexer = window.marked && window.marked.lexer;
-  if (typeof lexer !== 'function') return null;
-  let tokens;
-  try {
-    tokens = lexer(String(text || ''));
-  } catch {
-    return null;
-  }
-  let line = 1;
-  const starts = [];
-  tokens.forEach((token) => {
-    if (token.type !== 'space') starts.push(line);
-    const breaks = String(token.raw || '').match(/\n/g);
-    line += breaks ? breaks.length : 0;
-  });
-  return starts;
-}
-
-function stampPreviewLines(text) {
-  const md = previewBody.querySelector('.md');
-  if (!md) return false;
-  const starts = blockStartLines(text);
-  const children = [...md.children];
-  if (!starts || !children.length || children.length !== starts.length) return false;
-  children.forEach((el, index) => {
-    el.dataset.line = String(starts[index]);
-  });
-  return true;
 }
 
 function renderPreview(text, note) {
@@ -217,95 +168,11 @@ function renderPreview(text, note) {
     pre.className = 'af-code-preview';
     pre.textContent = text || '';
     previewBody.appendChild(pre);
-    previewLineSync = false;
-    if (editorOpen) syncPreviewFromEditor();
     return;
   }
   const html = markedParse(text);
   const noteHtml = note ? `<p class="af-readonly-note">${note}</p>` : '';
   previewBody.innerHTML = `${noteHtml}<div class="md">${html || '<p class="af-empty">这个文件是空的</p>'}</div>`;
-  previewLineSync = stampPreviewLines(text);
-  if (editorOpen) syncPreviewFromEditor();
-}
-
-let previewLineSync = false;
-let scrollLock = '';
-let scrollUnlock = 0;
-
-function lockScroll(source) {
-  scrollLock = source;
-  clearTimeout(scrollUnlock);
-  scrollUnlock = setTimeout(() => {
-    if (scrollLock === source) scrollLock = '';
-  }, 80);
-}
-
-function previewPad() {
-  return parseFloat(getComputedStyle(previewBody).paddingTop) || 0;
-}
-
-function elementTop(el) {
-  return el.getBoundingClientRect().top - previewBody.getBoundingClientRect().top + previewBody.scrollTop;
-}
-
-function scrollPreviewToLine(line) {
-  const blocks = [...previewBody.querySelectorAll('.md [data-line]')];
-  if (!blocks.length) return;
-  let index = 0;
-  for (let i = 0; i < blocks.length; i += 1) {
-    if (Number(blocks[i].dataset.line) <= line) index = i;
-    else break;
-  }
-  const el = blocks[index];
-  const start = Number(el.dataset.line) || 1;
-  const next = blocks[index + 1];
-  const end = next ? Number(next.dataset.line) : start + 1;
-  const span = Math.max(1, end - start);
-  const into = Math.min(1, Math.max(0, (line - start) / span));
-  const nextTop = elementTop(el) - previewPad() + into * el.offsetHeight;
-  if (Math.abs(previewBody.scrollTop - nextTop) < 2) return;
-  previewBody.scrollTop = nextTop;
-}
-
-function previewAnchor() {
-  const blocks = [...previewBody.querySelectorAll('.md [data-line]')];
-  if (!blocks.length) return 1;
-  const top = previewBody.scrollTop + previewPad();
-  let index = 0;
-  for (let i = 0; i < blocks.length; i += 1) {
-    if (elementTop(blocks[i]) <= top + 2) index = i;
-    else break;
-  }
-  const el = blocks[index];
-  const start = Number(el.dataset.line) || 1;
-  const next = blocks[index + 1];
-  const lastLine = Math.max(start + 1, String(draft || '').split('\n').length + 1);
-  const end = next ? Number(next.dataset.line) : lastLine;
-  const height = Math.max(1, el.offsetHeight);
-  const into = Math.min(1, Math.max(0, (top - elementTop(el)) / height));
-  return Math.round(start + into * Math.max(0, end - start - 1));
-}
-
-function scrollRatio(el) {
-  const max = el.scrollHeight - el.clientHeight;
-  return max <= 0 ? 0 : el.scrollTop / max;
-}
-
-function syncPreviewFromEditor() {
-  if (!editorOpen || !editor || scrollLock === 'preview') return;
-  lockScroll('editor');
-  if (previewLineSync && editor.topLine) scrollPreviewToLine(editor.topLine());
-  else if (editor.scrollRatio) {
-    const max = previewBody.scrollHeight - previewBody.clientHeight;
-    previewBody.scrollTop = editor.scrollRatio() * Math.max(0, max);
-  }
-}
-
-function syncEditorFromPreview() {
-  if (!editorOpen || !editor || scrollLock === 'editor') return;
-  lockScroll('preview');
-  if (previewLineSync && editor.scrollToLine) editor.scrollToLine(previewAnchor());
-  else if (editor.setScrollRatio) editor.setScrollRatio(scrollRatio(previewBody));
 }
 
 function renderEmpty(message) {
@@ -334,8 +201,11 @@ function applyLoaded(file, data) {
   editBtn.hidden = false;
   const note = readOnlyNote(loaded);
   renderPreview(draft, note);
+  syncEditorMode();
   editor?.setDoc(draft);
   editor?.relayout?.();
+  syncEditButton();
+  syncEditorNote();
   setDirty(false);
   renderSidebar();
 }
@@ -354,6 +224,7 @@ async function selectFile(file) {
     loaded = null;
     activeKey = '';
     setDirty(false);
+    setEditorOpen(false);
     renderEmpty(result?.error || '读取失败');
     renderSidebar();
     return;
@@ -568,13 +439,12 @@ function ensureEditor() {
   if (!window.QiziMarkdownEditor?.mount) return false;
   try {
     editor = window.QiziMarkdownEditor.mount(editorHost, {
+      live: wantsLive(loaded),
       onChange(text) {
         draft = text;
         setDirty(text !== (loaded?.content || ''));
-        if (loaded) renderPreview(text, readOnlyNote(loaded));
       },
       onSave() { void save(); },
-      onScroll() { syncPreviewFromEditor(); },
     });
   } catch (err) {
     console.error(err);
@@ -676,32 +546,25 @@ agentEl.addEventListener('click', (event) => {
   void openAgentMenu();
 });
 editBtn.addEventListener('click', () => {
-  if ((editorOpen || paneWidth) && editorColumnWidth() >= 80) {
+  if (editorOpen) {
     abandonEdit();
     return;
   }
   const first = !editor;
-  void setEditorOpen(true).then(() => {
-    if (!editorOpen) return;
-    if (!ensureEditor()) {
-      showToast('编辑器没有加载起来');
-      void setEditorOpen(false);
-      return;
-    }
-    if (first) editor.setDoc(draft);
-    revealEditor();
-    editor.relayout?.();
-    editor.focus();
-  });
+  setEditorOpen(true);
+  if (!ensureEditor()) {
+    showToast('编辑器没有加载起来');
+    setEditorOpen(false);
+    return;
+  }
+  syncEditorMode();
+  if (first) editor.setDoc(draft);
+  editor.relayout?.();
+  editor.focus();
 });
 window.addEventListener('resize', () => {
-  if (paneWidth) layoutPanes();
   editor?.relayout?.();
-  syncPreviewFromEditor();
 });
-previewBody.addEventListener('scroll', () => {
-  syncEditorFromPreview();
-}, { passive: true });
 helpBtn.addEventListener('click', (event) => {
   event.stopPropagation();
   helpCard.hidden = !helpCard.hidden;

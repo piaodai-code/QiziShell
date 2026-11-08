@@ -28,31 +28,29 @@
     <section class="af-preview">
       <header class="af-bar">
         <div class="af-bar-title" id="af-preview-title">未选择文件</div>
-        <button type="button" class="af-text-btn" id="af-edit-btn" hidden>
-          <img id="af-edit-icon" src="assets/icons/agent-files-edit.png" alt="">
-          <span id="af-edit-label">编辑</span>
-        </button>
+        <div class="af-bar-actions">
+          <button type="button" class="af-icon-btn" id="af-help-btn" title="Markdown 帮助" aria-label="Markdown 帮助" hidden>
+            <img src="assets/icons/agent-files-help.png" alt="">
+          </button>
+          <button type="button" class="af-text-btn" id="af-save-btn" title="保存" hidden disabled>
+            <img src="assets/icons/agent-files-save.png" alt="">
+            <span>保存</span>
+          </button>
+          <button type="button" class="af-text-btn" id="af-edit-btn" hidden>
+            <img id="af-edit-icon" src="assets/icons/agent-files-edit.png" alt="">
+            <span id="af-edit-label">编辑</span>
+          </button>
+        </div>
       </header>
       <div class="af-preview-body" id="af-preview-body">
         <p class="af-empty">请从左侧选择一份头脑记忆或技能进行查看</p>
       </div>
-    </section>
-    <section class="af-editor" id="af-editor" hidden>
-      <header class="af-bar">
-        <div class="af-bar-title">源码</div>
-        <div class="af-bar-actions">
-          <button type="button" class="af-icon-btn" id="af-help-btn" title="Markdown 帮助" aria-label="Markdown 帮助">
-            <img src="assets/icons/agent-files-help.png" alt="">
-          </button>
-          <button type="button" class="af-text-btn" id="af-save-btn" title="保存" disabled>
-            <img src="assets/icons/agent-files-save.png" alt="">
-            <span>保存</span>
-          </button>
-        </div>
-      </header>
-      <div class="af-editor-host" id="af-editor-host"></div>
-      <div class="af-help" id="af-help" hidden>
+      <section class="af-editor" id="af-editor" hidden>
+        <p class="af-readonly-note" id="af-editor-note" hidden></p>
+        <div class="af-editor-host" id="af-editor-host"></div>
+        <div class="af-help" id="af-help" hidden>
         <p class="af-help-title">Markdown</p>
+        <p>光标停在哪一行，这一行的 #、** 就露出来。移开以后标记收起来。表格和开头的 --- 配置保持原文。</p>
         <pre class="af-help-pre"># 标题
 **粗体**  *斜体*
 - 列表
