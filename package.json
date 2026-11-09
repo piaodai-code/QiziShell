@@ -1,6 +1,6 @@
 {
   "name": "qizi-shell",
-  "version": "0.2.3-2e",
+  "version": "0.2.3-2f",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -11,6 +11,7 @@
     "test:meeting-relay": "node scripts/meeting-relay-smoke.js",
     "test:private-channel": "node scripts/private-channel-smoke.js",
     "test:hermes-client": "node scripts/hermes-client-smoke.js",
+    "test:gateway-disconnect": "node scripts/gateway-disconnect-smoke.js",
     "test:markdown-live": "node scripts/markdown-live-smoke.mjs",
     "build:editor": "esbuild scripts/codemirror-entry.js --bundle --format=iife --global-name=QiziMarkdownEditor --outfile=vendor/codemirror-markdown.js"
   },

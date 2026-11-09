@@ -19,4 +19,9 @@ contextBridge.exposeInMainWorld('qiziAgentFiles', {
     ipcRenderer.on('agent-files:reload', handler);
     return () => ipcRenderer.removeListener('agent-files:reload', handler);
   },
+  onReconnecting: (callback) => {
+    const handler = () => callback();
+    ipcRenderer.on('agent-files:reconnecting', handler);
+    return () => ipcRenderer.removeListener('agent-files:reconnecting', handler);
+  },
 });

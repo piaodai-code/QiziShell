@@ -617,4 +617,18 @@ function explicitGatewayTokenPresent(token) {
   return typeof token === 'string' && token.trim().length > 0;
 }
 
-module.exports = { GatewayWsClient, OPERATOR_SCOPES };
+// 连接已经断掉、或请求超时且套接字不再可用时，可以等重连后再读一次。
+// 套接字仍开着的请求超时不在此列：网关还活着，只是这次调用慢。
+function isRetryableGatewayDisconnect(err, connection = {}) {
+  if (!err || err.clientError) return false;
+  const message = String(err.message || '');
+  if (message.startsWith('gateway closed (')) return true;
+  if (message === 'gateway not connected' || message === 'gateway connect timeout') return true;
+  if (!message.startsWith('gateway request timeout')) return false;
+  const alive = connection.connected === true
+    && connection.socketRetiring !== true
+    && connection.readyState === WebSocket.OPEN;
+  return !alive;
+}
+
+module.exports = { GatewayWsClient, OPERATOR_SCOPES, isRetryableGatewayDisconnect };

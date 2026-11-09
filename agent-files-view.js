@@ -41,6 +41,18 @@ const expandedFolders = new Set();
 let toastTimer = 0;
 let agentMenuOpen = false;
 let switchingAgent = false;
+let catalogEpoch = 0;
+let readEpoch = 0;
+let agentMenuEpoch = 0;
+
+function noteGatewayReconnecting() {
+  const status = document.getElementById('af-status');
+  if (status?.textContent === '正在读取…') status.textContent = '连接中断了，正在重连…';
+  const preview = previewBody.querySelector('.af-empty');
+  if (preview?.textContent === '正在读取…') preview.textContent = '连接中断了，正在重连…';
+  const menu = agentMenu.querySelector('.af-agent-empty');
+  if (menu?.textContent === '正在读取…') menu.textContent = '连接中断了，正在重连…';
+}
 
 function fileKey(file) {
   if (!file) return '';
@@ -216,10 +228,13 @@ async function selectFile(file) {
     return;
   }
   if (!confirmDiscard()) return;
+  const epoch = ++readEpoch;
+  const catalogSnapshot = catalogEpoch;
   previewTitle.textContent = file.label || file.name || '读取中…';
   previewBody.innerHTML = '<p class="af-empty">正在读取…</p>';
   editBtn.hidden = true;
   const result = await window.qiziAgentFiles.read(file);
+  if (epoch !== readEpoch || catalogSnapshot !== catalogEpoch) return;
   if (!result?.ok) {
     loaded = null;
     activeKey = '';
@@ -371,15 +386,18 @@ function renderSidebar() {
 }
 
 async function loadCatalog() {
+  const epoch = ++catalogEpoch;
   try {
     const context = await window.qiziAgentFiles.getContext();
+    if (epoch !== catalogEpoch) return;
     agentId = context?.agentId || '';
     agentLabel = context?.agentLabel || agentId || '当前 Agent';
     agentLabelEl.textContent = agentLabel;
     agentEl.title = `换一个 Agent · ${agentLabel}`;
     document.title = `${agentLabel} · 头脑与技能`;
-    sideScroll.innerHTML = '<p class="af-status">正在读取…</p>';
+    sideScroll.innerHTML = '<p class="af-status" id="af-status">正在读取…</p>';
     const result = await window.qiziAgentFiles.list();
+    if (epoch !== catalogEpoch) return;
     if (!result?.ok) {
       catalog = null;
       sideScroll.replaceChildren();
@@ -392,6 +410,7 @@ async function loadCatalog() {
     catalog = result;
     renderSidebar();
   } catch (err) {
+    if (epoch !== catalogEpoch) return;
     catalog = null;
     sideScroll.replaceChildren();
     const failed = document.createElement('p');
@@ -493,6 +512,7 @@ async function openAgentMenu() {
     closeAgentMenu();
     return;
   }
+  const epoch = ++agentMenuEpoch;
   agentMenuOpen = true;
   agentMenu.hidden = false;
   agentEl.setAttribute('aria-expanded', 'true');
@@ -507,7 +527,7 @@ async function openAgentMenu() {
   } catch (err) {
     result = { ok: false, error: err?.message || '读取 Agent 失败', agents: [] };
   }
-  if (!agentMenuOpen) return;
+  if (!agentMenuOpen || epoch !== agentMenuEpoch) return;
   fillAgentMenu(result);
 }
 
@@ -590,6 +610,10 @@ document.addEventListener('keydown', (event) => {
 window.qiziAgentFiles.onRequestSave(async () => {
   const ok = await save();
   window.qiziAgentFiles.saveResult(ok);
+});
+
+window.qiziAgentFiles.onReconnecting(() => {
+  noteGatewayReconnecting();
 });
 
 window.qiziAgentFiles.onReload(() => {

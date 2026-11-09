@@ -86,7 +86,7 @@ const os = require('os');
 const path = require('path');
 const https = require('https');
 const http = require('http');
-const { GatewayWsClient } = require('./gateway-ws');
+const { GatewayWsClient, isRetryableGatewayDisconnect } = require('./gateway-ws');
 const { extractMessageSentTimeFromRaw, stripLeadingEnvelopeTimestamp, stripSenderUntrustedMetadata } = require('./message-time');
 const {
   initSttManager,
@@ -574,6 +574,7 @@ let meetingHistoryPollTimer = null;
 let controlUiWindow = null;
 let controlUiLaunchUrl = null;
 let tray = null;
+let trayMenu = null;
 let isQuitting = false;
 /** macOS 点菜单栏图标会同时触发 activate + tray click，需忽略紧随其后的 activate */
 let suppressAppActivateUntil = 0;
@@ -2075,10 +2076,55 @@ function openAgentFilesWindow(payload) {
   return { ok: true };
 }
 
+const AGENT_FILES_RECONNECT_WAIT_MS = 20_000;
+
+function agentFilesDisconnectIsRetryable(err) {
+  if (err?.clientError) return false;
+  let client;
+  try {
+    client = ensureGateway();
+  } catch {
+    return false;
+  }
+  return isRetryableGatewayDisconnect(err, {
+    connected: client.connected === true,
+    socketRetiring: client.socketRetiring === true,
+    readyState: client.ws?.readyState,
+  });
+}
+
 async function agentFilesGateway() {
   const client = ensureGateway();
   await client.waitForConnect();
   return (method, params) => client.request(method, params);
+}
+
+// 读操作遇到半死连接时，等这一次重连完成后再做一遍。保存不走这里。
+async function retryAgentFilesAfterDisconnect(sender, work) {
+  try {
+    return await work();
+  } catch (err) {
+    if (!agentFilesDisconnectIsRetryable(err)) throw err;
+    if (sender?.isDestroyed?.()) throw err;
+    console.warn('[qizi] agent files disconnected, retrying:', err.message);
+    safeSendTo(sender, 'agent-files:reconnecting');
+    try {
+      await ensureGateway().waitForConnect(AGENT_FILES_RECONNECT_WAIT_MS);
+      return await work();
+    } catch (retryErr) {
+      if (!agentFilesDisconnectIsRetryable(retryErr)) throw retryErr;
+      console.warn('[qizi] agent files retry failed:', retryErr.message);
+      throw new Error('和 Gateway 的连接中断了，重连之后仍然没有回应。');
+    }
+  }
+}
+
+async function loadAgentListForFiles(sender) {
+  return retryAgentFilesAfterDisconnect(sender, async () => {
+    const listed = await listAgents();
+    if (!listed?.ok) throw new Error(listed?.error || '读取 Agent 失败');
+    return listed;
+  });
 }
 
 function openMeetingHelp() {
@@ -4189,7 +4235,9 @@ function trayMenuIcon(filename) {
 function onTrayMenuAction(fn) {
   return () => {
     markStatusItemInteraction();
-    fn();
+    // 菜单项回调发生在 NSMenu 跟踪循环里。立刻开窗口或 app.quit()
+    // 会在 menuDidClose 还在跑时拆掉托盘，V8 接着访问已释放的菜单对象。
+    setTimeout(fn, 0);
   };
 }
 
@@ -4201,10 +4249,10 @@ function buildTrayMenu() {
     { label: 'Update', icon: trayMenuIcon('update-menu.png'), click: onTrayMenuAction(() => openUpdate()) },
     { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: onTrayMenuAction(() => openAbout()) },
     { type: 'separator' },
-    { label: 'Quit', icon: trayMenuIcon('exit.png'), click: () => {
+    { label: 'Quit', icon: trayMenuIcon('exit.png'), click: onTrayMenuAction(() => {
       isQuitting = true;
       app.quit();
-    } },
+    }) },
   ]);
 }
 
@@ -4216,6 +4264,9 @@ function createTray() {
   if (process.platform === 'darwin') {
     // 不要 setContextMenu。macOS 会让左键进入菜单跟踪，click 在按下时触发：
     // 主窗口刚显示，松开鼠标跟踪结束，窗口就被收掉。左键只切换主窗口，右键再弹出菜单。
+    // popUpContextMenu 只拿菜单模型的 WeakPtr，调用立刻返回。菜单必须挂在
+    // trayMenu 上，否则关掉菜单时对象已被 GC，menuDidClose 进 V8 会 SIGSEGV。
+    trayMenu = buildTrayMenu();
     tray.on('click', (event) => {
       if (event.ctrlKey || event.metaKey) return;
       markTrayClick();
@@ -4223,11 +4274,13 @@ function createTray() {
       toggleMainWindow();
     });
     tray.on('right-click', () => {
-      tray.popUpContextMenu(buildTrayMenu());
+      if (!trayMenu) trayMenu = buildTrayMenu();
+      tray.popUpContextMenu(trayMenu);
     });
     return;
   }
-  tray.setContextMenu(buildTrayMenu());
+  trayMenu = buildTrayMenu();
+  tray.setContextMenu(trayMenu);
 }
 
 async function checkConnection() {
@@ -6640,7 +6693,7 @@ ipcMain.handle('agent-files:context', (event) => {
 ipcMain.handle('agent-files:agents', async (event) => {
   if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
   try {
-    const listed = await listAgents();
+    const listed = await loadAgentListForFiles(event.sender);
     if (!listed?.ok) return { ok: false, error: listed?.error || '读取 Agent 失败', agents: [] };
     const agents = [];
     for (const agent of listed.agents || []) {
@@ -6663,7 +6716,7 @@ ipcMain.handle('agent-files:switch', async (event, payload) => {
   if (agentFilesClosePrompt) return { ok: false, cancelled: true };
   agentFilesClosePrompt = true;
   try {
-    const listed = await listAgents();
+    const listed = await loadAgentListForFiles(event.sender);
     const found = listed?.ok ? (listed.agents || []).find((agent) => agent.id === agentId) : null;
     if (!found) return { ok: false, error: listed?.error || '未找到这个 Agent' };
     const decision = await settleAgentFilesUnsaved(win, '要保存后再换 Agent 吗？');
@@ -6694,8 +6747,10 @@ ipcMain.on('agent-files:save-result', (event, ok) => {
 ipcMain.handle('agent-files:list', async (event) => {
   if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
   try {
-    const request = await agentFilesGateway();
-    return await listAgentFileCatalog(request, agentFilesContext?.agentId);
+    return await retryAgentFilesAfterDisconnect(event.sender, async () => {
+      const request = await agentFilesGateway();
+      return await listAgentFileCatalog(request, agentFilesContext?.agentId);
+    });
   } catch (err) {
     return { ok: false, error: formatGatewayError(err), memories: [], skills: { global: [], private: [] } };
   }
@@ -6704,8 +6759,10 @@ ipcMain.handle('agent-files:list', async (event) => {
 ipcMain.handle('agent-files:read', async (event, file) => {
   if (!getAuthorizedAgentFilesWindow(event)) return forbiddenSenderResult();
   try {
-    const request = await agentFilesGateway();
-    return await readAgentFile(request, { ...(file || {}), agentId: agentFilesContext?.agentId });
+    return await retryAgentFilesAfterDisconnect(event.sender, async () => {
+      const request = await agentFilesGateway();
+      return await readAgentFile(request, { ...(file || {}), agentId: agentFilesContext?.agentId });
+    });
   } catch (err) {
     if (err?.clientError) return { ok: false, error: err.message };
     return { ok: false, error: formatGatewayError(err) };
@@ -7165,6 +7222,7 @@ app.on('before-quit', () => {
     tray.destroy();
     tray = null;
   }
+  trayMenu = null;
 });
 
 // 全局兜底：renderer 销毁/网络抖动等场景下，孤悬的 Promise rejection 不该让 main 崩
