@@ -940,6 +940,32 @@ body.meeting-mode .composer {
   gap: 6px;
   margin-left: 6px;
 }
+.composer-detach-btn {
+  position: absolute;
+  right: 12px;
+  top: calc(12px + (14px * 1.6 - 28px) / 2);
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+.composer-detach-btn img {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+  display: block;
+  opacity: 0.72;
+}
+.composer-detach-btn:hover { background: #ececec; }
+.composer-detach-btn:hover img { opacity: 1; }
 .model-picker-wrap,
 .session-controls-wrap {
   position: relative;
@@ -3887,6 +3913,7 @@ body.composer-host .composer-dragbar {
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   -webkit-app-region: drag;
   background: var(--titlebar-bg);
   border-bottom: 1px solid var(--border);

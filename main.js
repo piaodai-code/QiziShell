@@ -100,6 +100,7 @@ const { file: tmpFile } = require('tmp-promise');
 let mainWindow = null;
 let composerWindow = null;
 let composerSuppressed = false;
+let composerDocked = false;
 let composerReadyToShow = false;
 let liftingComposer = false;
 let composerLiftTimer = null;
@@ -4268,7 +4269,7 @@ function applyComposerVisibility() {
     && mainWindow.isVisible()
     && !mainWindow.isMinimized(),
   );
-  if (composerSuppressed || !chatOpen) {
+  if (composerSuppressed || composerDocked || !chatOpen) {
     if (composerWindow.isVisible()) composerWindow.hide();
     return;
   }
@@ -5637,6 +5638,14 @@ ipcMain.handle('composer:mounted', (event) => {
 ipcMain.handle('composer:suppressed', (event, suppressed) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   composerSuppressed = Boolean(suppressed);
+  applyComposerVisibility();
+  return { ok: true };
+});
+
+ipcMain.handle('composer:docked', (event, docked) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  composerDocked = Boolean(docked);
+  if (composerDocked) restoreComposerWindowSize();
   applyComposerVisibility();
   return { ok: true };
 });

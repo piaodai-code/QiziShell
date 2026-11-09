@@ -9588,9 +9588,110 @@ function bindComposerHostDocument(doc) {
   });
 }
 
+const COMPOSER_DETACH_KEY = 'qizi-composer-detached';
+let composerPopupWindow = null;
+let composerAnchor = null;
+let composerDetachBusy = false;
+
+function composerDetachPreferred() {
+  try {
+    return localStorage.getItem(COMPOSER_DETACH_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+
+function setComposerDetachPreferred(detached) {
+  try {
+    localStorage.setItem(COMPOSER_DETACH_KEY, detached ? '1' : '0');
+  } catch {
+    // ignore
+  }
+}
+
+function rememberComposerAnchor() {
+  if (composerAnchor || !composerEl) return;
+  composerAnchor = {
+    parent: composerEl.parentNode,
+    next: composerEl.nextSibling,
+    menuParent: composerContextMenuEl ? composerContextMenuEl.parentNode : null,
+    menuNext: composerContextMenuEl ? composerContextMenuEl.nextSibling : null,
+  };
+}
+
+function syncComposerDetachButton() {
+  const button = composerEl?.querySelector('.composer-detach-btn');
+  if (!button) return;
+  const detached = composerIsDetached();
+  const img = button.querySelector('img');
+  if (img) {
+    const file = detached ? 'assets/icons/composer-window-type.png' : 'assets/icons/composer-window-expand.png';
+    const url = new URL(file, document.baseURI).href;
+    if (img.src !== url) img.src = url;
+  }
+  const label = detached ? '使窗口合并' : '使窗口分开';
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('aria-pressed', detached ? 'true' : 'false');
+}
+
+function closeComposerMenus() {
+  hideAttachPopup();
+  hideModelPopup();
+  hideChannelPopup();
+  hidePermissionPopup();
+  hideSessionControlsPopup();
+  hideEmojiPicker();
+  hideContextUsagePopup();
+  hideCommandPopup();
+  hideAgentPopup();
+}
+
+function placeComposerBackHome() {
+  if (!composerAnchor?.parent || !composerEl) return;
+  composerAnchor.parent.insertBefore(composerEl, composerAnchor.next);
+  if (composerContextMenuEl && composerAnchor.menuParent) {
+    composerAnchor.menuParent.insertBefore(composerContextMenuEl, composerAnchor.menuNext);
+  }
+  delete composerEl.dataset.detached;
+  resetInputHeight();
+  positionBtwSideDock();
+  syncScrollBottomButton();
+}
+
+async function dockComposer() {
+  if (!composerIsDetached()) return false;
+  closeComposerMenus();
+  placeComposerBackHome();
+  await window.qizi?.setComposerDocked?.(true);
+  return !composerIsDetached();
+}
+
+async function detachComposer() {
+  rememberComposerAnchor();
+  if (composerPopupWindow && !composerPopupWindow.closed) {
+    const doc = composerPopupWindow.document;
+    const shell = doc?.querySelector('.composer-window-shell');
+    if (shell && composerEl) {
+      shell.appendChild(composerEl);
+      if (composerContextMenuEl) doc.body.appendChild(composerContextMenuEl);
+      composerEl.dataset.detached = '1';
+      resetInputHeight();
+      positionBtwSideDock();
+      syncScrollBottomButton();
+      await window.qizi?.setComposerDocked?.(false);
+      return true;
+    }
+    composerPopupWindow = null;
+  }
+  await mountDetachedComposer();
+  return composerIsDetached();
+}
+
 async function mountDetachedComposer() {
   if (!composerEl || composerEl.dataset.detached === '1') return;
   if (!window.qizi?.composerDidMount) return;
+  rememberComposerAnchor();
   let popup = null;
   try {
     popup = window.open('about:blank', 'qizi-composer', 'width=480,height=280');
@@ -9599,6 +9700,7 @@ async function mountDetachedComposer() {
     return;
   }
   if (!popup || popup === window || !popup.document || popup.document === document) return;
+  composerPopupWindow = popup;
   const doc = popup.document;
   doc.title = '输入';
   const head = doc.head || doc.createElement('head');
@@ -9636,10 +9738,38 @@ async function mountDetachedComposer() {
   }
   try {
     await window.qizi.composerDidMount();
+    await window.qizi.setComposerDocked?.(false);
   } catch (err) {
     console.warn('[qizi] composer show failed', err);
   }
   syncDetachedComposerSuppressed();
+  syncComposerDetachButton();
+}
+
+async function toggleComposerWindow() {
+  if (composerDetachBusy) return;
+  composerDetachBusy = true;
+  try {
+    if (composerIsDetached()) {
+      const docked = await dockComposer();
+      if (docked) setComposerDetachPreferred(false);
+    } else {
+      const detached = await detachComposer();
+      if (detached) setComposerDetachPreferred(true);
+    }
+  } finally {
+    composerDetachBusy = false;
+    syncComposerDetachButton();
+  }
+}
+
+const composerDetachBtn = document.getElementById('composer-detach-btn');
+if (composerDetachBtn) {
+  composerDetachBtn.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    void toggleComposerWindow();
+  });
 }
 
 window.addEventListener('mousedown', () => {
@@ -9649,4 +9779,7 @@ window.addEventListener('focus', () => {
   window.qizi?.raiseComposer?.();
 });
 
-void mountDetachedComposer();
+void (async () => {
+  syncComposerDetachButton();
+  if (composerDetachPreferred()) await mountDetachedComposer();
+})();

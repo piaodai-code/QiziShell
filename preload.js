@@ -171,6 +171,7 @@ contextBridge.exposeInMainWorld('qizi', {
   },
   composerDidMount: () => ipcRenderer.invoke('composer:mounted'),
   setComposerSuppressed: (suppressed) => ipcRenderer.invoke('composer:suppressed', Boolean(suppressed)),
+  setComposerDocked: (docked) => ipcRenderer.invoke('composer:docked', Boolean(docked)),
   raiseComposer: () => ipcRenderer.send('composer:raise'),
   growComposer: (extra) => ipcRenderer.invoke('composer:grow', extra),
   restoreComposerSize: () => ipcRenderer.invoke('composer:restore-size'),
