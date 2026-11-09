@@ -98,6 +98,13 @@ const {
 const { file: tmpFile } = require('tmp-promise');
 
 let mainWindow = null;
+let composerWindow = null;
+let composerSuppressed = false;
+let composerReadyToShow = false;
+let liftingComposer = false;
+let composerLiftTimer = null;
+let composerLiftArmed = false;
+let composerGrowSnapshot = null;
 let maintainingWindow = null;
 let maintainingSession = null;
 
@@ -598,6 +605,10 @@ let privateChannelStore = null;
 const DEFAULT_SESSION_KEY = 'agent:main:main';
 const SHELL_SESSION_MAIN_KEY = 'main';
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
+const COMPOSER_STATE_PATH = path.join(app.getPath('userData'), 'composer-window-state.json');
+const COMPOSER_MIN_WIDTH = 380;
+const COMPOSER_MIN_HEIGHT = 220;
+const COMPOSER_DEFAULT_HEIGHT = 280;
 const COPY_EDIT_STATE_PATH = path.join(app.getPath('userData'), 'copy-edit-window-state.json');
 const HISTORY_STATE_PATH = path.join(app.getPath('userData'), 'history-window-state.json');
 const AGENT_FILES_STATE_PATH = path.join(app.getPath('userData'), 'agent-files-window-state.json');
@@ -4120,6 +4131,170 @@ function saveWindowState() {
   }
 }
 
+function loadComposerWindowState() {
+  const fallback = { width: null, height: COMPOSER_DEFAULT_HEIGHT, x: null, y: null };
+  try {
+    const saved = JSON.parse(fs.readFileSync(COMPOSER_STATE_PATH, 'utf8'));
+    const width = Math.max(COMPOSER_MIN_WIDTH, Math.min(2400, Number(saved.width) || 0));
+    const height = Math.max(COMPOSER_MIN_HEIGHT, Math.min(1600, Number(saved.height) || fallback.height));
+    const x = Number(saved.x);
+    const y = Number(saved.y);
+    if (!width || !Number.isFinite(x) || !Number.isFinite(y)) return { ...fallback, height };
+    const visible = screen.getAllDisplays().some((display) => {
+      const area = display.workArea;
+      return x < area.x + area.width - 80
+        && x + width > area.x + 80
+        && y < area.y + area.height - 40
+        && y + 48 > area.y;
+    });
+    if (!visible) return { width, height, x: null, y: null };
+    return { width, height, x, y };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveComposerWindowState() {
+  if (composerGrowSnapshot) return;
+  if (!composerWindow || composerWindow.isDestroyed()) return;
+  try {
+    const bounds = composerWindow.getBounds();
+    fs.writeFileSync(COMPOSER_STATE_PATH, JSON.stringify({
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }));
+  } catch {
+    // non-fatal
+  }
+}
+
+function defaultComposerBounds() {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow.getBounds() : { x: 80, y: 80, width: 440, height: 640 };
+  const area = screen.getDisplayMatching(parent).workArea;
+  const width = Math.max(COMPOSER_MIN_WIDTH, Math.min(parent.width || COMPOSER_MIN_WIDTH, 760));
+  const height = COMPOSER_DEFAULT_HEIGHT;
+  let x = parent.x + Math.round((parent.width - width) / 2);
+  let y = parent.y + parent.height - height;
+  x = Math.max(area.x, Math.min(x, area.x + area.width - width));
+  y = Math.max(area.y, Math.min(y, area.y + area.height - height));
+  return { x, y, width, height };
+}
+
+function placeComposerWindow(win) {
+  const saved = loadComposerWindowState();
+  const fallback = defaultComposerBounds();
+  const bounds = {
+    x: saved.x == null ? fallback.x : saved.x,
+    y: saved.y == null ? fallback.y : saved.y,
+    width: saved.width || fallback.width,
+    height: saved.height || fallback.height,
+  };
+  win.setMinimumSize(COMPOSER_MIN_WIDTH, COMPOSER_MIN_HEIGHT);
+  win.setBounds(bounds);
+}
+
+function liftComposerOnce() {
+  if (liftingComposer) return;
+  if (!composerWindow || composerWindow.isDestroyed() || !composerWindow.isVisible()) return;
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized()) return;
+  liftingComposer = true;
+  const chatWasKey = mainWindow.isFocused();
+  try {
+    composerWindow.moveAbove(mainWindow.getMediaSourceId());
+    if (chatWasKey && !mainWindow.isFocused()) mainWindow.focus();
+  } catch (err) {
+    console.warn('[qizi] composer moveAbove failed:', err.message);
+    try { composerWindow.moveTop(); } catch { /* ignore */ }
+  } finally {
+    liftingComposer = false;
+  }
+}
+
+function raiseComposerAboveChat() {
+  // 标题栏拖动、双击缩放不会把点击交给页面，而且缩放动画结束时系统还会再把气泡窗排到最前。
+  // 所以一段操作里先抬一次，停稳后再抬一次。
+  if (!composerLiftArmed) {
+    composerLiftArmed = true;
+    liftComposerOnce();
+    setTimeout(() => {
+      composerLiftArmed = false;
+    }, 120);
+  }
+  clearTimeout(composerLiftTimer);
+  composerLiftTimer = setTimeout(() => {
+    composerLiftTimer = null;
+    liftComposerOnce();
+  }, 450);
+}
+
+function growComposerWindow(extra) {
+  const amount = Math.ceil(Number(extra) || 0);
+  if (!composerWindow || composerWindow.isDestroyed() || amount <= 0) return { ok: true, changed: false };
+  if (!composerGrowSnapshot) composerGrowSnapshot = composerWindow.getBounds();
+  const current = composerWindow.getBounds();
+  const area = screen.getDisplayMatching(current).workArea;
+  const bottom = area.y + area.height;
+  let height = current.height + amount;
+  let y = current.y;
+  if (y + height > bottom) {
+    const overflow = y + height - bottom;
+    y = Math.max(area.y, y - overflow);
+    height = Math.min(height, bottom - y);
+  }
+  if (height <= current.height + 1 && Math.abs(y - current.y) < 1) return { ok: true, changed: false };
+  composerWindow.setBounds({ x: current.x, y, width: current.width, height });
+  return { ok: true, changed: true };
+}
+
+function restoreComposerWindowSize() {
+  if (!composerGrowSnapshot || !composerWindow || composerWindow.isDestroyed()) {
+    composerGrowSnapshot = null;
+    return { ok: true };
+  }
+  const snapshot = composerGrowSnapshot;
+  composerGrowSnapshot = null;
+  composerWindow.setBounds(snapshot);
+  saveComposerWindowState();
+  return { ok: true };
+}
+
+function applyComposerVisibility() {
+  if (!composerWindow || composerWindow.isDestroyed() || !composerReadyToShow) return;
+  const chatOpen = Boolean(
+    mainWindow
+    && !mainWindow.isDestroyed()
+    && mainWindow.isVisible()
+    && !mainWindow.isMinimized(),
+  );
+  if (composerSuppressed || !chatOpen) {
+    if (composerWindow.isVisible()) composerWindow.hide();
+    return;
+  }
+  if (!composerWindow.isVisible()) composerWindow.showInactive();
+  raiseComposerAboveChat();
+}
+
+function adoptComposerWindow(win) {
+  if (!win || win.isDestroyed()) return;
+  composerWindow = win;
+  try { win.setParentWindow(null); } catch { /* already top-level */ }
+  win.setMenu(null);
+  placeComposerWindow(win);
+  win.on('move', saveComposerWindowState);
+  win.on('resize', saveComposerWindowState);
+  win.on('close', (event) => {
+    saveComposerWindowState();
+    if (!isQuitting) event.preventDefault();
+  });
+  win.on('focus', () => {
+    raiseComposerAboveChat();
+  });
+  win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  applyComposerVisibility();
+}
+
 function createWindow() {
   const { width, height } = loadWindowState();
   mainWindow = new BrowserWindow({
@@ -4146,7 +4321,17 @@ function createWindow() {
     callback(-2);
   });
 
-  mainWindow.on('resize', saveWindowState);
+  mainWindow.on('resize', () => {
+    saveWindowState();
+    raiseComposerAboveChat();
+  });
+  mainWindow.on('resized', () => {
+    liftComposerOnce();
+    setTimeout(liftComposerOnce, 80);
+  });
+  mainWindow.on('move', () => {
+    raiseComposerAboveChat();
+  });
   mainWindow.on('close', (event) => {
     saveWindowState();
     // 拦截「红点关闭」→ 隐藏而不是退出（菜单栏应用习惯）
@@ -4160,13 +4345,52 @@ function createWindow() {
 
   mainWindow.on('show', () => {
     syncDockVisibility();
+    applyComposerVisibility();
+  });
+  mainWindow.on('hide', () => {
+    applyComposerVisibility();
+  });
+  mainWindow.on('focus', () => {
+    applyComposerVisibility();
+  });
+  mainWindow.on('minimize', () => {
+    applyComposerVisibility();
+  });
+  mainWindow.on('restore', () => {
+    applyComposerVisibility();
   });
 
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+  mainWindow.webContents.setWindowOpenHandler(({ url, frameName }) => {
+    if (frameName === 'qizi-composer') {
+      return {
+        action: 'allow',
+        overrideBrowserWindowOptions: {
+          title: '输入',
+          frame: false,
+          show: false,
+          resizable: true,
+          minimizable: false,
+          maximizable: false,
+          fullscreenable: false,
+          closable: true,
+          backgroundColor: '#F2F2F2',
+          minWidth: COMPOSER_MIN_WIDTH,
+          minHeight: COMPOSER_MIN_HEIGHT,
+          width: 480,
+          height: COMPOSER_DEFAULT_HEIGHT,
+          autoHideMenuBar: true,
+        },
+      };
+    }
     if (openLinksExternally && isSafeExternalHttpUrl(url)) {
       openExternal(url);
     }
     return { action: 'deny' };
+  });
+
+  mainWindow.webContents.on('did-create-window', (child, details) => {
+    if (details.frameName !== 'qizi-composer') return;
+    adoptComposerWindow(child);
   });
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
@@ -5402,6 +5626,35 @@ async function streamChat(event, { message, attachments, runId, priorAssistantTe
     })();
   });
 }
+
+ipcMain.handle('composer:mounted', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  composerReadyToShow = true;
+  applyComposerVisibility();
+  return { ok: true };
+});
+
+ipcMain.handle('composer:suppressed', (event, suppressed) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  composerSuppressed = Boolean(suppressed);
+  applyComposerVisibility();
+  return { ok: true };
+});
+
+ipcMain.on('composer:raise', (event) => {
+  if (!getAuthorizedMainWindow(event)) return;
+  raiseComposerAboveChat();
+});
+
+ipcMain.handle('composer:grow', (event, extra) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return growComposerWindow(extra);
+});
+
+ipcMain.handle('composer:restore-size', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  return restoreComposerWindowSize();
+});
 
 ipcMain.handle('openclaw:check', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();

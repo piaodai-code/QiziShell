@@ -169,4 +169,9 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:stt:progress', handler);
     return () => ipcRenderer.removeListener('openclaw:stt:progress', handler);
   },
+  composerDidMount: () => ipcRenderer.invoke('composer:mounted'),
+  setComposerSuppressed: (suppressed) => ipcRenderer.invoke('composer:suppressed', Boolean(suppressed)),
+  raiseComposer: () => ipcRenderer.send('composer:raise'),
+  growComposer: (extra) => ipcRenderer.invoke('composer:grow', extra),
+  restoreComposerSize: () => ipcRenderer.invoke('composer:restore-size'),
 });

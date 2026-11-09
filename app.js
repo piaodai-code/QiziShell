@@ -805,8 +805,17 @@ const emojiBtn = document.getElementById('emoji-btn');
 const emojiPickerEl = document.getElementById('emoji-picker');
 let composerResized = false;
 
+function composerIsDetached() {
+  return Boolean(composerEl && composerEl.ownerDocument && composerEl.ownerDocument !== document);
+}
+
+function viewFor(el) {
+  return el?.ownerDocument?.defaultView || window;
+}
+
 function resetInputHeight() {
-  if (composerResized) {
+  if (!inputEl) return;
+  if (composerIsDetached() || composerResized) {
     inputEl.style.height = '';
     inputEl.style.maxHeight = '';
     return;
@@ -893,7 +902,9 @@ function isMessageListNearBottom(el) {
 function positionScrollBottomButton() {
   if (!scrollBottomBtn) return;
   const meeting = window.MeetingView?.isVisible?.() === true;
-  const footer = meeting ? document.getElementById('meeting-toolbar') : composerEl;
+  const footer = meeting
+    ? document.getElementById('meeting-toolbar')
+    : (composerIsDetached() ? null : composerEl);
   const height = footer && !footer.hidden ? footer.offsetHeight : 0;
   scrollBottomBtn.style.bottom = `${height + 12}px`;
 }
@@ -2594,8 +2605,9 @@ function showComposerContextMenu(x, y, target) {
   if (selectAllBtn) selectAllBtn.disabled = disabled || !value.length;
   composerContextMenuEl.hidden = false;
   const menuRect = composerContextMenuEl.getBoundingClientRect();
-  const maxX = window.innerWidth - menuRect.width - 8;
-  const maxY = window.innerHeight - menuRect.height - 8;
+  const view = viewFor(composerContextMenuEl);
+  const maxX = view.innerWidth - menuRect.width - 8;
+  const maxY = view.innerHeight - menuRect.height - 8;
   composerContextMenuEl.style.left = `${Math.max(8, Math.min(x, maxX))}px`;
   composerContextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
 }
@@ -2607,7 +2619,7 @@ async function pasteIntoTextarea(target) {
   try {
     text = await navigator.clipboard.readText();
   } catch {
-    document.execCommand('paste');
+    target.ownerDocument.execCommand('paste');
     target.dispatchEvent(new Event('input', { bubbles: true }));
     return;
   }
@@ -2633,13 +2645,13 @@ function handleComposerContextAction(action) {
     return;
   }
   if (action === 'cut') {
-    if (document.execCommand('cut')) {
+    if (target.ownerDocument.execCommand('cut')) {
       target.dispatchEvent(new Event('input', { bubbles: true }));
     }
     return;
   }
   if (action === 'copy') {
-    document.execCommand('copy');
+    target.ownerDocument.execCommand('copy');
     return;
   }
   if (action === 'paste') {
@@ -3600,9 +3612,9 @@ function setBtwAuxDim(active) {
 }
 
 function positionBtwSideDock() {
-  const composer = document.getElementById('composer');
-  const height = composer ? composer.getBoundingClientRect().height : 120;
-  const bottom = `${Math.ceil(height) + 8}px`;
+  const bottom = composerIsDetached()
+    ? '12px'
+    : `${Math.ceil((composerEl && composerEl.getBoundingClientRect().height) || 120) + 8}px`;
   if (btwSideDockEl) btwSideDockEl.style.setProperty('--btw-dock-bottom', bottom);
   if (queueSideDockEl) queueSideDockEl.style.setProperty('--btw-dock-bottom', bottom);
 }
@@ -5556,9 +5568,13 @@ async function refreshSessionControlsBadge() {
 
 function hideSessionControlsPopup() {
   if (!sessionControlsPopup) return;
+  const wasOpen = !sessionControlsPopup.hidden;
   sessionControlsPopup.hidden = true;
   sessionControlsPopup.innerHTML = '';
+  sessionControlsPopup.style.maxHeight = '';
+  sessionControlsPopup.style.overflowY = '';
   if (sessionControlsBtn) sessionControlsBtn.classList.remove('open');
+  if (wasOpen) releaseComposerPopupFit();
 }
 
 const PERMISSION_DOCS_URL = 'https://docs.openclaw.ai/gateway/permission-modes';
@@ -5717,29 +5733,125 @@ function renderPermissionPopup(state = sessionPermissionState, errorText = permi
     err.textContent = errorText;
     permPopup.appendChild(err);
   }
+  fitComposerPopup(permPopup);
 }
+
+let attachFitting = false;
 
 function hideAttachPopup() {
   if (!attachPopup) return;
+  const wasOpen = !attachPopup.hidden;
   attachPopup.hidden = true;
+  attachPopup.style.maxHeight = '';
+  attachPopup.style.overflowY = '';
   if (attachPickerBtn) {
     attachPickerBtn.classList.remove('open');
     attachPickerBtn.setAttribute('aria-expanded', 'false');
   }
+  if (wasOpen) releaseComposerPopupFit();
 }
 
 function placeAttachPopup() {
-  if (!attachPopup || !attachPickerBtn) return;
+  if (!attachPopup || !attachPickerBtn || attachFitting) return;
   const rect = attachPickerBtn.getBoundingClientRect();
+  const view = viewFor(attachPickerBtn);
   const margin = 8;
   attachPopup.style.position = 'fixed';
   attachPopup.style.zIndex = '10005';
   attachPopup.style.right = 'auto';
-  attachPopup.style.top = 'auto';
+  attachPopup.style.maxHeight = 'none';
+  attachPopup.style.overflowY = 'visible';
   const width = Math.max(attachPopup.offsetWidth || 148, 148);
-  const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+  const left = Math.max(margin, Math.min(rect.left, view.innerWidth - width - margin));
   attachPopup.style.left = `${Math.round(left)}px`;
-  attachPopup.style.bottom = `${Math.round(Math.max(margin, window.innerHeight - rect.top + margin))}px`;
+  const spaceAbove = rect.top;
+  const spaceBelow = view.innerHeight - rect.bottom;
+  const openDown = spaceBelow >= spaceAbove;
+  if (openDown) {
+    attachPopup.style.bottom = 'auto';
+    attachPopup.style.top = `${Math.round(rect.bottom + margin)}px`;
+  } else {
+    attachPopup.style.top = 'auto';
+    attachPopup.style.bottom = `${Math.round(Math.max(margin, view.innerHeight - rect.top + margin))}px`;
+  }
+  if (!composerIsDetached()) return;
+  const popupHeight = attachPopup.offsetHeight;
+  const anchorTop = openDown ? rect.bottom + margin : margin;
+  const overflow = openDown
+    ? Math.ceil(anchorTop + popupHeight + margin - view.innerHeight)
+    : 0;
+  const clampToWindow = () => {
+    const available = Math.max(80, view.innerHeight - anchorTop - margin);
+    if (popupHeight > available + 1) {
+      attachPopup.style.maxHeight = `${Math.floor(available)}px`;
+      attachPopup.style.overflowY = 'auto';
+    }
+  };
+  if (overflow > 2 && window.qizi?.growComposer) {
+    attachFitting = true;
+    void window.qizi.growComposer(overflow).then((result) => {
+      attachFitting = false;
+      if (!attachPopup || attachPopup.hidden) return;
+      if (result?.changed) placeAttachPopup();
+      else clampToWindow();
+    }).catch(() => {
+      attachFitting = false;
+      clampToWindow();
+    });
+    return;
+  }
+  clampToWindow();
+}
+
+let composerPopupFitting = false;
+let composerPopupFitAgain = null;
+
+function releaseComposerPopupFit() {
+  composerPopupFitAgain = null;
+  if (!composerIsDetached()) return;
+  void window.qizi?.restoreComposerSize?.();
+}
+
+function fitComposerPopup(popup) {
+  if (!composerIsDetached() || !popup || popup.hidden) return;
+  if (composerPopupFitting) {
+    composerPopupFitAgain = popup;
+    return;
+  }
+  const view = viewFor(popup);
+  const margin = 8;
+  popup.style.maxHeight = 'none';
+  popup.style.overflowY = 'visible';
+  const rect = popup.getBoundingClientRect();
+  const needed = Math.max(popup.scrollHeight, popup.offsetHeight);
+  const overflow = Math.ceil(rect.top + needed + margin - view.innerHeight);
+  const clampToWindow = () => {
+    const top = popup.getBoundingClientRect().top;
+    const available = Math.max(80, view.innerHeight - top - margin);
+    if (needed > available + 1) {
+      popup.style.maxHeight = `${Math.floor(available)}px`;
+      popup.style.overflowY = 'auto';
+    }
+  };
+  const finish = () => {
+    composerPopupFitting = false;
+    const again = composerPopupFitAgain;
+    composerPopupFitAgain = null;
+    if (again && !again.hidden) fitComposerPopup(again);
+  };
+  if (overflow > 2 && window.qizi?.growComposer) {
+    composerPopupFitting = true;
+    void window.qizi.growComposer(overflow).then((result) => {
+      if (!popup.hidden && result?.changed) composerPopupFitAgain = popup;
+      else if (!popup.hidden) clampToWindow();
+      finish();
+    }).catch(() => {
+      if (!popup.hidden) clampToWindow();
+      finish();
+    });
+    return;
+  }
+  clampToWindow();
 }
 
 function showAttachPopup() {
@@ -5764,13 +5876,17 @@ function showAttachPopup() {
 
 function hidePermissionPopup() {
   if (!permPopup) return;
+  const wasOpen = !permPopup.hidden;
   permPopup.hidden = true;
   permPopup.innerHTML = '';
+  permPopup.style.maxHeight = '';
+  permPopup.style.overflowY = '';
   permissionPopupError = '';
   if (permPickerBtn) {
     permPickerBtn.classList.remove('open');
     permPickerBtn.setAttribute('aria-expanded', 'false');
   }
+  if (wasOpen) releaseComposerPopupFit();
 }
 
 async function refreshSessionPermission() {
@@ -6040,6 +6156,7 @@ function renderSessionControlsPopup(data) {
   if (!sessionControlsPopup) return;
   if (!data?.ok) {
     sessionControlsPopup.innerHTML = `<div class="sc-popup-message sc-popup-message--error">${escapeHtml(data?.error || 'Failed to load')}</div>`;
+    fitComposerPopup(sessionControlsPopup);
     return;
   }
   sessionControlsPopup.innerHTML = '';
@@ -6051,6 +6168,7 @@ function renderSessionControlsPopup(data) {
 
   if (!thinkingSection && !speedSection) {
     sessionControlsPopup.innerHTML = '<div class="sc-popup-message">No session controls for this model.</div>';
+    fitComposerPopup(sessionControlsPopup);
     return;
   }
   if (thinkingSection) panel.appendChild(thinkingSection);
@@ -6061,6 +6179,7 @@ function renderSessionControlsPopup(data) {
   }
   if (speedSection) panel.appendChild(speedSection);
   sessionControlsPopup.appendChild(panel);
+  fitComposerPopup(sessionControlsPopup);
 }
 
 async function showSessionControlsPopup() {
@@ -6084,6 +6203,7 @@ async function showSessionControlsPopup() {
     await checkConnection();
     if (!connected) {
       sessionControlsPopup.innerHTML = '<div class="sc-popup-message sc-popup-message--error">Gateway not connected</div>';
+      fitComposerPopup(sessionControlsPopup);
       return;
     }
   }
@@ -6094,6 +6214,7 @@ async function showSessionControlsPopup() {
     if (result?.ok) setSessionControlsBadgeText(formatSessionControlsBadge(result));
   } catch (err) {
     sessionControlsPopup.innerHTML = `<div class="sc-popup-message sc-popup-message--error">${escapeHtml(err.message || 'Failed to load')}</div>`;
+    fitComposerPopup(sessionControlsPopup);
   }
 }
 
@@ -6124,15 +6245,20 @@ async function selectSessionControl(kind, value, options = {}) {
 
 function hideModelPopup() {
   if (!modelPopup) return;
+  const wasOpen = !modelPopup.hidden;
   modelPopup.hidden = true;
   modelPopup.innerHTML = '';
+  modelPopup.style.maxHeight = '';
+  modelPopup.style.overflowY = '';
   if (modelPickerBtn) modelPickerBtn.classList.remove('open');
+  if (wasOpen) releaseComposerPopupFit();
 }
 
 function renderModelPopup(models) {
   if (!modelPopup) return;
   if (!models.length) {
     modelPopup.innerHTML = '<div class="model-popup-empty">暂无可用模型</div>';
+    fitComposerPopup(modelPopup);
     return;
   }
   modelPopup.innerHTML = '';
@@ -6164,6 +6290,7 @@ function renderModelPopup(models) {
     btn.addEventListener('click', () => selectModel(qualified, formatCatalogEntryLabel(entry)));
     modelPopup.appendChild(btn);
   }
+  fitComposerPopup(modelPopup);
 }
 
 async function showModelPopup() {
@@ -6195,6 +6322,7 @@ async function showModelPopup() {
     if (!modelPopup || modelPopup.hidden) return;
     if (!connected) {
       modelPopup.innerHTML = '<div class="model-popup-error">未连接 Gateway</div>';
+      fitComposerPopup(modelPopup);
       return;
     }
   }
@@ -6207,6 +6335,7 @@ async function showModelPopup() {
   } catch (err) {
     if (!modelPopup || modelPopup.hidden || cachedModels?.length) return;
     modelPopup.innerHTML = `<div class="model-popup-error">${escapeHtml(err.message || '加载失败')}</div>`;
+    fitComposerPopup(modelPopup);
   }
 }
 
@@ -7175,14 +7304,15 @@ if (msgContextMenuEl) {
   });
 }
 
-document.addEventListener('click', (e) => {
+function onContextMenuSurfaceClick(e) {
   if (msgContextMenuEl && !msgContextMenuEl.hidden) {
     if (!e.target.closest('#msg-context-menu')) hideMessageContextMenu();
   }
   if (composerContextMenuEl && !composerContextMenuEl.hidden) {
     if (!e.target.closest('#composer-context-menu')) hideComposerContextMenu();
   }
-});
+}
+document.addEventListener('click', onContextMenuSurfaceClick);
 
 if (composerContextMenuEl) {
   composerContextMenuEl.addEventListener('click', (e) => {
@@ -7349,7 +7479,7 @@ inputEl.addEventListener('input', () => {
   } else {
     hideCommandPopup();
   }
-  if (!composerResized) {
+  if (!composerResized && !composerIsDetached()) {
     inputEl.style.height = 'auto';
     inputEl.style.height = `${Math.min(Math.max(inputEl.scrollHeight, 90), 200)}px`;
   }
@@ -7570,13 +7700,15 @@ function insertEmojiAtCursor(emoji) {
 function positionEmojiPicker() {
   const anchor = (emojiBtn && !emojiBtn.closest('[hidden]')) ? emojiBtn : attachPickerBtn;
   if (!anchor || !emojiPickerEl || emojiPickerEl.hidden) return;
+  const view = viewFor(anchor);
   const rect = anchor.getBoundingClientRect();
   const panelW = emojiPickerEl.offsetWidth;
   const panelH = emojiPickerEl.offsetHeight;
   const gap = 6;
   let top = rect.top - panelH - gap;
-  if (top < 8) top = 8;
-  const maxLeft = window.innerWidth - panelW - 8;
+  if (top < 8) top = rect.bottom + gap;
+  if (top + panelH > view.innerHeight - 8) top = Math.max(8, view.innerHeight - panelH - 8);
+  const maxLeft = view.innerWidth - panelW - 8;
   const left = Math.max(8, Math.min(rect.left, maxLeft));
   emojiPickerEl.style.left = `${left}px`;
   emojiPickerEl.style.top = `${top}px`;
@@ -7671,41 +7803,13 @@ resetInputHeight();
 updateComposerSendBtn();
 
 // ===== 拖拽图片或文件到窗口 =====
-let dragCounter = 0;
 function isFileDrag(e) {
   if (!e.dataTransfer) return false;
   return Array.from(e.dataTransfer.types || []).includes('Files');
 }
 
-document.addEventListener('dragenter', (e) => {
-  if (!isFileDrag(e)) return;
-  e.preventDefault();
-  dragCounter++;
-  document.body.classList.add('drag-over');
-});
-
-document.addEventListener('dragleave', (e) => {
-  if (!isFileDrag(e)) return;
-  e.preventDefault();
-  dragCounter--;
-  if (dragCounter <= 0) {
-    dragCounter = 0;
-    document.body.classList.remove('drag-over');
-  }
-});
-
-document.addEventListener('dragover', (e) => {
-  if (!isFileDrag(e)) return;
-  e.preventDefault();
-  e.dataTransfer.dropEffect = 'copy';
-});
-
-document.addEventListener('drop', async (e) => {
-  if (!isFileDrag(e)) return;
-  e.preventDefault();
-  dragCounter = 0;
-  document.body.classList.remove('drag-over');
-  const { files, directories } = filesFromDataTransfer(e.dataTransfer);
+async function ingestDroppedFiles(dataTransfer) {
+  const { files, directories } = filesFromDataTransfer(dataTransfer);
   let images = 0;
   let attached = 0;
   let skipped = directories;
@@ -7731,7 +7835,42 @@ document.addEventListener('drop', async (e) => {
   } else if (skipped > 0) {
     setStatus('这些内容不能作为附件加入', 'error');
   }
-});
+}
+
+function bindFileDrop(doc) {
+  if (!doc || doc.__qiziFileDropBound) return;
+  doc.__qiziFileDropBound = true;
+  let dragCounter = 0;
+  doc.addEventListener('dragenter', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragCounter += 1;
+    doc.body.classList.add('drag-over');
+  });
+  doc.addEventListener('dragleave', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragCounter -= 1;
+    if (dragCounter <= 0) {
+      dragCounter = 0;
+      doc.body.classList.remove('drag-over');
+    }
+  });
+  doc.addEventListener('dragover', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  });
+  doc.addEventListener('drop', (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();
+    dragCounter = 0;
+    doc.body.classList.remove('drag-over');
+    void ingestDroppedFiles(e.dataTransfer);
+  });
+}
+
+bindFileDrop(document);
 
 // ===== Cmd+V 黏贴剪贴板图片 =====
 inputEl.addEventListener('paste', async (e) => {
@@ -7882,9 +8021,10 @@ if (attachPopup) {
       ev.preventDefault();
       ev.stopPropagation();
     };
-    document.addEventListener('click', swallowClick, true);
-    document.addEventListener('mouseup', () => {
-      setTimeout(() => document.removeEventListener('click', swallowClick, true), 0);
+    const hostDoc = attachPopup.ownerDocument || document;
+    hostDoc.addEventListener('click', swallowClick, true);
+    hostDoc.addEventListener('mouseup', () => {
+      setTimeout(() => hostDoc.removeEventListener('click', swallowClick, true), 0);
     }, { capture: true, once: true });
   });
   attachPopup.addEventListener('click', (e) => {
@@ -7892,7 +8032,7 @@ if (attachPopup) {
   });
 }
 
-document.addEventListener('click', (e) => {
+function onShellSurfaceClick(e) {
   if (modelPopup && !modelPopup.hidden) {
     if (!e.target.closest('.model-picker-wrap')) hideModelPopup();
   }
@@ -7922,9 +8062,10 @@ document.addEventListener('click', (e) => {
   if (appMenuPopup && !appMenuPopup.hidden) {
     if (!e.target.closest('.titlebar-menu-wrap')) hideAppMenu();
   }
-});
+}
+document.addEventListener('click', onShellSurfaceClick);
 
-document.addEventListener('keydown', (e) => {
+function onShellSurfaceKeydown(e) {
   if (permPopup && !permPopup.hidden && /^[1-5]$/.test(e.key) && !e.metaKey && !e.ctrlKey && !e.altKey) {
     const typing = e.target === inputEl || e.target?.closest?.('textarea, input, [contenteditable="true"]');
     if (!typing) {
@@ -7963,7 +8104,8 @@ document.addEventListener('keydown', (e) => {
     if (agentPopup && !agentPopup.hidden) hideAgentPopup();
     if (appMenuPopup && !appMenuPopup.hidden) hideAppMenu();
   }
-});
+}
+document.addEventListener('keydown', onShellSurfaceKeydown);
 
 if (multiselectCancelBtn) {
   multiselectCancelBtn.addEventListener('click', exitMultiSelectMode);
@@ -8877,13 +9019,17 @@ async function refreshChannelPickerLabel() {
 
 function hideChannelPopup() {
   if (!channelPopup) return;
+  const wasOpen = !channelPopup.hidden;
   channelPopup.hidden = true;
   channelPopup.innerHTML = '';
+  channelPopup.style.maxHeight = '';
+  channelPopup.style.overflowY = '';
   channelPopupCatalog = null;
   if (channelPickerBtn) {
     channelPickerBtn.classList.remove('open');
     channelPickerBtn.setAttribute('aria-expanded', 'false');
   }
+  if (wasOpen) releaseComposerPopupFit();
 }
 
 function renderChannelPopup(catalog, errorText) {
@@ -8950,6 +9096,7 @@ function renderChannelPopup(catalog, errorText) {
     err.textContent = errorText;
     channelPopup.appendChild(err);
   }
+  fitComposerPopup(channelPopup);
 }
 
 async function showChannelPopup() {
@@ -9376,21 +9523,30 @@ window.addEventListener('qizi-meeting-exec-forward', (event) => {
   void openExecAgentAfterMeetingForward(detail);
 });
 
+function syncDetachedComposerSuppressed() {
+  const suppressed = document.body.classList.contains('meeting-mode');
+  void window.qizi?.setComposerSuppressed?.(suppressed);
+}
+
 window.addEventListener('qizi-meeting-entered', (event) => {
   applyMeetingTitlebar(event.detail || {});
+  syncDetachedComposerSuppressed();
 });
 
 window.addEventListener('qizi-meeting-hub-opened', (event) => {
   applyMeetingTitlebar(event.detail || {});
+  syncDetachedComposerSuppressed();
 });
 
 window.addEventListener('qizi-meeting-view-shown', (event) => {
   applyMeetingTitlebar(event.detail || window.MeetingView?.getConfig?.() || {});
+  syncDetachedComposerSuppressed();
 });
 
 window.addEventListener('qizi-meeting-view-hidden', () => {
   restoreMeetingTitlebar();
   render();
+  syncDetachedComposerSuppressed();
 });
 
 window.addEventListener('qizi-meeting-exited', () => {
@@ -9398,6 +9554,7 @@ window.addEventListener('qizi-meeting-exited', () => {
   contextMenuSource = 'chat';
   restoreMeetingTitlebar();
   render();
+  syncDetachedComposerSuppressed();
 });
 
 window.qiziDeliverCopyEditPrompt = deliverCopyEditPrompt;
@@ -9415,3 +9572,81 @@ window.QiziShellMsgOps = {
   toggleMultiSelectIndex,
   renderMessageSelectCheckHtml,
 };
+
+function bindComposerHostDocument(doc) {
+  doc.addEventListener('click', onContextMenuSurfaceClick);
+  doc.addEventListener('click', onShellSurfaceClick);
+  doc.addEventListener('keydown', onShellSurfaceKeydown);
+  bindFileDrop(doc);
+  doc.defaultView.addEventListener('resize', () => {
+    positionEmojiPicker();
+    if (attachPopup && !attachPopup.hidden) placeAttachPopup();
+    if (modelPopup && !modelPopup.hidden) fitComposerPopup(modelPopup);
+    if (channelPopup && !channelPopup.hidden) fitComposerPopup(channelPopup);
+    if (permPopup && !permPopup.hidden) fitComposerPopup(permPopup);
+    if (sessionControlsPopup && !sessionControlsPopup.hidden) fitComposerPopup(sessionControlsPopup);
+  });
+}
+
+async function mountDetachedComposer() {
+  if (!composerEl || composerEl.dataset.detached === '1') return;
+  if (!window.qizi?.composerDidMount) return;
+  let popup = null;
+  try {
+    popup = window.open('about:blank', 'qizi-composer', 'width=480,height=280');
+  } catch (err) {
+    console.warn('[qizi] composer window open failed', err);
+    return;
+  }
+  if (!popup || popup === window || !popup.document || popup.document === document) return;
+  const doc = popup.document;
+  doc.title = '输入';
+  const head = doc.head || doc.createElement('head');
+  if (!doc.head) doc.documentElement.insertBefore(head, doc.body);
+  const base = doc.createElement('base');
+  base.href = document.baseURI;
+  head.appendChild(base);
+  doc.documentElement.classList.add('composer-host');
+  doc.body.classList.add('composer-host');
+  const shell = doc.createElement('div');
+  shell.className = 'composer-window-shell';
+  const drag = doc.createElement('div');
+  drag.className = 'composer-dragbar';
+  drag.title = '拖动输入窗';
+  shell.appendChild(drag);
+  doc.body.appendChild(shell);
+  shell.appendChild(composerEl);
+  if (composerContextMenuEl) doc.body.appendChild(composerContextMenuEl);
+  composerEl.dataset.detached = '1';
+  bindComposerHostDocument(doc);
+  resetInputHeight();
+  positionBtwSideDock();
+  syncScrollBottomButton();
+  try {
+    const cssUrl = new URL('style.css', document.baseURI);
+    const css = await fetch(cssUrl).then((response) => {
+      if (!response.ok) throw new Error('style.css');
+      return response.text();
+    });
+    const style = doc.createElement('style');
+    style.textContent = css;
+    head.appendChild(style);
+  } catch (err) {
+    console.warn('[qizi] composer styles failed', err);
+  }
+  try {
+    await window.qizi.composerDidMount();
+  } catch (err) {
+    console.warn('[qizi] composer show failed', err);
+  }
+  syncDetachedComposerSuppressed();
+}
+
+window.addEventListener('mousedown', () => {
+  window.qizi?.raiseComposer?.();
+}, true);
+window.addEventListener('focus', () => {
+  window.qizi?.raiseComposer?.();
+});
+
+void mountDetachedComposer();
