@@ -6285,8 +6285,15 @@ function renderModelPopup(models) {
     meta.className = 'model-item-meta';
     meta.textContent = qualified;
 
-    btn.appendChild(nameRow);
-    btn.appendChild(meta);
+    const body = document.createElement('span');
+    body.className = 'model-item-body';
+    body.appendChild(nameRow);
+    body.appendChild(meta);
+    const mark = document.createElement('span');
+    mark.className = 'model-item-mark';
+    if (qualified === currentModelQualified) mark.innerHTML = permissionCheckSvg();
+    btn.appendChild(body);
+    btn.appendChild(mark);
     btn.addEventListener('click', () => selectModel(qualified, formatCatalogEntryLabel(entry)));
     modelPopup.appendChild(btn);
   }
