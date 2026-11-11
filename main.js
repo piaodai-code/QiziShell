@@ -608,8 +608,8 @@ const SHELL_SESSION_MAIN_KEY = 'main';
 const STATE_PATH = path.join(app.getPath('userData'), 'window-state.json');
 const COMPOSER_STATE_PATH = path.join(app.getPath('userData'), 'composer-window-state.json');
 const COMPOSER_MIN_WIDTH = 380;
-const COMPOSER_MIN_HEIGHT = 220;
-const COMPOSER_DEFAULT_HEIGHT = 280;
+const COMPOSER_MIN_HEIGHT = 240;
+const COMPOSER_DEFAULT_HEIGHT = 300;
 const COPY_EDIT_STATE_PATH = path.join(app.getPath('userData'), 'copy-edit-window-state.json');
 const HISTORY_STATE_PATH = path.join(app.getPath('userData'), 'history-window-state.json');
 const AGENT_FILES_STATE_PATH = path.join(app.getPath('userData'), 'agent-files-window-state.json');
@@ -4230,6 +4230,48 @@ function raiseComposerAboveChat() {
   }, 450);
 }
 
+let composerTopResize = null;
+
+function resizeComposerFromTop(phase, screenY) {
+  if (!composerWindow || composerWindow.isDestroyed()) {
+    composerTopResize = null;
+    return;
+  }
+  if (phase === 'end') {
+    composerTopResize = null;
+    saveComposerWindowState();
+    return;
+  }
+  const pointerY = Math.round(Number(screenY));
+  if (!Number.isFinite(pointerY)) return;
+  const current = composerWindow.getBounds();
+  if (phase === 'start' || !composerTopResize) {
+    composerTopResize = {
+      bottom: current.y + current.height,
+      grabOffset: pointerY - current.y,
+    };
+    if (phase === 'start') return;
+  }
+  const area = screen.getDisplayMatching(current).workArea;
+  let y = pointerY - composerTopResize.grabOffset;
+  let height = composerTopResize.bottom - y;
+  if (height < COMPOSER_MIN_HEIGHT) {
+    height = COMPOSER_MIN_HEIGHT;
+    y = composerTopResize.bottom - height;
+  }
+  if (height > 1600) {
+    height = 1600;
+    y = composerTopResize.bottom - height;
+  }
+  if (y < area.y) {
+    y = area.y;
+    height = composerTopResize.bottom - y;
+    if (height < COMPOSER_MIN_HEIGHT) return;
+  }
+  if (y === current.y && height === current.height) return;
+  composerWindow.setBounds({ x: current.x, y, width: current.width, height });
+}
+
 function growComposerWindow(extra) {
   const amount = Math.ceil(Number(extra) || 0);
   if (!composerWindow || composerWindow.isDestroyed() || amount <= 0) return { ok: true, changed: false };
@@ -4296,6 +4338,47 @@ function adoptComposerWindow(win) {
   applyComposerVisibility();
 }
 
+const chatRendererReloads = [];
+
+function discardCrashedComposerWindow() {
+  composerReadyToShow = false;
+  composerGrowSnapshot = null;
+  const win = composerWindow;
+  composerWindow = null;
+  if (!win || win.isDestroyed()) return;
+  win.removeAllListeners('close');
+  try { win.destroy(); } catch { /* ignore */ }
+}
+
+function recoverChatRenderer(details) {
+  if (isQuitting) return;
+  const reason = details?.reason || 'unknown';
+  if (reason === 'clean-exit') return;
+  console.error('[qizi] chat renderer gone:', reason, details?.exitCode ?? '');
+  const now = Date.now();
+  while (chatRendererReloads.length && now - chatRendererReloads[0] > 60000) {
+    chatRendererReloads.shift();
+  }
+  chatRendererReloads.push(now);
+  discardCrashedComposerWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (chatRendererReloads.length > 2) {
+    dialog.showMessageBox(mainWindow, {
+      type: 'error',
+      title: '启孜',
+      message: '界面进程反复崩溃，已停止自动恢复。',
+      detail: `原因：${reason}`,
+      buttons: ['关闭'],
+    }).catch(() => {});
+    return;
+  }
+  try {
+    mainWindow.webContents.reload();
+  } catch (err) {
+    console.error('[qizi] chat renderer reload failed:', err);
+  }
+}
+
 function createWindow() {
   const { width, height } = loadWindowState();
   mainWindow = new BrowserWindow({
@@ -4304,6 +4387,7 @@ function createWindow() {
     minWidth: WINDOW_MIN_WIDTH,
     minHeight: WINDOW_MIN_HEIGHT,
     title: 'QiziShell',
+    backgroundColor: '#F2F2F2',
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 12, y: 12 },
     webPreferences: {
@@ -4312,6 +4396,10 @@ function createWindow() {
       contextIsolation: true,
       devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
     },
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    setImmediate(() => recoverChatRenderer(details));
   });
 
   mainWindow.webContents.session.setCertificateVerifyProc((request, callback) => {
@@ -4368,13 +4456,15 @@ function createWindow() {
         overrideBrowserWindowOptions: {
           title: '输入',
           frame: false,
+          transparent: true,
           show: false,
           resizable: true,
           minimizable: false,
           maximizable: false,
           fullscreenable: false,
           closable: true,
-          backgroundColor: '#F2F2F2',
+          backgroundColor: '#00000000',
+          hasShadow: true,
           minWidth: COMPOSER_MIN_WIDTH,
           minHeight: COMPOSER_MIN_HEIGHT,
           width: 480,
@@ -5663,6 +5753,11 @@ ipcMain.handle('composer:grow', (event, extra) => {
 ipcMain.handle('composer:restore-size', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return restoreComposerWindowSize();
+});
+
+ipcMain.on('composer:top-resize', (event, payload) => {
+  if (!getAuthorizedMainWindow(event)) return;
+  resizeComposerFromTop(payload?.phase, payload?.screenY);
 });
 
 ipcMain.handle('openclaw:check', (event) => {

@@ -4074,6 +4074,7 @@ function formatAgentLabel(agent) {
 }
 
 function updateAgentTitleLabel(agent) {
+  syncComposerWindowAvatar();
   if (!titlebarAgentAvatar) return;
   if (titlebarAgentBtn?.classList.contains('titlebar-agent-btn--meeting-view')) return;
   const info = agent || getCurrentAgentInfo();
@@ -9516,6 +9517,7 @@ function applyMeetingTitlebar() {
   titlebarAgentBtn.title = '会议 · 切换 Agent';
   titlebarAgentBtn.setAttribute('aria-label', '会议 · 切换 Agent');
   titlebarAgentBtn.classList.add('titlebar-agent-btn--meeting-view');
+  syncComposerWindowAvatar();
 }
 
 function restoreMeetingTitlebar() {
@@ -9679,8 +9681,9 @@ async function detachComposer() {
   if (composerPopupWindow && !composerPopupWindow.closed) {
     const doc = composerPopupWindow.document;
     const shell = doc?.querySelector('.composer-window-shell');
-    if (shell && composerEl) {
-      shell.appendChild(composerEl);
+    const frame = shell?.querySelector('.composer-window-frame') || shell;
+    if (frame && composerEl) {
+      frame.appendChild(composerEl);
       if (composerContextMenuEl) doc.body.appendChild(composerContextMenuEl);
       composerEl.dataset.detached = '1';
       resetInputHeight();
@@ -9719,12 +9722,25 @@ async function mountDetachedComposer() {
   doc.body.classList.add('composer-host');
   const shell = doc.createElement('div');
   shell.className = 'composer-window-shell';
+  const avatarSlot = doc.createElement('div');
+  avatarSlot.className = 'composer-window-avatar';
+  shell.appendChild(avatarSlot);
+  const frame = doc.createElement('div');
+  frame.className = 'composer-window-frame';
+  const topResize = doc.createElement('div');
+  topResize.className = 'composer-top-resize';
+  topResize.title = '调整高度';
+  topResize.style.cssText = 'flex-shrink:0;height:8px;cursor:ns-resize;-webkit-app-region:no-drag;';
+  topResize.style.setProperty('-webkit-app-region', 'no-drag');
+  frame.appendChild(topResize);
+  bindComposerTopResize(topResize);
   const drag = doc.createElement('div');
   drag.className = 'composer-dragbar';
   drag.title = '拖动输入窗';
-  shell.appendChild(drag);
+  frame.appendChild(drag);
+  shell.appendChild(frame);
   doc.body.appendChild(shell);
-  shell.appendChild(composerEl);
+  frame.appendChild(composerEl);
   if (composerContextMenuEl) doc.body.appendChild(composerContextMenuEl);
   composerEl.dataset.detached = '1';
   bindComposerHostDocument(doc);
@@ -9733,7 +9749,7 @@ async function mountDetachedComposer() {
   syncScrollBottomButton();
   try {
     const cssUrl = new URL('style.css', document.baseURI);
-    const css = await fetch(cssUrl).then((response) => {
+    const css = await fetch(cssUrl, { cache: 'no-store' }).then((response) => {
       if (!response.ok) throw new Error('style.css');
       return response.text();
     });
@@ -9751,6 +9767,55 @@ async function mountDetachedComposer() {
   }
   syncDetachedComposerSuppressed();
   syncComposerDetachButton();
+  syncComposerWindowAvatar();
+}
+
+function composerWindowAvatarHtml() {
+  if (titlebarAgentBtn?.classList.contains('titlebar-agent-btn--meeting-view')) {
+    const src = window.MeetingView?.getAvatarSrc?.() || 'assets/icons/meeting-team.png';
+    return `<span class="agent-avatar agent-avatar-composer agent-avatar-meeting" role="img" aria-label="会议"><img src="${src}" alt="会议"></span>`;
+  }
+  return buildAgentAvatarInner(getCurrentAgentInfo(), 'composer');
+}
+
+function bindComposerTopResize(handle) {
+  if (!handle || handle.dataset.bound) return;
+  handle.dataset.bound = '1';
+  let dragging = false;
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    window.qizi?.resizeComposerTop?.('end');
+  };
+  handle.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    dragging = true;
+    handle.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    event.stopPropagation();
+    window.qizi?.resizeComposerTop?.('start', event.screenY);
+  });
+  handle.addEventListener('pointermove', (event) => {
+    if (!dragging) return;
+    window.qizi?.resizeComposerTop?.('move', event.screenY);
+  });
+  handle.addEventListener('pointerup', end);
+  handle.addEventListener('pointercancel', end);
+}
+
+function syncComposerWindowAvatar() {
+  const doc = composerPopupWindow?.document;
+  if (!doc || composerPopupWindow.closed) return;
+  const slot = doc.querySelector('.composer-window-avatar');
+  if (!slot) return;
+  const html = composerWindowAvatarHtml();
+  if (slot.dataset.html === html) return;
+  slot.dataset.html = html;
+  slot.innerHTML = html;
+  const meeting = titlebarAgentBtn?.classList.contains('titlebar-agent-btn--meeting-view');
+  const label = meeting ? '会议' : formatAgentLabel(getCurrentAgentInfo());
+  slot.title = label;
+  slot.setAttribute('aria-label', label);
 }
 
 async function toggleComposerWindow() {

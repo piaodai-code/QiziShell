@@ -175,4 +175,5 @@ contextBridge.exposeInMainWorld('qizi', {
   raiseComposer: () => ipcRenderer.send('composer:raise'),
   growComposer: (extra) => ipcRenderer.invoke('composer:grow', extra),
   restoreComposerSize: () => ipcRenderer.invoke('composer:restore-size'),
+  resizeComposerTop: (phase, screenY) => ipcRenderer.send('composer:top-resize', { phase, screenY }),
 });
