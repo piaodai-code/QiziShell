@@ -3133,27 +3133,66 @@ function recordCommittedSegment(run, segmentText) {
   run.committedInRunText = `${run.committedInRunText || ''}${part}`;
 }
 
+const ASSISTANT_SNAPSHOT_SLICE = 48;
+
+function assistantSnapshotSlices(text) {
+  const body = String(text || '').trim();
+  if (body.length < ASSISTANT_SNAPSHOT_SLICE) return [];
+  const slices = [body.slice(0, ASSISTANT_SNAPSHOT_SLICE), body.slice(-ASSISTANT_SNAPSHOT_SLICE)];
+  if (body.length > ASSISTANT_SNAPSHOT_SLICE * 3) {
+    const mid = Math.floor(body.length / 2) - Math.floor(ASSISTANT_SNAPSHOT_SLICE / 2);
+    slices.push(body.slice(mid, mid + ASSISTANT_SNAPSHOT_SLICE));
+  }
+  return slices;
+}
+
+function assistantTextsOverlap(a, b) {
+  const left = String(a || '').trim();
+  const right = String(b || '').trim();
+  if (!left || !right) return false;
+  const shorter = left.length <= right.length ? left : right;
+  const longer = shorter === left ? right : left;
+  return assistantSnapshotSlices(shorter).some((slice) => longer.includes(slice));
+}
+
+function dropRepeatedAssistantTranscript(text) {
+  const body = String(text || '').trim();
+  if (body.length < ASSISTANT_SNAPSHOT_SLICE * 2) return String(text || '');
+  const scanEnd = Math.min(body.length, 500);
+  for (let i = 0; i + ASSISTANT_SNAPSHOT_SLICE <= scanEnd; i += 24) {
+    const slice = body.slice(i, i + ASSISTANT_SNAPSHOT_SLICE);
+    const at = body.indexOf(slice, i + ASSISTANT_SNAPSHOT_SLICE);
+    if (at < 0) continue;
+    const start = at - i;
+    if (start < ASSISTANT_SNAPSHOT_SLICE) continue;
+    const first = body.slice(0, start).trim();
+    const second = body.slice(start).trim();
+    if (second.length < ASSISTANT_SNAPSHOT_SLICE || !assistantTextsOverlap(first, second)) continue;
+    if (second.length < first.length * 0.6) continue;
+    return second.length >= first.length ? second : first;
+  }
+  return String(text || '');
+}
+
+function joinAssistantTranscript(current, next) {
+  const cur = String(current || '').trim();
+  const incoming = String(next || '').trim();
+  if (!incoming) return String(current || '');
+  if (!cur) return incoming;
+  if (incoming === cur || cur.startsWith(incoming)) return cur;
+  if (incoming.startsWith(cur) || incoming.includes(cur)) return incoming;
+  if (cur.includes(incoming)) return cur;
+  if (assistantTextsOverlap(cur, incoming)) return incoming.length >= cur.length ? incoming : cur;
+  return dropRepeatedAssistantTranscript(`${cur}\n\n${incoming}`);
+}
+
 function advanceOwnedStream(run, rawNext) {
   if (typeof rawNext !== 'string') return null;
   const next = stripPriorAssistantPrefix(run, rawNext);
   if (!next) return null;
-  const current = String(run.fullText || '');
-
-  if (!current) {
-    return { fullText: next, delta: next };
-  }
-
-  if (next === current) return null;
-
-  if (next.startsWith(current)) {
-    const delta = next.slice(current.length);
-    if (!delta) return null;
-    return { fullText: next, delta };
-  }
-
-  // 工具卡已 commit 上一段过程消息，Gateway 发来新段（strip 后不再延续 current）
-  recordCommittedSegment(run, current);
-  return { fullText: next, delta: next };
+  const fullText = joinAssistantTranscript(run.fullText, next);
+  if (fullText === String(run.fullText || '')) return null;
+  return { fullText, delta: fullText };
 }
 
 function finishClientRun(clientRunId, outcome) {
@@ -3230,19 +3269,10 @@ function handleGatewayAgentLifecycleEvent(payload) {
     finishClientRun(clientRunId, { error: String(err) });
     return;
   }
-  const remaining = String(run.fullText || '').trim();
-  let doneText = remaining;
-  if (remaining) {
-    if (run.sawToolActivity) {
-      sendChatSegmentToRenderer(run, clientRunId, run.fullText);
-      recordCommittedSegment(run, run.fullText);
-      run.fullText = '';
-      doneText = '';
-    } else {
-      sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
-    }
+  if (String(run.fullText || '').trim()) {
+    sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
   }
-  finishClientRun(clientRunId, { ok: true, text: doneText });
+  finishClientRun(clientRunId, { ok: true, text: String(run.fullText || '') });
 }
 
 function handleGatewayAgentEvent(payload) {
@@ -3866,20 +3896,15 @@ function handleOwnedGatewayChatEvent(payload, matched) {
     if (finalText && !looksLikeLeakedToolPayloadText(finalText)) {
       const stripped = stripPriorAssistantPrefix(run, finalText);
       if (stripped) {
-        finalText = stripped;
-        if (finalText.length >= run.fullText.length) {
-          run.fullText = finalText;
+        const merged = joinAssistantTranscript(run.fullText, stripped);
+        if (merged !== String(run.fullText || '')) {
+          run.fullText = merged;
           sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
         }
       }
     }
-    const visible = String(run.fullText || '').trim();
-    // chat final 就是这一轮的结束（网页版据此收起「正在回复」）。
-    // 用过工具时不能再空等 lifecycle / hasActiveRun：结束后网关仍可能短暂标成活跃，界面就会一直停在等待。
-    if (run.sawToolActivity && visible) {
-      sendChatSegmentToRenderer(run, clientRunId, run.fullText);
-      recordCommittedSegment(run, run.fullText);
-    }
+    // chat final 就是这一轮的结束。用过工具时也不能再空等 lifecycle：
+    // 结束后网关仍可能短暂标成活跃。
     run.sawChatFinal = true;
     finishClientRun(clientRunId, { ok: true, text: run.fullText });
     return;

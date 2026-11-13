@@ -58,6 +58,16 @@
       <main class="messages" id="messages">
         <div class="msg-hint">还没有消息，发个试试 👋</div>
       </main>
+      <div class="run-activity" id="run-activity" hidden>
+        <button type="button" class="run-activity-bar" id="run-activity-toggle" aria-expanded="false" aria-controls="run-activity-panel" title="查看本轮命令">
+          <span class="run-activity-main">Working</span>
+          <span class="run-activity-time" id="run-activity-time">0:00</span>
+          <span class="run-activity-line" id="run-activity-line"></span>
+        </button>
+        <div class="run-activity-panel" id="run-activity-panel" hidden>
+          <div class="run-activity-log" id="run-activity-log"></div>
+        </div>
+      </div>
     </section>
     <section class="meeting-screen" id="meeting-screen" hidden>
       <main class="messages meeting-messages" id="meeting-messages">

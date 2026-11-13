@@ -1,12 +1,95 @@
 /**
- * Webchat 对齐：Gateway 事件 FIFO 队列 → 时间线 append / 流式原地更新。
- * - chat delta：只更新当前流式气泡
- * - segment / done：commit 流式段，再处理后续
- * - tool start：先 commit 流式，再 append 工具卡；tool update 原地更新
+ * 一轮回复只保留一个助手气泡：文字在这个气泡里增长，结束时定稿。
+ * 命令和脚本不进消息列表，交给底部 Working 条。
  */
 (function initChatTimeline(global) {
   function isToolMsg(m) {
     return m?.kind === 'tool';
+  }
+
+  const SNAPSHOT_SLICE = 48;
+
+  function snapshotSlices(text) {
+    const body = String(text || '').trim();
+    if (body.length < SNAPSHOT_SLICE) return [];
+    const slices = [body.slice(0, SNAPSHOT_SLICE), body.slice(-SNAPSHOT_SLICE)];
+    if (body.length > SNAPSHOT_SLICE * 3) {
+      const mid = Math.floor(body.length / 2) - Math.floor(SNAPSHOT_SLICE / 2);
+      slices.push(body.slice(mid, mid + SNAPSHOT_SLICE));
+    }
+    return slices;
+  }
+
+  function sharesSnapshot(a, b) {
+    const left = String(a || '').trim();
+    const right = String(b || '').trim();
+    if (!left || !right) return false;
+    const shorter = left.length <= right.length ? left : right;
+    const longer = shorter === left ? right : left;
+    return snapshotSlices(shorter).some((slice) => longer.includes(slice));
+  }
+
+  function dropRepeatedTranscript(text) {
+    const body = String(text || '').trim();
+    if (body.length < SNAPSHOT_SLICE * 2) return String(text || '');
+    const scanEnd = Math.min(body.length, 500);
+    for (let i = 0; i + SNAPSHOT_SLICE <= scanEnd; i += 24) {
+      const slice = body.slice(i, i + SNAPSHOT_SLICE);
+      const at = body.indexOf(slice, i + SNAPSHOT_SLICE);
+      if (at < 0) continue;
+      const start = at - i;
+      if (start < SNAPSHOT_SLICE) continue;
+      const first = body.slice(0, start).trim();
+      const second = body.slice(start).trim();
+      if (second.length < SNAPSHOT_SLICE || !sharesSnapshot(first, second)) continue;
+      if (second.length < first.length * 0.6) continue;
+      return second.length >= first.length ? second : first;
+    }
+    return String(text || '');
+  }
+
+  function mergeAssistantTranscript(current, incoming) {
+    const cur = String(current || '').trim();
+    const next = String(incoming || '').trim();
+    if (!next) return String(current || '');
+    if (!cur || cur === '…') return next;
+    if (next === cur || cur.startsWith(next)) return cur;
+    if (next.startsWith(cur) || next.includes(cur)) return next;
+    if (cur.includes(next)) return cur;
+    if (sharesSnapshot(cur, next)) return next.length >= cur.length ? next : cur;
+    return dropRepeatedTranscript(`${cur}\n\n${next}`);
+  }
+
+  function collapseConsecutiveAssistants(list) {
+    if (!Array.isArray(list)) return list;
+    const out = [];
+    for (const msg of list) {
+      const cleaned = msg?.who === 'them' && !msg.streaming
+        ? { ...msg, text: dropRepeatedTranscript(msg.text) }
+        : msg;
+      const prev = out[out.length - 1];
+      const canFold = cleaned?.who === 'them'
+        && prev?.who === 'them'
+        && !cleaned.streaming
+        && !prev.streaming
+        && cleaned.kind !== 'tool'
+        && prev.kind !== 'tool';
+      if (!canFold) {
+        out.push(cleaned);
+        continue;
+      }
+      out[out.length - 1] = {
+        ...prev,
+        ...cleaned,
+        text: mergeAssistantTranscript(prev.text, cleaned.text),
+        streaming: false,
+      };
+    }
+    return out;
+  }
+
+  function absorbAssistantText(current, incoming) {
+    return mergeAssistantTranscript(current, incoming);
   }
 
   function createChatTimeline(options) {
@@ -22,6 +105,7 @@
       onRenderStream,
       onRunDone,
       onToolRunning,
+      onTools,
     } = options;
 
     const toolState = global.ToolStream?.createState?.() || { byId: new Map(), order: [] };
@@ -138,11 +222,7 @@
       if (target) {
         if (incoming.trim()) {
           const stripped = stripCommittedAssistantPrefix(runId, incoming);
-          if (stripped) {
-            target.text = stripped.length >= String(target.text || '').trim().length
-              ? stripped
-              : target.text;
-          }
+          if (stripped) target.text = absorbAssistantText(target.text, stripped);
         }
         const visible = String(target.text || '').trim();
         if (!visible || isPlaceholderText(target.text)) {
@@ -188,38 +268,17 @@
       return msg;
     }
 
-    function upsertTool(entry) {
-      if (!entry?.toolCallId) return;
+    function toolEntries() {
+      return toolState.order
+        .map((id) => toolState.byId.get(id))
+        .filter(Boolean)
+        .map((entry) => ({ ...entry }));
+    }
+
+    function removeToolMessages() {
       const list = msgs();
-      const idx = list.findIndex((m) => isToolMsg(m) && m.toolCallId === entry.toolCallId);
-      const running = entry.phase !== 'result' && !entry.output;
-      const sentAtMs = entry.startedAt || Date.now();
-      const sentTime = formatEnvelopeTime(sentAtMs);
-      const displayTime = sentTime.match(/\d{2}:\d{2}/)?.[0] || now();
-      const toolMsg = {
-        id: idx >= 0 ? list[idx].id : allocId(),
-        kind: 'tool',
-        who: 'them',
-        toolCallId: entry.toolCallId,
-        name: entry.name,
-        args: entry.args,
-        output: entry.output,
-        phase: entry.phase,
-        isError: entry.isError === true,
-        gatewayRunId: entry.runId,
-        runId: options.getActiveRunId?.() ?? null,
-        sentAtMs,
-        sentTime: sentTime || undefined,
-        time: displayTime,
-        sessionKey: getScope().sessionKey,
-        chatEpoch: getScope().chatEpoch,
-        updatedAt: entry.updatedAt,
-        streaming: running,
-      };
-      if (idx >= 0) {
-        list[idx] = { ...list[idx], ...toolMsg };
-      } else {
-        list.push(toolMsg);
+      for (let i = list.length - 1; i >= 0; i -= 1) {
+        if (isToolMsg(list[i])) list.splice(i, 1);
       }
     }
 
@@ -262,7 +321,7 @@
     }
 
     function processDelta(item) {
-      const { runId, delta, replace, fullText } = item;
+      const { runId, delta, fullText } = item;
       const key = runId != null ? String(runId) : '';
       if (key && finishedRuns.has(key)) return;
 
@@ -276,11 +335,7 @@
         target = createStreamingBubble(runId, itemExtra(item));
       }
 
-      if (replace === true || isPlaceholderText(target.text)) {
-        target.text = incoming;
-      } else if (!String(target.text || '').endsWith(incoming)) {
-        target.text = `${target.text || ''}${incoming}`;
-      }
+      target.text = absorbAssistantText(target.text, incoming);
       target.streaming = true;
       target.lastDeltaAt = Date.now();
       if (onRenderStream && runId != null) {
@@ -299,13 +354,14 @@
 
     function processSegment({ runId, text }) {
       const segmentText = text ? stripCommittedAssistantPrefix(runId, text) : '';
-      if (!findStreaming(runId)) {
-        if (segmentText.trim()) appendFinalBubble({ runId, text: segmentText });
-        onRender();
-        return;
-      }
-      commitStream({ runId, text: segmentText || undefined, archive: true });
-      onRender();
+      if (!segmentText.trim()) return;
+      let target = findStreaming(runId);
+      if (!target) target = createStreamingBubble(runId);
+      target.text = absorbAssistantText(target.text, segmentText);
+      target.streaming = true;
+      target.lastDeltaAt = Date.now();
+      if (onRenderStream && runId != null) onRenderStream(runId);
+      else onRender();
     }
 
     function processDone({ runId, text, error, aborted }) {
@@ -341,10 +397,12 @@
       } else if (err) {
         appendFinalBubble({ runId, text: '', error: err });
       }
-      for (const m of msgs()) {
-        if (!isToolMsg(m) || !m.streaming) continue;
-        m.streaming = false;
-        if (m.phase !== 'result') m.phase = 'result';
+      removeToolMessages();
+      if (global.ToolStream?.clearState) global.ToolStream.clearState(toolState);
+      const collapsed = collapseConsecutiveAssistants(msgs());
+      if (collapsed !== msgs()) {
+        const list = msgs();
+        list.splice(0, list.length, ...collapsed);
       }
       if (key) finishedRuns.add(key);
       onRender();
@@ -355,11 +413,7 @@
       if (!global.ToolStream?.applyToolEvent) return;
       const result = global.ToolStream.applyToolEvent(toolState, payload);
       if (!result.changed || !result.entry) return;
-      if (result.commitStream) {
-        commitStream({ runId: runId ?? options.getActiveRunId?.(), archive: true });
-      }
-      upsertTool(result.entry);
-      onRender();
+      if (onTools) onTools(toolEntries());
       if (result.entry.phase !== 'result' && onToolRunning) onToolRunning();
     }
 
@@ -388,10 +442,18 @@
       enqueueDone: (p) => enqueue({ type: 'done', ...p }),
       enqueueTool: (p) => enqueue({ type: 'tool', ...p }),
       reset,
+      clearTools: () => {
+        if (global.ToolStream?.clearState) global.ToolStream.clearState(toolState);
+      },
       findStreaming,
       commitStream,
     };
   }
 
-  global.ChatTimeline = { create: createChatTimeline, isToolMsg };
+  global.ChatTimeline = {
+    create: createChatTimeline,
+    isToolMsg,
+    absorbAssistantText,
+    collapseConsecutiveAssistants,
+  };
 })(typeof window !== 'undefined' ? window : globalThis);

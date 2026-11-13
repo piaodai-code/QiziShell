@@ -193,11 +193,67 @@
     state.order.length = 0;
   }
 
+  function commandText(entry) {
+    const name = String(entry?.name || 'tool');
+    const args = entry?.args;
+    const label = resolveToolLabel(name);
+    if (typeof args === 'string' && args.trim()) {
+      return name === 'exec' || name === 'bash' || name === 'shell'
+        ? `$ ${args.trim()}`
+        : `${label}  ${args.trim()}`;
+    }
+    if (args && typeof args === 'object') {
+      const cmd = args.command || args.cmd || args.script || args.input;
+      if (typeof cmd === 'string' && cmd.trim()) return `$ ${cmd.trim()}`;
+    }
+    const preview = formatArgsPreview(args);
+    return preview ? `${label}  ${preview}` : label;
+  }
+
+  function describeEntry(entry) {
+    const command = commandText(entry);
+    const output = String(entry?.output || '').trim();
+    const lines = output ? output.split(/\r?\n/).filter((line) => line.trim()) : [];
+    const lastLine = lines.length ? lines[lines.length - 1].trim() : '';
+    return {
+      command,
+      output,
+      line: lastLine || command,
+      isError: entry?.isError === true,
+    };
+  }
+
+  function latestActivityLine(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    for (let i = list.length - 1; i >= 0; i -= 1) {
+      const line = describeEntry(list[i]).line;
+      if (line) return line;
+    }
+    return '';
+  }
+
+  function renderActivityLogHtml(entries) {
+    const list = Array.isArray(entries) ? entries : [];
+    if (!list.length) {
+      return '<div class="run-activity-empty">这一轮还没有命令</div>';
+    }
+    return list.map((entry) => {
+      const described = describeEntry(entry);
+      const out = described.output
+        ? `<pre class="run-activity-item-out">${escapeHtml(described.output)}</pre>`
+        : '';
+      const cls = described.isError ? ' run-activity-item--error' : '';
+      return `<div class="run-activity-item${cls}"><div class="run-activity-item-cmd">${escapeHtml(described.command)}</div>${out}</div>`;
+    }).join('');
+  }
+
   global.ToolStream = {
     createState,
     applyToolEvent,
     renderToolCardHtml,
     clearState,
     formatToolOutput,
+    latestActivityLine,
+    renderActivityLogHtml,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

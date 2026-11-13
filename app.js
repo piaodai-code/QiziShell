@@ -272,6 +272,7 @@ function isToolTimelineMessage(msg) {
 
 function resetChatTimeline() {
   chatTimeline?.reset?.();
+  stopRunActivity();
 }
 
 /** @type {ReturnType<typeof window.ChatTimeline.create> | null} */
@@ -300,6 +301,7 @@ function ensureChatTimeline() {
     onRender: () => render(),
     onRenderStream: (runId) => scheduleStreamingUpdate(runId),
     getActiveRunId: () => activeRunId,
+    onTools: (entries) => noteRunActivityTools(entries),
     onRunDone: ({ runId, error, aborted }) => {
       if (streamRenderTimer) {
         clearTimeout(streamRenderTimer);
@@ -905,7 +907,9 @@ function positionScrollBottomButton() {
   const footer = meeting
     ? document.getElementById('meeting-toolbar')
     : (composerIsDetached() ? null : composerEl);
-  const height = footer && !footer.hidden ? footer.offsetHeight : 0;
+  let height = footer && !footer.hidden ? footer.offsetHeight : 0;
+  const activity = document.getElementById('run-activity');
+  if (!meeting && activity && !activity.hidden) height += activity.offsetHeight;
   scrollBottomBtn.style.bottom = `${height + 12}px`;
 }
 
@@ -1021,6 +1025,8 @@ if (typeof ResizeObserver !== 'undefined') {
     else syncScrollBottomButton();
   });
   if (composerEl) footerResizeObserver.observe(composerEl);
+  const runActivityForScroll = document.getElementById('run-activity');
+  if (runActivityForScroll) footerResizeObserver.observe(runActivityForScroll);
   const meetingToolbarForScroll = document.getElementById('meeting-toolbar');
   if (meetingToolbarForScroll) footerResizeObserver.observe(meetingToolbarForScroll);
 }
@@ -1055,24 +1061,16 @@ function render(options = {}) {
     return;
   }
   messagesEl.innerHTML = '';
+  let renderedCount = 0;
   for (let i = 0; i < messages.length; i += 1) {
     const m = messages[i];
+    if (isToolTimelineMessage(m)) continue;
     try {
+      renderedCount += 1;
       const row = document.createElement('div');
-      row.className = 'msg ' + m.who + (isToolTimelineMessage(m) ? ' msg-tool' : '');
+      row.className = 'msg ' + m.who;
       if (m.id) row.dataset.msgId = String(m.id);
       if (m.runId != null) row.dataset.runId = String(m.runId);
-      if (isToolTimelineMessage(m)) {
-        row.innerHTML = `
-          ${renderMessageAvatarHtml(m.who)}
-          <div class="msg-content">
-            ${window.ToolStream?.renderToolCardHtml?.(m) || ''}
-            <div class="msg-meta">${m.time || ''}${m.streaming ? ' · 运行中…' : ''}</div>
-          </div>
-        `;
-        messagesEl.appendChild(row);
-        continue;
-      }
       row.innerHTML = `
         ${renderMessageAvatarHtml(m.who)}
         <div class="msg-content">
@@ -1086,6 +1084,9 @@ function render(options = {}) {
     } catch (e) {
       console.error('render error:', e);
     }
+  }
+  if (renderedCount === 0) {
+    messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
   }
   window.QiziCodeBlocks?.decorate(messagesEl);
   settleMessageListScroll(messagesEl, {
@@ -2964,9 +2965,10 @@ function isExecCompletionNoticeText(text) {
 
 function finalizeHistoryMessages(list) {
   const cleaned = (Array.isArray(list) ? list : []).filter((msg) => !isExecCompletionNoticeText(msg?.text));
-  return dedupeAssistantMessages(
+  const deduped = dedupeAssistantMessages(
     dedupeAdjacentUserMessages(dedupeForwardUserMessages(cleaned)),
   );
+  return window.ChatTimeline?.collapseConsecutiveAssistants?.(deduped) || deduped;
 }
 
 function backfillMessageSentAtMs(msg) {
@@ -6507,10 +6509,144 @@ function updateComposerSendBtn() {
   composerSendBtn.setAttribute('aria-label', label);
 }
 
+const runActivityEl = document.getElementById('run-activity');
+const runActivityToggle = document.getElementById('run-activity-toggle');
+const runActivityTimeEl = document.getElementById('run-activity-time');
+const runActivityLineEl = document.getElementById('run-activity-line');
+const runActivityPanel = document.getElementById('run-activity-panel');
+const runActivityLogEl = document.getElementById('run-activity-log');
+let runActivityTimer = null;
+let runActivityStarted = 0;
+let runActivityEntries = [];
+let runActivityExpanded = false;
+
+function formatRunActivityElapsed(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function syncRunActivityPanelHeight() {
+  if (!runActivityPanel) return;
+  const area = document.getElementById('chat-screen') || messagesEl;
+  const max = Math.max(120, Math.floor((area?.clientHeight || 0) * 2 / 3));
+  runActivityPanel.style.maxHeight = `${max}px`;
+}
+
+function paintRunActivityLog() {
+  if (!runActivityLogEl || !runActivityPanel) return;
+  const nearBottom = runActivityPanel.hidden
+    || runActivityPanel.scrollHeight - runActivityPanel.clientHeight - runActivityPanel.scrollTop < 48;
+  runActivityLogEl.innerHTML = window.ToolStream?.renderActivityLogHtml?.(runActivityEntries)
+    || '<div class="run-activity-empty">这一轮还没有命令</div>';
+  if (nearBottom) runActivityPanel.scrollTop = runActivityPanel.scrollHeight;
+}
+
+function paintRunActivity() {
+  if (!runActivityEl || window.MeetingView?.isVisible?.()) return;
+  runActivityEl.hidden = false;
+  if (runActivityTimeEl) {
+    runActivityTimeEl.textContent = formatRunActivityElapsed(Date.now() - runActivityStarted);
+  }
+  if (runActivityLineEl) {
+    const line = window.ToolStream?.latestActivityLine?.(runActivityEntries) || '';
+    runActivityLineEl.textContent = line;
+    runActivityLineEl.title = line;
+  }
+}
+
+function expandRunActivity() {
+  if (!runActivityPanel || !runActivityToggle) return;
+  runActivityExpanded = true;
+  syncRunActivityPanelHeight();
+  runActivityPanel.hidden = false;
+  runActivityToggle.setAttribute('aria-expanded', 'true');
+  paintRunActivityLog();
+}
+
+function collapseRunActivity() {
+  runActivityExpanded = false;
+  if (runActivityPanel) runActivityPanel.hidden = true;
+  if (runActivityToggle) runActivityToggle.setAttribute('aria-expanded', 'false');
+}
+
+function startRunActivity({ reset = false } = {}) {
+  if (window.MeetingView?.isVisible?.()) return;
+  if (reset || !runActivityTimer) {
+    if (reset) {
+      runActivityEntries = [];
+      collapseRunActivity();
+      chatTimeline?.clearTools?.();
+    }
+    runActivityStarted = Date.now();
+  }
+  if (runActivityTimer) clearInterval(runActivityTimer);
+  paintRunActivity();
+  if (runActivityExpanded) paintRunActivityLog();
+  syncScrollBottomButton();
+  runActivityTimer = setInterval(paintRunActivity, 1000);
+}
+
+function stopRunActivity() {
+  if (runActivityTimer) clearInterval(runActivityTimer);
+  runActivityTimer = null;
+  runActivityEntries = [];
+  runActivityStarted = 0;
+  collapseRunActivity();
+  if (runActivityEl) runActivityEl.hidden = true;
+  if (runActivityLineEl) {
+    runActivityLineEl.textContent = '';
+    runActivityLineEl.title = '';
+  }
+  syncScrollBottomButton();
+}
+
+function noteRunActivityTools(entries) {
+  if (window.MeetingView?.isVisible?.()) return;
+  const live = busy
+    || runActivityTimer
+    || messages.some((m) => m.who === 'them' && m.streaming && !isToolTimelineMessage(m));
+  if (!live) {
+    chatTimeline?.clearTools?.();
+    return;
+  }
+  runActivityEntries = Array.isArray(entries) ? entries : [];
+  if (!runActivityTimer) startRunActivity({ reset: false });
+  else {
+    paintRunActivity();
+    if (runActivityExpanded) paintRunActivityLog();
+  }
+}
+
 function setBusy(value) {
+  const wasBusy = busy;
   busy = value;
   updateComposerSendBtn();
+  if (value) startRunActivity({ reset: !wasBusy && !runActivityTimer });
+  else stopRunActivity();
 }
+
+if (runActivityToggle) {
+  runActivityToggle.addEventListener('click', () => {
+    if (runActivityExpanded) collapseRunActivity();
+    else expandRunActivity();
+  });
+}
+
+document.addEventListener('pointerdown', (event) => {
+  if (!runActivityExpanded || !runActivityEl) return;
+  if (runActivityEl.contains(event.target)) return;
+  collapseRunActivity();
+});
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && runActivityExpanded) collapseRunActivity();
+});
+
+window.addEventListener('resize', () => {
+  if (runActivityExpanded) syncRunActivityPanelHeight();
+});
 
 async function abortRun() {
   if (!busy) return;
@@ -7008,36 +7144,16 @@ function applyBackgroundOwnedText(sessionKey, runId, text, replace) {
     };
     list.push(target);
   }
-  if (replace || isStreamingPlaceholderText(target.text)) target.text = incoming;
-  else if (!String(target.text || '').endsWith(incoming)) target.text = `${target.text || ''}${incoming}`;
+  target.text = window.ChatTimeline?.absorbAssistantText
+    ? window.ChatTimeline.absorbAssistantText(target.text, incoming)
+    : incoming;
   target.streaming = true;
   const agentId = visibleUnreadAgentId(sessionKey);
   if (agentId) markAgentUnread(agentId);
 }
 
 function applyBackgroundOwnedSegment(sessionKey, runId, text) {
-  const incoming = String(text || '').trim();
-  if (!incoming) return;
-  const list = ensureBackgroundSnapshot(sessionKey);
-  let target = [...list].reverse().find((message) => (
-    message.who === 'them' && message.streaming && (runId == null || runIdsMatch(message.runId, runId))
-  ));
-  if (!target) {
-    target = {
-      id: allocMessageId(),
-      who: 'them',
-      text: incoming,
-      time: now(),
-      streaming: false,
-      runId,
-      sessionKey,
-    };
-    list.push(target);
-  } else {
-    if (incoming.length >= String(target.text || '').length) target.text = incoming;
-    target.streaming = false;
-  }
-  appendCompletedMessageToArchive(sessionKey, target);
+  applyBackgroundOwnedText(sessionKey, runId, text, false);
 }
 
 function applyBackgroundOwnedTerminal(payload) {
