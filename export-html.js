@@ -138,8 +138,34 @@ function buildExportWordHtml(entries) {
   ].join('');
 }
 
+function markdownAuthor(value) {
+  return String(value || '未知').replace(/[\\`*_{}\[\]]/g, '\\$&').replace(/\r?\n/g, ' ');
+}
+
+function markdownQuote(text) {
+  return String(text || '').split(/\r?\n/).map((line) => `> ${line}`).join('\n');
+}
+
+function buildExportMarkdown(entries) {
+  const blocks = (Array.isArray(entries) ? entries : []).map((entry) => {
+    const lines = [`**${markdownAuthor(entry?.author)}**${entry?.time ? ` ${entry.time}` : ''}`, ''];
+    if (entry?.forward?.text) {
+      lines.push(`> **转发 · ${markdownAuthor(entry.forward.authorLabel)}**`);
+      lines.push(markdownQuote(entry.forward.text), '');
+    } else if (entry?.quote?.text) {
+      lines.push(`> **引用 · ${markdownAuthor(entry.quote.authorLabel)}**`);
+      lines.push(markdownQuote(entry.quote.text), '');
+    }
+    const body = String(entry?.text || '').trim();
+    if (body) lines.push(body);
+    return lines.join('\n').trim();
+  }).filter(Boolean);
+  return blocks.length ? `${blocks.join('\n\n---\n\n')}\n` : '';
+}
+
 module.exports = {
   buildExportWordHtml,
+  buildExportMarkdown,
   parseMarkdownSafe,
   sanitizeRichHtml,
 };

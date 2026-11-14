@@ -5,7 +5,8 @@ const openLinksExternally = !process.argv.includes('--open-links-in-shell');
 
 const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-policy');
 const { MaintainingSession } = require('./maintaining-session');
-const { buildExportWordHtml } = require('./export-html');
+const { buildExportMarkdown } = require('./export-html');
+const { buildExportDocx } = require('./export-docx');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
 const { startMeetingGroupRelay } = require('./meeting-group');
 const { saveMeetingRecord } = require('./meeting-store');
@@ -6836,17 +6837,26 @@ ipcMain.handle('openclaw:export:word', async (event, payload) => {
   }
   const stamp = new Date().toISOString().slice(0, 10);
   const result = await dialog.showSaveDialog(win, {
-    title: '保存为 Word 文档',
-    defaultPath: `qizi-export-${stamp}.doc`,
-    filters: [{ name: 'Word 文档', extensions: ['doc', 'docx'] }],
+    title: '保存',
+    defaultPath: `qizi-export-${stamp}.md`,
+    filters: [
+      { name: 'Markdown', extensions: ['md'] },
+      { name: 'Word 文档', extensions: ['docx'] },
+    ],
   });
   if (result.canceled || !result.filePath) {
     return { ok: false, cancelled: true };
   }
   try {
-    const html = buildExportWordHtml(entries);
-    fs.writeFileSync(result.filePath, `\ufeff${html}`, 'utf8');
-    return { ok: true, path: result.filePath };
+    let filePath = result.filePath;
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext !== '.md' && ext !== '.docx') filePath = `${filePath}.md`;
+    if (path.extname(filePath).toLowerCase() === '.docx') {
+      fs.writeFileSync(filePath, buildExportDocx(entries));
+    } else {
+      fs.writeFileSync(filePath, buildExportMarkdown(entries), 'utf8');
+    }
+    return { ok: true, path: filePath };
   } catch (err) {
     return { ok: false, error: err.message || '保存失败' };
   }

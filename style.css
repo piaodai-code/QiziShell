@@ -1049,7 +1049,7 @@ body.meeting-mode .composer {
   position: absolute;
   right: 12px;
   top: calc(12px + (14px * 1.6 - 28px) / 2);
-  z-index: 2;
+  z-index: 3;
   width: 28px;
   height: 28px;
   border: none;
@@ -2010,6 +2010,7 @@ svg.msg-context-icon {
 .composer-input-wrap {
   position: relative;
   flex-shrink: 0;
+  isolation: isolate;
 }
 .composer--resized .composer-input-wrap {
   flex: 1;
@@ -2054,7 +2055,7 @@ svg.msg-context-icon {
   color: #fff;
   flex-shrink: 0;
   transition: background 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
-  z-index: 2;
+  z-index: 3;
 }
 .composer-send-btn:not(:disabled):hover { background: #111; }
 .composer-send-btn:not(:disabled):active { transform: scale(0.96); }
@@ -4128,6 +4129,50 @@ body.composer-host .composer textarea {
   height: auto !important;
   min-height: 0;
   max-height: none;
+}
+.composer-md {
+  position: relative;
+  z-index: 0;
+  width: 100%;
+  min-height: calc(90px + 6mm);
+  height: calc(90px + 6mm);
+  background: transparent;
+}
+.composer-md .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+.composer-md.is-disabled {
+  cursor: wait;
+}
+.composer-md.is-disabled .cm-content {
+  color: var(--meta-text);
+  -webkit-text-fill-color: var(--meta-text);
+}
+.composer-md.is-stt-pending .cm-placeholder {
+  color: #666;
+}
+.composer--resized .composer-md,
+body.composer-host .composer-md {
+  flex: 1 1 auto;
+  height: auto !important;
+  min-height: 0;
+  max-height: none !important;
+}
+.composer textarea.composer-md-source,
+body.composer-host .composer textarea.composer-md-source {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  flex: 0 0 auto !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  overflow: hidden !important;
 }
 body.composer-host .model-popup,
 body.composer-host .sc-popup,

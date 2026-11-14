@@ -6502,9 +6502,10 @@ function composerHasSendableContent() {
 function updateComposerSendBtn() {
   if (!composerSendBtn) return;
   const canSend = composerHasSendableContent();
-  composerSendBtn.classList.toggle('is-stop', busy);
-  composerSendBtn.disabled = !busy && !canSend;
-  const label = busy ? '停止' : '发送';
+  const showStop = busy && !canSend;
+  composerSendBtn.classList.toggle('is-stop', showStop);
+  composerSendBtn.disabled = !showStop && !canSend;
+  const label = showStop ? '停止' : '发送';
   composerSendBtn.title = label;
   composerSendBtn.setAttribute('aria-label', label);
 }
@@ -6862,6 +6863,7 @@ function caretLineThreshold(el) {
 }
 
 function isCaretOnFirstLine(el) {
+  if (el?.qiziMarkdown?.isCaretOnFirstLine) return el.qiziMarkdown.isCaretOnFirstLine();
   if (!el) return true;
   const pos = el.selectionStart ?? 0;
   if (pos <= 0) return true;
@@ -6873,6 +6875,7 @@ function isCaretOnFirstLine(el) {
 }
 
 function isCaretOnLastLine(el) {
+  if (el?.qiziMarkdown?.isCaretOnLastLine) return el.qiziMarkdown.isCaretOnLastLine();
   if (!el) return true;
   const value = String(el.value || '');
   const pos = el.selectionStart ?? 0;
@@ -6956,7 +6959,25 @@ async function send() {
     return;
   }
   if (busy && pendingOutbound) {
-    setStatus('已有消息排队，请稍候…', 'pending');
+    const queued = pendingOutbound.user;
+    const nextText = [queued.text, text].map((part) => String(part || '').trim()).filter(Boolean).join('\n');
+    const nextImages = [...(queued.images || []), ...pendingImages];
+    const nextFiles = [...(queued.files || []), ...pendingFiles];
+    queued.text = nextText;
+    if (nextImages.length > 0) queued.images = nextImages;
+    if (nextFiles.length > 0) queued.files = nextFiles;
+    if (pendingQuote && !queued.quote) queued.quote = { ...pendingQuote };
+    pendingImages = [];
+    pendingFiles = [];
+    renderPendingAttachments();
+    inputEl.value = '';
+    resetInputHeight();
+    clearPendingQuote();
+    hideCommandPopup();
+    updateComposerSendBtn();
+    showQueueSideCard(queued);
+    render({ scrollToBottom: true });
+    setStatus('已加入排队的消息', 'ok');
     return;
   }
   if (text && text.trimStart().toLowerCase().startsWith('/debug')) {
@@ -7448,6 +7469,7 @@ if (composerContextMenuEl) {
 
 bindComposerInputContextMenu(inputEl);
 bindComposerInputContextMenu(document.getElementById('meeting-owner-input'));
+window.bindComposerMarkdownInput?.(inputEl);
 
 if (composerQuoteRemoveEl) {
   composerQuoteRemoveEl.addEventListener('click', () => {
@@ -7604,8 +7626,9 @@ inputEl.addEventListener('input', () => {
     hideCommandPopup();
   }
   if (!composerResized && !composerIsDetached()) {
-    inputEl.style.height = 'auto';
-    inputEl.style.height = `${Math.min(Math.max(inputEl.scrollHeight, 90), 200)}px`;
+    const contentHeight = inputEl.qiziMarkdown?.contentHeight?.() ?? inputEl.scrollHeight;
+    const minHeight = inputEl.qiziMarkdown ? 113 : 90;
+    inputEl.style.height = `${Math.min(Math.max(contentHeight, minHeight), 200)}px`;
   }
   updateComposerSendBtn();
 });
@@ -7616,13 +7639,19 @@ inputEl.addEventListener('blur', () => {
 
 if (composerSendBtn) {
   composerSendBtn.addEventListener('click', () => {
-    if (busy) {
+    if (busy && !composerHasSendableContent()) {
       abortRun();
       return;
     }
     send();
   });
 }
+
+inputEl.addEventListener('qizi-composer-files', (event) => {
+  const files = event.detail?.files;
+  if (!files?.length) return;
+  void ingestDroppedFiles({ files, items: [] });
+});
 
 const screenshotBtn = document.getElementById('screenshot-btn');
 if (screenshotBtn) {
@@ -7990,6 +8019,7 @@ function bindFileDrop(doc) {
     e.preventDefault();
     dragCounter = 0;
     doc.body.classList.remove('drag-over');
+    if (e.target?.closest?.('.composer-md')) return;
     void ingestDroppedFiles(e.dataTransfer);
   });
 }
@@ -9772,9 +9802,15 @@ function closeComposerMenus() {
   hideAgentPopup();
 }
 
+function remountComposerMarkdown() {
+  inputEl?.qiziMarkdown?.remount?.();
+  inputEl?.qiziMarkdown?.focus?.();
+}
+
 function placeComposerBackHome() {
   if (!composerAnchor?.parent || !composerEl) return;
   composerAnchor.parent.insertBefore(composerEl, composerAnchor.next);
+  remountComposerMarkdown();
   if (composerContextMenuEl && composerAnchor.menuParent) {
     composerAnchor.menuParent.insertBefore(composerContextMenuEl, composerAnchor.menuNext);
   }
@@ -9802,6 +9838,7 @@ async function detachComposer() {
       frame.appendChild(composerEl);
       if (composerContextMenuEl) doc.body.appendChild(composerContextMenuEl);
       composerEl.dataset.detached = '1';
+      remountComposerMarkdown();
       resetInputHeight();
       positionBtwSideDock();
       syncScrollBottomButton();
@@ -9859,6 +9896,7 @@ async function mountDetachedComposer() {
   frame.appendChild(composerEl);
   if (composerContextMenuEl) doc.body.appendChild(composerContextMenuEl);
   composerEl.dataset.detached = '1';
+  remountComposerMarkdown();
   bindComposerHostDocument(doc);
   resetInputHeight();
   positionBtwSideDock();

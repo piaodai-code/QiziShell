@@ -12924,6 +12924,49 @@ var QiziMarkdownEditor = (() => {
   }, {
     decorations: (v) => v.decorations
   });
+  var Placeholder = class extends WidgetType {
+    constructor(content2) {
+      super();
+      this.content = content2;
+    }
+    toDOM(view) {
+      let wrap = document.createElement("span");
+      wrap.className = "cm-placeholder";
+      wrap.style.pointerEvents = "none";
+      wrap.appendChild(typeof this.content == "string" ? document.createTextNode(this.content) : typeof this.content == "function" ? this.content(view) : this.content.cloneNode(true));
+      wrap.setAttribute("aria-hidden", "true");
+      return wrap;
+    }
+    coordsAt(dom) {
+      let rects = dom.firstChild ? clientRectsFor(dom.firstChild) : [];
+      if (!rects.length)
+        return null;
+      let style = window.getComputedStyle(dom.parentNode);
+      let rect = flattenRect(rects[0], style.direction != "rtl");
+      let lineHeight = parseInt(style.lineHeight);
+      if (rect.bottom - rect.top > lineHeight * 1.5)
+        return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.top + lineHeight };
+      return rect;
+    }
+    ignoreEvent() {
+      return false;
+    }
+  };
+  function placeholder(content2) {
+    let plugin = ViewPlugin.fromClass(class {
+      constructor(view) {
+        this.view = view;
+        this.placeholder = content2 ? Decoration.set([Decoration.widget({ widget: new Placeholder(content2), side: 1 }).range(0)]) : Decoration.none;
+      }
+      get decorations() {
+        return this.view.state.doc.length ? Decoration.none : this.placeholder;
+      }
+    }, { decorations: (v) => v.decorations });
+    return typeof content2 == "string" ? [
+      plugin,
+      EditorView.contentAttributes.of({ "aria-placeholder": content2 })
+    ] : plugin;
+  }
   var MaxOff = 2e3;
   function rectangleFor(state, a, b) {
     let startLine = Math.min(a.line, b.line), endLine = Math.max(a.line, b.line);
@@ -28277,6 +28320,10 @@ var QiziMarkdownEditor = (() => {
     view.dispatch({ changes, selection, scrollIntoView: true, userEvent: "delete.line" });
     return true;
   };
+  var insertNewline = ({ state, dispatch }) => {
+    dispatch(state.update(state.replaceSelection(state.lineBreak), { scrollIntoView: true, userEvent: "input" }));
+    return true;
+  };
   function isBetweenBrackets(state, pos) {
     if (/\(\)|\[\]|\{\}/.test(state.sliceDoc(pos - 1, pos + 1)))
       return { from: pos, to: pos };
@@ -30179,13 +30226,36 @@ var QiziMarkdownEditor = (() => {
     ".cm-gutters": { display: "none" },
     "&.cm-focused": { outline: "none" }
   });
+  var composerChrome = EditorView.theme({
+    "&": {
+      height: "100%",
+      fontSize: "14px",
+      backgroundColor: "transparent"
+    },
+    ".cm-scroller": {
+      fontFamily: '-apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif',
+      lineHeight: "1.6",
+      overflow: "auto"
+    },
+    ".cm-content": {
+      padding: "12px 52px 12px 16px",
+      caretColor: "#174ea6"
+    },
+    ".cm-gutters": { display: "none" },
+    "&.cm-focused": { outline: "none" },
+    ".cm-placeholder": {
+      color: "#999",
+      fontStyle: "normal"
+    }
+  });
   var selectionColor = "#d7d4f0";
   var selectionTheme = Prec.highest(EditorView.theme({
     ".cm-activeLine": { backgroundColor: "transparent !important" },
     ".cm-selectionBackground": { backgroundColor: `${selectionColor} !important` },
     ".cm-content ::selection, .cm-line::selection": { backgroundColor: `${selectionColor} !important` }
   }));
-  function modeExtensions(live) {
+  function modeExtensions(live, variant) {
+    if (live && variant === "composer") return [composerChrome, liveMarkdown()];
     if (live) return [liveChrome, liveMarkdown()];
     return [
       lineNumbers(),
@@ -30197,10 +30267,23 @@ var QiziMarkdownEditor = (() => {
       sourceTheme
     ];
   }
+  function placeholderExtensions(text) {
+    const value = String(text || "");
+    return value ? [placeholder(value)] : [];
+  }
+  function editableExtensions(on) {
+    return [
+      EditorView.editable.of(on !== false),
+      EditorState.readOnly.of(on === false)
+    ];
+  }
   function mount(parent, handlers2 = {}) {
     let applying = false;
     let live = handlers2.live !== false;
+    const variant = handlers2.variant === "composer" ? "composer" : "";
     const mode = new Compartment();
+    const placeholderSlot = new Compartment();
+    const editableSlot = new Compartment();
     const keys2 = keymap.of([
       {
         key: "Mod-s",
@@ -30209,6 +30292,10 @@ var QiziMarkdownEditor = (() => {
           handlers2.onSave?.();
           return true;
         }
+      },
+      {
+        key: "Shift-Enter",
+        run: insertNewline
       }
     ]);
     const extensions = [
@@ -30235,7 +30322,35 @@ var QiziMarkdownEditor = (() => {
       keys2,
       selectionTheme,
       EditorView.lineWrapping,
-      mode.of(modeExtensions(live)),
+      mode.of(modeExtensions(live, variant)),
+      placeholderSlot.of(placeholderExtensions(handlers2.placeholder)),
+      editableSlot.of(editableExtensions(handlers2.editable !== false)),
+      Prec.highest(EditorView.domEventHandlers({
+        keydown(event) {
+          return handlers2.onKeyDown?.(event) === true;
+        },
+        paste(event) {
+          return handlers2.onPaste?.(event) === true;
+        },
+        blur() {
+          handlers2.onBlur?.();
+          return false;
+        },
+        contextmenu(event) {
+          return handlers2.onContextMenu?.(event) === true;
+        },
+        drop(event) {
+          if (variant !== "composer") return false;
+          const transfer = event.dataTransfer;
+          if (!transfer) return false;
+          const types2 = Array.from(transfer.types || []);
+          const dropped = transfer.files ? Array.from(transfer.files) : [];
+          if (!dropped.length && !types2.includes("Files")) return false;
+          event.preventDefault();
+          if (dropped.length) handlers2.onFiles?.(dropped);
+          return true;
+        }
+      })),
       EditorView.updateListener.of((update) => {
         if (applying || !update.docChanged) return;
         handlers2.onChange?.(update.state.doc.toString());
@@ -30243,7 +30358,10 @@ var QiziMarkdownEditor = (() => {
     ];
     const view = new EditorView({
       parent,
-      state: EditorState.create({ doc: "", extensions })
+      state: EditorState.create({
+        doc: String(handlers2.doc ?? ""),
+        extensions
+      })
     });
     parent.classList.toggle("is-live", live);
     return {
@@ -30252,7 +30370,53 @@ var QiziMarkdownEditor = (() => {
         if (isLive === live) return;
         live = isLive;
         parent.classList.toggle("is-live", live);
-        view.dispatch({ effects: mode.reconfigure(modeExtensions(live)) });
+        view.dispatch({ effects: mode.reconfigure(modeExtensions(live, variant)) });
+      },
+      setPlaceholder(text) {
+        view.dispatch({
+          effects: placeholderSlot.reconfigure(placeholderExtensions(text))
+        });
+      },
+      setEditable(on) {
+        view.dispatch({
+          effects: editableSlot.reconfigure(editableExtensions(on !== false))
+        });
+      },
+      getSelection() {
+        const range = view.state.selection.main;
+        return { from: range.from, to: range.to };
+      },
+      setSelection(from, to) {
+        const docLength = view.state.doc.length;
+        const anchor = Math.max(0, Math.min(Number(from) || 0, docLength));
+        const head = Math.max(0, Math.min(Number(to ?? from) || 0, docLength));
+        view.dispatch({ selection: EditorSelection.range(anchor, head) });
+      },
+      selectAll() {
+        view.dispatch({
+          selection: EditorSelection.range(0, view.state.doc.length)
+        });
+        view.focus();
+      },
+      contentHeight() {
+        const style = view.contentDOM.ownerDocument.defaultView.getComputedStyle(view.contentDOM);
+        const pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+        return Math.ceil(view.contentHeight + pad);
+      },
+      isCaretOnFirstLine() {
+        const head = view.state.selection.main.head;
+        const line = view.state.doc.lineAt(head);
+        if (line.number > 1) return false;
+        return Math.abs(view.lineBlockAt(head).top - view.lineBlockAt(line.from).top) < 2;
+      },
+      isCaretOnLastLine() {
+        const head = view.state.selection.main.head;
+        const line = view.state.doc.lineAt(head);
+        if (line.number < view.state.doc.lines) return false;
+        return Math.abs(view.lineBlockAt(head).top - view.lineBlockAt(line.to).top) < 2;
+      },
+      hasFocus() {
+        return view.hasFocus;
       },
       setDoc(text) {
         applying = true;

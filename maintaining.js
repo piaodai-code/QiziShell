@@ -381,18 +381,24 @@
     return created;
   }
 
-  function syncSendButton() {
-    const canSend = connected && (
+  function composerHasSendable() {
+    return Boolean(
       inputEl.value.trim()
       || pendingQuote
       || selectionCount() > 0
       || pendingImages.length > 0
       || pendingFiles.length > 0
     );
-    sendBtn.disabled = busy ? false : !canSend;
-    sendBtn.classList.toggle('is-stop', busy);
-    sendBtn.title = busy ? 'Stop' : 'Send';
-    sendBtn.setAttribute('aria-label', sendBtn.title);
+  }
+
+  function syncSendButton() {
+    const canSend = connected && composerHasSendable();
+    const showStop = busy && !composerHasSendable();
+    sendBtn.disabled = showStop ? false : !canSend;
+    sendBtn.classList.toggle('is-stop', showStop);
+    const label = showStop ? 'Stop' : 'Send';
+    sendBtn.title = label;
+    sendBtn.setAttribute('aria-label', label);
   }
 
   function renderPending() {
@@ -473,6 +479,35 @@
       reader.onerror = () => reject(reader.error);
       reader.readAsDataURL(file);
     });
+  }
+
+  async function ingestDroppedFiles(dataTransfer) {
+    const { files, directories } = filesFromDataTransfer(dataTransfer);
+    let images = 0;
+    let attached = 0;
+    let skipped = directories;
+    let oversized = 0;
+    for (const file of files) {
+      const result = await addDroppedFile(file);
+      if (result === 'image') images += 1;
+      else if (result === 'file') attached += 1;
+      else if (result === 'large') oversized += 1;
+      else skipped += 1;
+    }
+    const added = images + attached;
+    if (added > 0) inputEl.focus();
+    const parts = [];
+    if (images) parts.push(images === 1 ? '1 image' : `${images} images`);
+    if (attached) parts.push(attached === 1 ? '1 file' : `${attached} files`);
+    if (added > 0 && oversized > 0) {
+      setStatus(`Added ${parts.join(' and ')}. A file over 20 MB was left out.`, 'error');
+    } else if (added > 0) {
+      setStatus(`Added ${parts.join(' and ')}`, 'ok');
+    } else if (oversized > 0) {
+      setStatus('That file is larger than 20 MB', 'error');
+    } else if (skipped > 0) {
+      setStatus('That can’t be attached', 'error');
+    }
   }
 
   async function addDroppedFile(file) {
@@ -608,16 +643,9 @@
     attachPopup.style.bottom = `${Math.round(Math.max(8, window.innerHeight - rect.top + 8))}px`;
   }
 
-  async function sendMessage() {
-    if (busy) {
-      busy = false;
-      stopWorking();
-      syncSendButton();
-      try { await window.maintaining.abort(); } catch (err) {
-        setStatus(err.message || 'Could not stop', 'error');
-      }
-      return;
-    }
+  let queuedSend = null;
+
+  function takeComposerPayload() {
     const typed = inputEl.value;
     const quote = pendingQuote;
     const selection = multiSelectMode && selectionCount() > 0 ? mergedForward(multiSelectedIndices) : null;
@@ -627,14 +655,34 @@
     const outbound = selection?.text
       ? formatQuote(selection, typed)
       : (quote ? formatQuote(quote, typed) : typed);
+    return { typed, quote, selection, images, files, outbound };
+  }
+
+  function restoreComposerPayload(payload) {
+    inputEl.value = payload.typed;
+    pendingQuote = payload.quote;
+    pendingImages.unshift(...payload.images);
+    pendingFiles.unshift(...payload.files);
+    renderPending();
+    renderComposerQuote();
+    syncSendButton();
+  }
+
+  function clearComposerDraft() {
+    inputEl.value = '';
+    pendingQuote = null;
+    renderComposerQuote();
+    syncSendButton();
+  }
+
+  async function deliverSend(payload) {
+    const { typed, quote, selection, images, files, outbound } = payload;
     if (!connected) {
-      pendingImages.unshift(...images);
-      pendingFiles.unshift(...files);
-      renderPending();
+      restoreComposerPayload(payload);
       showLogin('Sign in to Hermes first');
       return;
     }
-    if (!outbound.trim() && images.length === 0 && files.length === 0) return;
+    if (!String(outbound || '').trim() && images.length === 0 && files.length === 0) return;
     messages.push({
       who: 'me',
       text: outbound,
@@ -642,9 +690,7 @@
       files: files.map((file) => ({ name: file.name, size: file.size })),
       time: nowLabel(),
     });
-    inputEl.value = '';
-    pendingQuote = null;
-    renderComposerQuote();
+    clearComposerDraft();
     busy = true;
     pinned = true;
     startWorking();
@@ -656,18 +702,45 @@
       if (selection) exitMultiSelect();
     } catch (err) {
       messages.pop();
-      inputEl.value = typed;
-      pendingQuote = quote;
-      pendingImages.unshift(...images);
-      pendingFiles.unshift(...files);
-      renderPending();
-      renderComposerQuote();
+      restoreComposerPayload(payload);
       render();
       busy = false;
       stopWorking();
       syncSendButton();
       setStatus(err.message || 'Send failed', 'error');
     }
+  }
+
+  function flushQueuedSend() {
+    if (busy || !queuedSend) return;
+    const payload = queuedSend;
+    queuedSend = null;
+    void deliverSend(payload);
+  }
+
+  async function sendMessage() {
+    if (busy && !composerHasSendable()) {
+      busy = false;
+      stopWorking();
+      syncSendButton();
+      try { await window.maintaining.abort(); } catch (err) {
+        setStatus(err.message || 'Could not stop', 'error');
+      }
+      return;
+    }
+    if (!composerHasSendable()) return;
+    if (busy && queuedSend) {
+      setStatus('已有一条消息在排队', 'pending');
+      return;
+    }
+    const payload = takeComposerPayload();
+    if (busy) {
+      clearComposerDraft();
+      queuedSend = payload;
+      setStatus('已排队，当前回复结束后发送', 'pending');
+      return;
+    }
+    await deliverSend(payload);
   }
 
   function quotePreview(text) {
@@ -989,6 +1062,13 @@
     hideContextMenu();
   });
 
+  window.bindComposerMarkdownInput?.(inputEl);
+
+  inputEl.addEventListener('qizi-composer-files', (event) => {
+    const files = event.detail?.files;
+    if (!files?.length) return;
+    void ingestDroppedFiles({ files, items: [] });
+  });
   inputEl.addEventListener('input', syncSendButton);
   inputEl.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
@@ -1120,32 +1200,8 @@
     event.preventDefault();
     dragCounter = 0;
     document.body.classList.remove('drag-over');
-    const { files, directories } = filesFromDataTransfer(event.dataTransfer);
-    let images = 0;
-    let attached = 0;
-    let skipped = directories;
-    let oversized = 0;
-    for (const file of files) {
-      const result = await addDroppedFile(file);
-      if (result === 'image') images += 1;
-      else if (result === 'file') attached += 1;
-      else if (result === 'large') oversized += 1;
-      else skipped += 1;
-    }
-    const added = images + attached;
-    if (added > 0) inputEl.focus();
-    const parts = [];
-    if (images) parts.push(images === 1 ? '1 image' : `${images} images`);
-    if (attached) parts.push(attached === 1 ? '1 file' : `${attached} files`);
-    if (added > 0 && oversized > 0) {
-      setStatus(`Added ${parts.join(' and ')}. A file over 20 MB was left out.`, 'error');
-    } else if (added > 0) {
-      setStatus(`Added ${parts.join(' and ')}`, 'ok');
-    } else if (oversized > 0) {
-      setStatus('That file is larger than 20 MB', 'error');
-    } else if (skipped > 0) {
-      setStatus('That can’t be attached', 'error');
-    }
+    if (event.target?.closest?.('.composer-md')) return;
+    void ingestDroppedFiles(event.dataTransfer);
   });
   requestEl.addEventListener('click', (event) => {
     const button = event.target.closest('button[data-choice]');
@@ -1264,6 +1320,7 @@
     busy = false;
     stopWorking();
     syncSendButton();
+    flushQueuedSend();
   });
   window.maintaining.onStream((payload) => {
     const current = streamingMessage();
@@ -1286,6 +1343,7 @@
     stopWorking();
     render();
     syncSendButton();
+    flushQueuedSend();
   });
   window.maintaining.onTurnError((payload) => {
     const last = messages[messages.length - 1];
@@ -1295,6 +1353,7 @@
     setStatus(payload?.message || 'Hermes error', 'error');
     render();
     syncSendButton();
+    flushQueuedSend();
   });
   window.maintaining.onRequest((payload) => {
     requests.push(payload);
