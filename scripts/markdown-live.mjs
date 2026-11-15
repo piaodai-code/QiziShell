@@ -322,6 +322,14 @@ function activeLines(state) {
   return lines;
 }
 
+function activeLineKey(state) {
+  let key = '';
+  for (const range of state.selection.ranges) {
+    key += `${state.doc.lineAt(range.from).number}-${state.doc.lineAt(range.to).number};`;
+  }
+  return key;
+}
+
 function frontmatterEnd(doc) {
   if (doc.lines < 2 || doc.line(1).text.trim() !== '---') return -1;
   const limit = Math.min(doc.lines, 80);
@@ -374,7 +382,7 @@ function finishSet(items, kind) {
 }
 
 export function buildLiveDecorations(state) {
-  ensureSyntaxTree(state, state.doc.length, 250);
+  ensureSyntaxTree(state, state.doc.length, 8);
   const doc = state.doc;
   const active = activeLines(state);
   const frontEnd = frontmatterEnd(doc);
@@ -546,7 +554,9 @@ const liveField = StateField.define({
   },
   update(value, tr) {
     const treeChanged = syntaxTree(tr.startState) !== syntaxTree(tr.state);
-    if (!tr.docChanged && !tr.selection && !treeChanged) return value;
+    if (!tr.docChanged && !treeChanged) {
+      if (!tr.selection || activeLineKey(tr.startState) === activeLineKey(tr.state)) return value;
+    }
     return safeLiveDecorations(tr.state);
   },
   provide(field) {

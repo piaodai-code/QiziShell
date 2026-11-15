@@ -4824,7 +4824,7 @@ function onTrayMenuAction(fn) {
 function buildTrayMenu() {
   return Menu.buildFromTemplate([
     { label: 'Settings', icon: trayMenuIcon('gear.png'), click: onTrayMenuAction(() => openSettings()) },
-    { label: 'Maintaining', icon: trayMenuIcon('tools-wrench.png'), click: onTrayMenuAction(() => openMaintainingWindow()) },
+    { label: 'Maintianer', icon: trayMenuIcon('tools-wrench.png'), click: onTrayMenuAction(() => openMaintainingWindow()) },
     { label: 'Openclaw Control', icon: trayMenuIcon('openclaw-control.png'), click: onTrayMenuAction(() => openOpenClawControl()) },
     { label: 'Update', icon: trayMenuIcon('update-menu.png'), click: onTrayMenuAction(() => openUpdate()) },
     { label: 'About QiziShell', icon: trayMenuIcon('about-menu.png'), click: onTrayMenuAction(() => openAbout()) },

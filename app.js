@@ -7703,6 +7703,21 @@ inputEl.addEventListener('keydown', (e) => {
   }
 });
 
+let composerHeightFrame = 0;
+
+function scheduleComposerInputHeight() {
+  if (!inputEl || composerResized || composerIsDetached()) return;
+  if (composerHeightFrame) return;
+  composerHeightFrame = viewFor(inputEl).requestAnimationFrame(() => {
+    composerHeightFrame = 0;
+    if (!inputEl || composerResized || composerIsDetached()) return;
+    const contentHeight = inputEl.qiziMarkdown?.contentHeight?.() ?? inputEl.scrollHeight;
+    const minHeight = inputEl.qiziMarkdown ? 113 : 90;
+    const next = `${Math.min(Math.max(contentHeight, minHeight), 200)}px`;
+    if (inputEl.style.height !== next) inputEl.style.height = next;
+  });
+}
+
 inputEl.addEventListener('input', () => {
   if (!inputHistorySuppressInput && inputHistoryIndex !== -1) {
     inputHistoryIndex = -1;
@@ -7711,14 +7726,10 @@ inputEl.addEventListener('input', () => {
   const v = inputEl.value;
   if (v.startsWith('/')) {
     syncCommandPopupForInput(v);
-  } else {
+  } else if (isCommandPopupVisible()) {
     hideCommandPopup();
   }
-  if (!composerResized && !composerIsDetached()) {
-    const contentHeight = inputEl.qiziMarkdown?.contentHeight?.() ?? inputEl.scrollHeight;
-    const minHeight = inputEl.qiziMarkdown ? 113 : 90;
-    inputEl.style.height = `${Math.min(Math.max(contentHeight, minHeight), 200)}px`;
-  }
+  scheduleComposerInputHeight();
   updateComposerSendBtn();
 });
 

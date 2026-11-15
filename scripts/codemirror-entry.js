@@ -125,6 +125,7 @@ function editableExtensions(on) {
 
 function mount(parent, handlers = {}) {
   let applying = false;
+  let contentPad = null;
   let live = handlers.live !== false;
   const variant = handlers.variant === 'composer' ? 'composer' : '';
   const mode = new Compartment();
@@ -144,6 +145,7 @@ function mount(parent, handlers = {}) {
       run: insertNewline,
     },
   ]);
+  const composer = variant === 'composer';
   const extensions = [
     highlightSpecialChars(),
     history(),
@@ -151,13 +153,18 @@ function mount(parent, handlers = {}) {
     dropCursor(),
     EditorState.allowMultipleSelections.of(true),
     indentOnInput(),
-    bracketMatching(),
-    closeBrackets(),
-    autocompletion(),
-    rectangularSelection(),
-    crosshairCursor(),
-    highlightSelectionMatches(),
-    keymap.of([
+    ...(composer ? [] : [
+      bracketMatching(),
+      closeBrackets(),
+      autocompletion(),
+      rectangularSelection(),
+      crosshairCursor(),
+      highlightSelectionMatches(),
+    ]),
+    keymap.of(composer ? [
+      ...defaultKeymap,
+      ...historyKeymap,
+    ] : [
       ...closeBracketsKeymap,
       ...defaultKeymap,
       ...searchKeymap,
@@ -246,9 +253,11 @@ function mount(parent, handlers = {}) {
       view.focus();
     },
     contentHeight() {
-      const style = view.contentDOM.ownerDocument.defaultView.getComputedStyle(view.contentDOM);
-      const pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-      return Math.ceil(view.contentHeight + pad);
+      if (contentPad == null) {
+        const style = view.contentDOM.ownerDocument.defaultView.getComputedStyle(view.contentDOM);
+        contentPad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+      }
+      return Math.ceil(view.contentHeight + contentPad);
     },
     isCaretOnFirstLine() {
       const head = view.state.selection.main.head;

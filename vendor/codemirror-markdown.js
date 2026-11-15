@@ -29902,6 +29902,13 @@ var QiziMarkdownEditor = (() => {
     }
     return lines;
   }
+  function activeLineKey(state) {
+    let key = "";
+    for (const range of state.selection.ranges) {
+      key += `${state.doc.lineAt(range.from).number}-${state.doc.lineAt(range.to).number};`;
+    }
+    return key;
+  }
   function frontmatterEnd(doc2) {
     if (doc2.lines < 2 || doc2.line(1).text.trim() !== "---") return -1;
     const limit = Math.min(doc2.lines, 80);
@@ -29949,7 +29956,7 @@ var QiziMarkdownEditor = (() => {
     return builder.finish();
   }
   function buildLiveDecorations(state) {
-    ensureSyntaxTree(state, state.doc.length, 250);
+    ensureSyntaxTree(state, state.doc.length, 8);
     const doc2 = state.doc;
     const active = activeLines(state);
     const frontEnd = frontmatterEnd(doc2);
@@ -30099,7 +30106,9 @@ var QiziMarkdownEditor = (() => {
     },
     update(value, tr) {
       const treeChanged = syntaxTree(tr.startState) !== syntaxTree(tr.state);
-      if (!tr.docChanged && !tr.selection && !treeChanged) return value;
+      if (!tr.docChanged && !treeChanged) {
+        if (!tr.selection || activeLineKey(tr.startState) === activeLineKey(tr.state)) return value;
+      }
       return safeLiveDecorations(tr.state);
     },
     provide(field) {
@@ -30279,6 +30288,7 @@ var QiziMarkdownEditor = (() => {
   }
   function mount(parent, handlers2 = {}) {
     let applying = false;
+    let contentPad = null;
     let live = handlers2.live !== false;
     const variant = handlers2.variant === "composer" ? "composer" : "";
     const mode = new Compartment();
@@ -30298,6 +30308,7 @@ var QiziMarkdownEditor = (() => {
         run: insertNewline
       }
     ]);
+    const composer = variant === "composer";
     const extensions = [
       highlightSpecialChars(),
       history(),
@@ -30305,13 +30316,18 @@ var QiziMarkdownEditor = (() => {
       dropCursor(),
       EditorState.allowMultipleSelections.of(true),
       indentOnInput(),
-      bracketMatching(),
-      closeBrackets(),
-      autocompletion(),
-      rectangularSelection(),
-      crosshairCursor(),
-      highlightSelectionMatches(),
-      keymap.of([
+      ...composer ? [] : [
+        bracketMatching(),
+        closeBrackets(),
+        autocompletion(),
+        rectangularSelection(),
+        crosshairCursor(),
+        highlightSelectionMatches()
+      ],
+      keymap.of(composer ? [
+        ...defaultKeymap,
+        ...historyKeymap
+      ] : [
         ...closeBracketsKeymap,
         ...defaultKeymap,
         ...searchKeymap,
@@ -30399,9 +30415,11 @@ var QiziMarkdownEditor = (() => {
         view.focus();
       },
       contentHeight() {
-        const style = view.contentDOM.ownerDocument.defaultView.getComputedStyle(view.contentDOM);
-        const pad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-        return Math.ceil(view.contentHeight + pad);
+        if (contentPad == null) {
+          const style = view.contentDOM.ownerDocument.defaultView.getComputedStyle(view.contentDOM);
+          contentPad = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+        }
+        return Math.ceil(view.contentHeight + contentPad);
       },
       isCaretOnFirstLine() {
         const head = view.state.selection.main.head;

@@ -25,11 +25,16 @@
     let editor = null;
 
     function syncHostBox() {
-      host.style.height = textarea.style.height;
-      host.style.maxHeight = textarea.style.maxHeight;
+      const nextHeight = textarea.style.height;
+      const nextMax = textarea.style.maxHeight;
+      const boxChanged = host.style.height !== nextHeight || host.style.maxHeight !== nextMax;
+      if (boxChanged) {
+        host.style.height = nextHeight;
+        host.style.maxHeight = nextMax;
+        editor?.relayout();
+      }
       host.classList.toggle('is-stt-pending', textarea.classList.contains('is-stt-pending'));
       host.classList.toggle('is-disabled', Boolean(textarea.disabled));
-      editor?.relayout();
     }
 
     function keyboardEvent(source) {
@@ -71,6 +76,8 @@
         },
         onKeyDown(event) {
           if (event.isComposing || event.keyCode === 229) return false;
+          if (event.key !== 'Enter' && event.key !== 'Escape' && event.key !== 'Tab'
+            && event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return false;
           const forwarded = keyboardEvent(event);
           textarea.dispatchEvent(forwarded);
           if (!forwarded.defaultPrevented) return false;
