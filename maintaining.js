@@ -733,6 +733,7 @@
       setStatus('已有一条消息在排队', 'pending');
       return;
     }
+    rememberSentInput(inputEl.value);
     const payload = takeComposerPayload();
     if (busy) {
       clearComposerDraft();
@@ -1064,13 +1065,104 @@
 
   window.bindComposerMarkdownInput?.(inputEl);
 
+  const INPUT_HISTORY_MAX = 100;
+  const inputHistory = [];
+  let inputHistoryIndex = -1;
+  let inputHistoryDraft = '';
+  let inputHistorySuppressInput = false;
+
+  function isCaretOnFirstLine(el) {
+    if (el?.qiziMarkdown?.isCaretOnFirstLine) return el.qiziMarkdown.isCaretOnFirstLine();
+    if (!el) return true;
+    const pos = el.selectionStart ?? 0;
+    if (pos <= 0) return true;
+    return !/[\r\n]/.test(String(el.value || '').slice(0, pos));
+  }
+
+  function isCaretOnLastLine(el) {
+    if (el?.qiziMarkdown?.isCaretOnLastLine) return el.qiziMarkdown.isCaretOnLastLine();
+    if (!el) return true;
+    const value = String(el.value || '');
+    const pos = el.selectionStart ?? 0;
+    if (pos >= value.length) return true;
+    return !/[\r\n]/.test(value.slice(pos));
+  }
+
+  function rememberSentInput(text) {
+    const trimmed = String(text || '').trim();
+    if (!trimmed) return;
+    const last = inputHistory[inputHistory.length - 1];
+    if (last === trimmed) return;
+    inputHistory.push(trimmed);
+    if (inputHistory.length > INPUT_HISTORY_MAX) inputHistory.shift();
+    inputHistoryIndex = -1;
+    inputHistoryDraft = '';
+  }
+
+  function applyInputHistoryValue(value) {
+    inputHistorySuppressInput = true;
+    inputEl.value = value;
+    const end = value.length;
+    inputEl.setSelectionRange(end, end);
+    syncSendButton();
+    queueMicrotask(() => {
+      inputHistorySuppressInput = false;
+    });
+  }
+
+  function navigateInputHistory(direction) {
+    if (inputHistory.length === 0) return false;
+    if (direction === 'up') {
+      if (inputHistoryIndex === -1) {
+        inputHistoryDraft = inputEl.value;
+        inputHistoryIndex = inputHistory.length - 1;
+      } else if (inputHistoryIndex > 0) {
+        inputHistoryIndex -= 1;
+      }
+      applyInputHistoryValue(inputHistory[inputHistoryIndex]);
+      return true;
+    }
+    if (direction === 'down') {
+      if (inputHistoryIndex === -1) return false;
+      if (inputHistoryIndex < inputHistory.length - 1) {
+        inputHistoryIndex += 1;
+        applyInputHistoryValue(inputHistory[inputHistoryIndex]);
+      } else {
+        inputHistoryIndex = -1;
+        applyInputHistoryValue(inputHistoryDraft);
+      }
+      return true;
+    }
+    return false;
+  }
+
   inputEl.addEventListener('qizi-composer-files', (event) => {
     const files = event.detail?.files;
     if (!files?.length) return;
     void ingestDroppedFiles({ files, items: [] });
   });
-  inputEl.addEventListener('input', syncSendButton);
+  inputEl.addEventListener('input', () => {
+    if (!inputHistorySuppressInput && inputHistoryIndex !== -1) {
+      inputHistoryIndex = -1;
+      inputHistoryDraft = '';
+    }
+    syncSendButton();
+  });
   inputEl.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowUp' && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (inputEl.selectionStart !== inputEl.selectionEnd) return;
+      if (!isCaretOnFirstLine(inputEl)) return;
+      if (navigateInputHistory('up')) event.preventDefault();
+      return;
+    }
+    if (event.key === 'ArrowDown' && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      if (event.isComposing || event.keyCode === 229) return;
+      if (inputEl.selectionStart !== inputEl.selectionEnd) return;
+      if (!isCaretOnLastLine(inputEl)) return;
+      if (navigateInputHistory('down')) event.preventDefault();
+      return;
+    }
     if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       void sendMessage();

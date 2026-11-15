@@ -121,6 +121,7 @@ contextBridge.exposeInMainWorld('qizi', {
   pickFiles: () => ipcRenderer.invoke('openclaw:pickFiles'),
   captureScreenshot: () => ipcRenderer.invoke('openclaw:screenshot'),
   getSettings: () => ipcRenderer.invoke('openclaw:settings:get'),
+  pokeHistoryWindow: () => ipcRenderer.invoke('openclaw:history:poke'),
   testGatewaySettings: (payload) => ipcRenderer.invoke('openclaw:settings:test', payload),
   saveSettings: (payload) => ipcRenderer.invoke('openclaw:settings:save', payload),
   getDebugMode: () => ipcRenderer.invoke('openclaw:debug:get'),

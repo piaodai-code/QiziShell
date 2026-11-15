@@ -1,5 +1,7 @@
 /**
- * 一轮回复只保留一个助手气泡：文字在这个气泡里增长，结束时定稿。
+ * 一次送达一个气泡，和 Telegram 一样。
+ * 正在流入的同一条回复在这一个气泡里增长，结束时定稿。
+ * 已经分开送达的消息保持分开，不在这里合并。
  * 命令和脚本不进消息列表，交给底部 Working 条。
  */
 (function initChatTimeline(global) {
@@ -58,34 +60,6 @@
     if (cur.includes(next)) return cur;
     if (sharesSnapshot(cur, next)) return next.length >= cur.length ? next : cur;
     return dropRepeatedTranscript(`${cur}\n\n${next}`);
-  }
-
-  function collapseConsecutiveAssistants(list) {
-    if (!Array.isArray(list)) return list;
-    const out = [];
-    for (const msg of list) {
-      const cleaned = msg?.who === 'them' && !msg.streaming
-        ? { ...msg, text: dropRepeatedTranscript(msg.text) }
-        : msg;
-      const prev = out[out.length - 1];
-      const canFold = cleaned?.who === 'them'
-        && prev?.who === 'them'
-        && !cleaned.streaming
-        && !prev.streaming
-        && cleaned.kind !== 'tool'
-        && prev.kind !== 'tool';
-      if (!canFold) {
-        out.push(cleaned);
-        continue;
-      }
-      out[out.length - 1] = {
-        ...prev,
-        ...cleaned,
-        text: mergeAssistantTranscript(prev.text, cleaned.text),
-        streaming: false,
-      };
-    }
-    return out;
   }
 
   function absorbAssistantText(current, incoming) {
@@ -215,14 +189,17 @@
       return bubble;
     }
 
-    function commitStream({ runId, text, archive = true, error = null } = {}) {
+    function commitStream({ runId, text, archive = true, error = null, replace = false } = {}) {
       const incoming = typeof text === 'string' ? text : '';
       let target = findStreaming(runId);
 
       if (target) {
         if (incoming.trim()) {
-          const stripped = stripCommittedAssistantPrefix(runId, incoming);
-          if (stripped) target.text = absorbAssistantText(target.text, stripped);
+          if (replace) target.text = incoming;
+          else {
+            const stripped = stripCommittedAssistantPrefix(runId, incoming);
+            if (stripped) target.text = absorbAssistantText(target.text, stripped);
+          }
         }
         const visible = String(target.text || '').trim();
         if (!visible || isPlaceholderText(target.text)) {
@@ -321,11 +298,13 @@
     }
 
     function processDelta(item) {
-      const { runId, delta, fullText } = item;
+      const { runId } = item;
       const key = runId != null ? String(runId) : '';
       if (key && finishedRuns.has(key)) return;
 
-      let incoming = stripCommittedAssistantPrefix(runId, String(delta ?? fullText ?? ''));
+      let incoming = item.replace
+        ? String(item.fullText ?? item.delta ?? '')
+        : stripCommittedAssistantPrefix(runId, String(item.delta ?? item.fullText ?? ''));
       if (!incoming.trim()) return;
 
       let target = findStreaming(runId);
@@ -335,7 +314,7 @@
         target = createStreamingBubble(runId, itemExtra(item));
       }
 
-      target.text = absorbAssistantText(target.text, incoming);
+      target.text = item.replace ? incoming : absorbAssistantText(target.text, incoming);
       target.streaming = true;
       target.lastDeltaAt = Date.now();
       if (onRenderStream && runId != null) {
@@ -364,7 +343,7 @@
       else onRender();
     }
 
-    function processDone({ runId, text, error, aborted }) {
+    function processDone({ runId, text, error, aborted, replace }) {
       const key = runId != null ? String(runId) : '';
       if (key && finishedRuns.has(key)) return;
 
@@ -375,7 +354,13 @@
       const incoming = typeof text === 'string' ? stripCommittedAssistantPrefix(runId, text) : '';
       const streaming = findStreaming(runId);
       if (streaming) {
-        commitStream({ runId, text: incoming, archive: true, error: err || null });
+        commitStream({
+          runId,
+          text: incoming,
+          archive: true,
+          error: err || null,
+          replace: replace === true,
+        });
       } else if (incoming.trim()) {
         const last = findLastAssistantBubble(runId);
         const lastText = String(last?.text || '').trim();
@@ -399,11 +384,6 @@
       }
       removeToolMessages();
       if (global.ToolStream?.clearState) global.ToolStream.clearState(toolState);
-      const collapsed = collapseConsecutiveAssistants(msgs());
-      if (collapsed !== msgs()) {
-        const list = msgs();
-        list.splice(0, list.length, ...collapsed);
-      }
       if (key) finishedRuns.add(key);
       onRender();
       if (onRunDone) onRunDone({ runId, text, error: err, aborted });
@@ -454,6 +434,5 @@
     create: createChatTimeline,
     isToolMsg,
     absorbAssistantText,
-    collapseConsecutiveAssistants,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

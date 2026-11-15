@@ -1241,6 +1241,7 @@ function loadShellSettings() {
       showMainOnLaunch: parsed.showMainOnLaunch !== false,
       messageSoundEnabled: parsed.messageSoundEnabled === true,
       messageSoundId: normalizeMessageSoundId(parsed.messageSoundId),
+      conciseMessages: parsed.conciseMessages !== false,
       tokenless: parsed.tokenless === true,
       debugMode: normalizeDebugMode(parsed.debugMode),
     };
@@ -1266,6 +1267,9 @@ function saveShellSettings(next) {
     messageSoundId: next.messageSoundId == null
       ? normalizeMessageSoundId(current.messageSoundId)
       : normalizeMessageSoundId(next.messageSoundId),
+    conciseMessages: next.conciseMessages == null
+      ? current.conciseMessages !== false
+      : next.conciseMessages !== false,
     tokenless: next.tokenless == null ? current.tokenless === true : next.tokenless === true,
     debugMode: normalizeDebugMode(nextDebugMode),
   };
@@ -1348,6 +1352,7 @@ function getSettingsSnapshot() {
     showMainOnLaunch: shell.showMainOnLaunch !== false,
     messageSoundEnabled: shell.messageSoundEnabled === true,
     messageSoundId: normalizeMessageSoundId(shell.messageSoundId),
+    conciseMessages: shell.conciseMessages !== false,
     debugMode: getRuntimeDebugMode(),
     debugModeSource: ENV_DEBUG_MODE ? 'env' : 'settings',
     envOverrides: Boolean(
@@ -2648,14 +2653,155 @@ function isExecCompletionNoticeText(text) {
   return EXEC_COMPLETION_NOTICE_RE.test(visible) || EXEC_COMPLETION_NOTICE_RE.test(raw);
 }
 
+function isConciseMessagesEnabled() {
+  return loadShellSettings().conciseMessages !== false;
+}
+
+function isDeliveryMirrorNoticeText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (/^Model switched from\b/i.test(raw)) return true;
+  return /Learned:\s*updated\b/.test(raw);
+}
+
+function isDeliveryMirrorNotice(message) {
+  if (message?.openclawDeliveryMirror) return true;
+  return isDeliveryMirrorNoticeText(extractMessageText(message));
+}
+
+function conciseDisplayText(run) {
+  const committed = String(run?.conciseProcess || '').trim();
+  const live = String(run?.conciseLive || '').trim();
+  if (!committed) return live;
+  if (!live || committed.endsWith(live) || live.startsWith(committed)) {
+    return live.startsWith(committed) ? live : committed;
+  }
+  return `${committed}\n\n${live}`;
+}
+
+function compactStreamText(value) {
+  return String(value || '').replace(/\s+/g, '');
+}
+
+function extractAssistantStreamText(message) {
+  if (!message) return '';
+  if (typeof message === 'string') return message;
+  if (typeof message.content === 'string') return message.content;
+  if (!Array.isArray(message.content)) return extractMessageText(message);
+  let out = '';
+  for (const block of message.content) {
+    const piece = typeof block === 'string'
+      ? block
+      : (block?.type === 'text' && typeof block.text === 'string' && isVisibleAssistantTextBlock(block) ? block.text : '');
+    if (!piece) continue;
+    if (!out) {
+      out = piece;
+      continue;
+    }
+    const left = out[out.length - 1];
+    const right = piece[0];
+    if (left === '\n' || right === '\n' || /\s/.test(left) || /\s/.test(right)) out += piece;
+    else out += piece;
+  }
+  return out;
+}
+
+function nextConciseText(shown, snapshot, deltaText) {
+  const base = String(shown || '');
+  const snap = String(snapshot || '').trim();
+  const delta = String(deltaText || '');
+  if ((snap && (isDeliveryMirrorNoticeText(snap) || looksLikeLeakedToolPayloadText(snap)))
+    || (delta && (isDeliveryMirrorNoticeText(delta) || looksLikeLeakedToolPayloadText(delta)))) {
+    return base;
+  }
+  const baseC = compactStreamText(base);
+  const snapC = compactStreamText(snap);
+  if (!baseC) {
+    if (delta.trim()) return delta;
+    return snap;
+  }
+  if (snapC && snapC.startsWith(baseC)) return snap;
+  if (delta) {
+    const deltaC = compactStreamText(delta);
+    if (deltaC && baseC.endsWith(deltaC)) return base;
+    return base + delta;
+  }
+  if (snapC && (baseC.endsWith(snapC) || (snapC.length >= 12 && baseC.includes(snapC)))) return base;
+  if (snap) return `${base}\n\n${snap}`;
+  return base;
+}
+
+function commitConciseFinal(shown, finalText) {
+  const base = String(shown || '');
+  const snap = String(finalText || '').trim();
+  if (!snap || isDeliveryMirrorNoticeText(snap) || looksLikeLeakedToolPayloadText(snap)) return base;
+  const baseC = compactStreamText(base);
+  const snapC = compactStreamText(snap);
+  if (!baseC) return snap;
+  if (snapC.startsWith(baseC)) return snap;
+  if (baseC.endsWith(snapC) || (snapC.length >= 12 && baseC.includes(snapC))) return base;
+  return `${base}\n\n${snap}`;
+}
+
+function conciseTurnPreview(rawMessages) {
+  const list = Array.isArray(rawMessages) ? rawMessages : [];
+  let start = 0;
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const role = normalizeHistoryRole(list[i]?.role ?? list[i]?.who);
+    if (role === 'user' || role === 'me') {
+      start = i + 1;
+      break;
+    }
+  }
+  const parts = [];
+  let stopText = '';
+  for (let i = start; i < list.length; i += 1) {
+    const message = list[i];
+    const role = normalizeHistoryRole(message?.role ?? message?.who);
+    if (role !== 'assistant' && role !== 'them') continue;
+    if (isDeliveryMirrorNotice(message)) continue;
+    const text = extractMessageText(message).trim();
+    if (!text || looksLikeLeakedToolPayloadText(text)) continue;
+    const reason = assistantStopReason(message);
+    if (reason === 'stop') {
+      stopText = text;
+      continue;
+    }
+    if (!reason || reason === 'toolUse') {
+      if (parts[parts.length - 1] !== text) parts.push(text);
+    }
+  }
+  if (stopText) return { text: stopText, done: true };
+  return { text: parts.join('\n\n'), done: false };
+}
+
+function assistantStopReason(message) {
+  const reason = message?.stopReason;
+  return typeof reason === 'string' ? reason : '';
+}
+
+/** 精简模式只留正式回复：stopReason 为 stop 且有正文。没有该字段的旧消息保持原样。 */
+function shouldHideConciseAssistant(message) {
+  if (!isConciseMessagesEnabled()) return false;
+  const role = normalizeHistoryRole(message?.role ?? message?.who);
+  if (role !== 'assistant' && role !== 'them') return false;
+  const reason = assistantStopReason(message);
+  if (!reason) return false;
+  if (reason !== 'stop') return true;
+  return !extractMessageText(message).trim();
+}
+
 function shouldHideHistoryMessage(message) {
   if (isToolHistoryMessage(message)) return true;
   if (isExecCompletionNoticeText(extractMessageText(message))) return true;
   const role = normalizeHistoryRole(message?.role ?? message?.who);
   if (role === 'assistant' || role === 'them' || !role) {
-    return looksLikeLeakedToolPayloadText(extractMessageText(message));
+    if (looksLikeLeakedToolPayloadText(extractMessageText(message))) return true;
   }
-  return false;
+  if (isConciseMessagesEnabled() && (role === 'assistant' || role === 'them') && isDeliveryMirrorNotice(message)) {
+    return true;
+  }
+  return shouldHideConciseAssistant(message);
 }
 
 function convertHistoryMessages(serverMessages) {
@@ -2686,6 +2832,7 @@ function convertHistoryMessages(serverMessages) {
         time: displayTime,
         sentTime: sent.time || undefined,
         sentAtMs: sent.sentAtMs ?? undefined,
+        stopReason: assistantStopReason(m) || undefined,
         streaming: false,
       };
     })
@@ -2819,6 +2966,7 @@ function convertMeetingHistoryMessages(serverMessages, meta) {
         time: displayTime,
         sentTime: sent.time || undefined,
         sentAtMs: sent.sentAtMs ?? undefined,
+        stopReason: assistantStopReason(raw) || undefined,
         streaming: false,
         speakerAgentId: speakerAgentId || undefined,
         speakerLabel,
@@ -3213,7 +3361,10 @@ function finishClientRun(clientRunId, outcome) {
   } else if (outcome.error) {
     sendStreamErrorToRenderer(run, clientRunId, outcome.error);
   } else {
-    sendStreamDoneToRenderer(run, clientRunId, { text: fullText });
+    sendStreamDoneToRenderer(run, clientRunId, {
+      text: fullText,
+      replace: outcome.replace === true,
+    });
   }
   if (run.done) {
     run.done({ ...outcome, text: fullText });
@@ -3270,6 +3421,7 @@ function handleGatewayAgentLifecycleEvent(payload) {
     finishClientRun(clientRunId, { error: String(err) });
     return;
   }
+  if (isConciseMessagesEnabled() && !run.sawChatFinal) return;
   if (String(run.fullText || '').trim()) {
     sendStreamDeltaToRenderer(run, clientRunId, run.fullText, true);
   }
@@ -3311,6 +3463,55 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
   run.lastEventAt = Date.now();
 
   const broadcastBase = { sessionKey, gatewayRunId, passive };
+
+  if (isConciseMessagesEnabled()) {
+    const stopReason = assistantStopReason(payload.message) || assistantStopReason(payload);
+    const messageText = payload.message == null ? '' : extractAssistantStreamText(payload.message);
+    const deltaText = typeof payload.deltaText === 'string' ? payload.deltaText : '';
+    if (isDeliveryMirrorNotice(payload.message) || isDeliveryMirrorNoticeText(messageText) || isDeliveryMirrorNoticeText(deltaText) || isDeliveryMirrorNoticeText(payload.text)) {
+      return;
+    }
+    if (payload.state === 'delta') {
+      const view = nextConciseText(run.conciseShown, messageText, deltaText);
+      if (view && view !== run.conciseShown) {
+        run.conciseShown = view;
+        broadcastToRenderers('openclaw:session-chat', {
+          ...broadcastBase,
+          state: 'delta',
+          delta: view,
+          replace: true,
+          text: view,
+        });
+      }
+      return;
+    }
+    if (payload.state === 'final' && stopReason === 'stop') {
+      const finalText = String(messageText || '').trim();
+      broadcastToRenderers('openclaw:session-chat', {
+        ...broadcastBase,
+        state: 'final',
+        text: finalText,
+        replace: true,
+      });
+      externalSessionRuns.delete(gatewayRunId);
+      if (isForwardRun) finishForwardRun(gatewayRunId);
+      return;
+    }
+    if (payload.state === 'final' && stopReason && stopReason !== 'stop') {
+      const view = commitConciseFinal(run.conciseShown, messageText);
+      if (view) {
+        run.conciseShown = view;
+        broadcastToRenderers('openclaw:session-chat', {
+          ...broadcastBase,
+          state: 'delta',
+          delta: view,
+          replace: true,
+          text: view,
+        });
+      }
+      return;
+    }
+  }
 
   if (payload.state === 'delta') {
     const next = resolveDeltaText(run.fullText, payload);
@@ -3884,6 +4085,16 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   clearRunRecoverTimer(run);
 
   if (payload.state === 'delta') {
+    if (isConciseMessagesEnabled()) {
+      const snapshot = payload.message == null ? '' : extractAssistantStreamText(payload.message);
+      const deltaText = typeof payload.deltaText === 'string' ? payload.deltaText : '';
+      const view = nextConciseText(run.conciseShown, snapshot, deltaText);
+      if (view && view !== run.conciseShown) {
+        run.conciseShown = view;
+        sendStreamDeltaToRenderer(run, clientRunId, view, true);
+      }
+      return;
+    }
     const rawNext = resolveDeltaText(run.fullText, payload);
     const advance = advanceOwnedStream(run, rawNext);
     if (!advance) return;
@@ -3893,6 +4104,34 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   }
 
   if (payload.state === 'final') {
+    const stopReason = assistantStopReason(payload.message);
+    if (isConciseMessagesEnabled() && isDeliveryMirrorNotice(payload.message)) {
+      run.suppressProcessText = true;
+      return;
+    }
+    if (isConciseMessagesEnabled() && stopReason && stopReason !== 'stop') {
+      const finalText = extractAssistantStreamText(payload.message);
+      const view = commitConciseFinal(run.conciseShown, finalText);
+      if (view && view !== run.conciseShown) {
+        run.conciseShown = view;
+        sendStreamDeltaToRenderer(run, clientRunId, view, true);
+      }
+      run.suppressProcessText = true;
+      return;
+    }
+    if (isConciseMessagesEnabled() && stopReason === 'stop') {
+      const finalText = extractMessageText(payload.message);
+      run.conciseProcess = '';
+      run.conciseLive = '';
+      run.conciseRaw = '';
+      if (finalText && !looksLikeLeakedToolPayloadText(finalText)) {
+        run.fullText = finalText;
+        sendStreamDeltaToRenderer(run, clientRunId, finalText, true);
+      }
+      run.sawChatFinal = true;
+      finishClientRun(clientRunId, { ok: true, text: String(run.fullText || ''), replace: true });
+      return;
+    }
     let finalText = extractMessageText(payload.message);
     if (finalText && !looksLikeLeakedToolPayloadText(finalText)) {
       const stripped = stripPriorAssistantPrefix(run, finalText);
@@ -5322,7 +5561,19 @@ function loadDisplayChatHistory(client, sessionKey) {
 }
 
 function presentChatHistory(rawMessages) {
-  return dedupeForwardHistoryMessages(convertHistoryMessages(rawMessages || []));
+  const messages = dedupeForwardHistoryMessages(convertHistoryMessages(rawMessages || []));
+  if (!isConciseMessagesEnabled()) return messages;
+  const preview = conciseTurnPreview(rawMessages);
+  if (preview.done || !preview.text) return messages;
+  messages.push({
+    who: 'them',
+    text: preview.text,
+    streaming: true,
+    external: true,
+    conciseLive: true,
+    time: '',
+  });
+  return messages;
 }
 
 async function loadChatHistoryForSession(sessionKey) {
@@ -5816,6 +6067,7 @@ ipcMain.handle('openclaw:settings:save', (event, payload) => {
       showMainOnLaunch: payload?.showMainOnLaunch !== false,
       messageSoundEnabled: payload?.messageSoundEnabled === true,
       messageSoundId: payload?.messageSoundId,
+      conciseMessages: payload?.conciseMessages !== false,
     });
     restartGatewayAfterSettings();
     return { ok: true, snapshot: getSettingsSnapshot() };
@@ -6416,26 +6668,65 @@ async function pollBackgroundOwnedRuns() {
   const current = getSessionKey();
   for (const [clientRunId, run] of activeRuns.entries()) {
     const onScreen = !run.sessionKey || run.sessionKey === current;
-    if (onScreen && !run.sawToolActivity && !run.sawChatFinal) continue;
+    const conciseFollow = isConciseMessagesEnabled() && onScreen;
+    if (onScreen && !conciseFollow && !run.sawToolActivity && !run.sawChatFinal) continue;
     if (run.backgroundPollInflight) continue;
     const quietMs = onScreen ? 2000 : 3000;
-    if (Date.now() - (run.lastEventAt || 0) < quietMs) continue;
+    if (!conciseFollow && Date.now() - (run.lastEventAt || 0) < quietMs) continue;
     const observedAt = run.lastEventAt || 0;
     run.backgroundPollInflight = true;
     try {
       const result = await client.request('chat.history', {
         sessionKey: run.sessionKey || current,
-        limit: 40,
+        limit: conciseFollow ? 200 : 40,
         maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
       });
       if (!activeRuns.has(clientRunId)) continue;
-      if (onScreen && (run.lastEventAt || 0) !== observedAt) {
+      if (conciseFollow) {
+        const preview = conciseTurnPreview(result?.messages || []);
+        const shown = String(run.conciseShown || '');
+        const next = String(preview.text || '');
+        const shownC = compactStreamText(shown);
+        const nextC = compactStreamText(next);
+        const useHistory = Boolean(next) && (
+          preview.done
+          || !shownC
+          || nextC.startsWith(shownC)
+          || nextC.length >= shownC.length
+        );
+        if (useHistory && next !== shown) {
+          run.conciseShown = next;
+          sendStreamDeltaToRenderer(run, clientRunId, next, true);
+        }
+        if (preview.done && next) {
+          run.fullText = next;
+          run.sawChatFinal = true;
+          finishClientRun(clientRunId, { ok: true, text: next, replace: true });
+          continue;
+        }
+        const info = result?.sessionInfo;
+        const gatewayIdle = info && info.hasActiveRun === false;
+        if (gatewayIdle && Date.now() - (run.startedAt || 0) > 8000) {
+          run.quietPolls = (run.quietPolls || 0) + 1;
+          if (run.quietPolls >= 2) {
+            const text = next || shown || String(run.fullText || '');
+            if (text) {
+              run.fullText = text;
+              finishClientRun(clientRunId, { ok: true, text, replace: true });
+            }
+          }
+        } else {
+          run.quietPolls = 0;
+        }
+        continue;
+      }
+      if (!conciseFollow && onScreen && (run.lastEventAt || 0) !== observedAt) {
         run.quietPolls = 0;
         continue;
       }
       const msgs = convertHistoryMessages(result?.messages || []);
       const latest = [...msgs].reverse().find((item) => item.who === 'them' && String(item.text || '').trim());
-      const text = latest?.text || '';
+      const text = run.suppressProcessText ? String(run.fullText || '') : (latest?.text || '');
       if (!onScreen && text && text !== run.fullText && text.length >= String(run.fullText || '').length) {
         run.fullText = text;
         run.lastEventAt = Date.now();
@@ -6959,6 +7250,14 @@ ipcMain.handle('openclaw:history:open', (event, context) => {
 ipcMain.handle('openclaw:history:context', (event) => {
   if (!getAuthorizedHistoryWindow(event)) return null;
   return historyWindowContext;
+});
+
+ipcMain.handle('openclaw:history:poke', (event) => {
+  if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  if (historyWindow && !historyWindow.isDestroyed() && historyWindowContext?.sessionKey) {
+    safeSendTo(historyWindow.webContents, 'openclaw:history:refresh', historyWindowContext);
+  }
+  return { ok: true };
 });
 
 ipcMain.handle('openclaw:history:read-local', async (event, payload) => {

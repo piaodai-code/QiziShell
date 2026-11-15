@@ -75,6 +75,7 @@ const settingsStatusEl = document.getElementById('settings-status');
 const settingsTestBtn = document.getElementById('settings-test-btn');
 const settingsLaunchAtLogin = document.getElementById('settings-launch-at-login');
 const settingsShowMainOnLaunch = document.getElementById('settings-show-main-on-launch');
+const settingsConciseMessages = document.getElementById('settings-concise-messages');
 const settingsMessageSound = document.getElementById('settings-message-sound');
 const settingsMessageSoundSelect = document.getElementById('settings-message-sound-id');
 const settingsSoundPreviewBtn = document.getElementById('settings-sound-preview');
@@ -93,6 +94,7 @@ const MESSAGE_SOUNDS = [
 ];
 let messageSoundEnabled = false;
 let messageSoundId = MESSAGE_SOUNDS[0].id;
+let conciseMessages = true;
 const soundedRunIds = new Map();
 const forwardModal = document.getElementById('forward-modal');
 const forwardAgentsListEl = document.getElementById('forward-agents-list');
@@ -2812,6 +2814,59 @@ function findRelevantAssistantFromHistory(historyMessages, streamingTarget) {
   return null;
 }
 
+function adoptConciseLivePreview(historyMessages) {
+  if (!conciseMessages || isLocalOwnedActiveRun()) return;
+  const list = Array.isArray(historyMessages) ? historyMessages : [];
+  const live = [...list].reverse().find((m) => m?.conciseLive && m.who === 'them');
+  let local = [...messages].reverse().find((m) => m?.conciseLive && m.who === 'them' && m.streaming);
+  if (live && String(live.text || '').trim()) {
+    if (!local) {
+      currentRunId += 1;
+      local = {
+        who: 'them',
+        text: live.text,
+        time: now(),
+        streaming: true,
+        external: true,
+        conciseLive: true,
+        runId: currentRunId,
+        streamingStartedAt: Date.now(),
+        lastDeltaAt: Date.now(),
+      };
+      messages.push(local);
+      setBusy(true);
+      activeRunId = currentRunId;
+      return;
+    }
+    const next = String(live.text || '');
+    const shown = String(local.text || '');
+    const nextC = next.replace(/\s+/g, '');
+    const shownC = shown.replace(/\s+/g, '');
+    if (next !== shown && (!shownC || nextC.startsWith(shownC) || nextC.length >= shownC.length)) {
+      local.text = next;
+      local.streaming = true;
+      local.lastDeltaAt = Date.now();
+      scheduleStreamingUpdate(local.runId);
+    }
+    return;
+  }
+  if (!local) return;
+  const stop = [...list].reverse().find((m) => (
+    m?.who === 'them'
+    && !m.conciseLive
+    && m.stopReason === 'stop'
+    && String(m.text || '').trim()
+  ));
+  if (!stop) return;
+  local.text = stop.text;
+  local.streaming = false;
+  local.conciseLive = false;
+  local.external = false;
+  local.stopReason = 'stop';
+  scheduleStreamingUpdate(local.runId);
+  if (!messages.some((m) => m.streaming)) setBusy(false);
+}
+
 function dedupeAssistantMessages(list) {
   if (!Array.isArray(list) || list.length === 0) return list;
   const out = [];
@@ -2963,12 +3018,32 @@ function isExecCompletionNoticeText(text) {
   return EXEC_COMPLETION_NOTICE_RE.test(String(text || '').trim());
 }
 
+function isDeliveryMirrorNoticeText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  if (/^Model switched from\b/i.test(raw)) return true;
+  return /Learned:\s*updated\b/.test(raw);
+}
+
+function isProcessAssistantMessage(msg) {
+  if (!conciseMessages || !msg || msg.who === 'me') return false;
+  const reason = typeof msg.stopReason === 'string' ? msg.stopReason : '';
+  if (!reason) return false;
+  if (reason !== 'stop') return true;
+  return !String(msg.text || '').trim();
+}
+
 function finalizeHistoryMessages(list) {
   const cleaned = (Array.isArray(list) ? list : []).filter((msg) => !isExecCompletionNoticeText(msg?.text));
+  // 一次送达一个气泡。相邻的助手消息各自保留，不把多次 cron / 多次回复合成一条。
   const deduped = dedupeAssistantMessages(
     dedupeAdjacentUserMessages(dedupeForwardUserMessages(cleaned)),
   );
-  return window.ChatTimeline?.collapseConsecutiveAssistants?.(deduped) || deduped;
+  if (!conciseMessages) return deduped;
+  return deduped.filter((msg) => (
+    !isProcessAssistantMessage(msg)
+    && (msg?.who === 'me' || !isDeliveryMirrorNoticeText(msg?.text))
+  ));
 }
 
 function backfillMessageSentAtMs(msg) {
@@ -3035,6 +3110,7 @@ function archiveRecordFromMessage(msg) {
       : undefined,
     time: m.time,
     runId: m.runId,
+    stopReason: m.stopReason || undefined,
     streaming: false,
   };
 }
@@ -4486,6 +4562,7 @@ function applyCurrentSessionContinuation(payload) {
       text: payload.text,
       error: payload.state === 'error' ? (payload.error || 'chat error') : null,
       aborted: payload.state === 'aborted',
+      replace: payload.replace === true,
     });
     if (!busy) setStatus('已连接', 'ok');
   }
@@ -4707,12 +4784,14 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     } else {
       const streamingThem = messages.filter((m) => m.who === 'them' && m.streaming);
       for (const sm of streamingThem) {
+        if (sm.conciseLive) continue;
         const relevantThem = findRelevantAssistantFromHistory(result.messages, sm);
         if (relevantThem && shouldApplyHistoryStreamText(sm, relevantThem.text)) {
           sm.text = relevantThem.text;
           scheduleStreamingUpdate(sm.runId);
         }
       }
+      adoptConciseLivePreview(result.messages);
       render();
       return;
     }
@@ -4845,12 +4924,13 @@ async function resumeInterruptedSession(options = {}) {
   }
 }
 
-function finishAssistant({ error, runId, text, aborted } = {}) {
+function finishAssistant({ error, runId, text, aborted, replace } = {}) {
   ensureChatTimeline().enqueueDone({
     runId: runId ?? activeRunId,
     text,
     error,
     aborted,
+    replace: replace === true,
   });
 }
 
@@ -7165,9 +7245,11 @@ function applyBackgroundOwnedText(sessionKey, runId, text, replace) {
     };
     list.push(target);
   }
-  target.text = window.ChatTimeline?.absorbAssistantText
-    ? window.ChatTimeline.absorbAssistantText(target.text, incoming)
-    : incoming;
+  target.text = replace
+    ? incoming
+    : (window.ChatTimeline?.absorbAssistantText
+      ? window.ChatTimeline.absorbAssistantText(target.text, incoming)
+      : incoming);
   target.streaming = true;
   const agentId = visibleUnreadAgentId(sessionKey);
   if (agentId) markAgentUnread(agentId);
@@ -7187,7 +7269,9 @@ function applyBackgroundOwnedTerminal(payload) {
   ));
   if (target) {
     const incoming = String(payload.text || '');
-    if (incoming && incoming.length >= String(target.text || '').length) target.text = incoming;
+    if (incoming && (payload.replace === true || incoming.length >= String(target.text || '').length)) {
+      target.text = incoming;
+    }
     target.streaming = false;
     if (payload.error) {
       target.text = target.text ? `${target.text}\n\n[错误] ${payload.error}` : `[错误] ${payload.error}`;
@@ -7226,7 +7310,12 @@ window.qizi.onChatDone((runId, payload) => {
     textLength: String(payload?.text || '').length,
     activeRunId,
   });
-  finishAssistant({ runId, text: payload?.text, aborted: payload?.aborted === true });
+  finishAssistant({
+    runId,
+    text: payload?.text,
+    aborted: payload?.aborted === true,
+    replace: payload?.replace === true,
+  });
   setTimeout(() => {
     if (!busy) void syncHistoryFromGateway();
   }, 0);
@@ -8050,6 +8139,11 @@ inputEl.addEventListener('paste', async (e) => {
 (async function bootstrap() {
   applyLocalDebugMode(debugMode);
   try {
+    if (window.qizi?.getSettings) {
+      const snapshot = await window.qizi.getSettings();
+      applyMessageSoundSettings(snapshot);
+      conciseMessages = snapshot?.conciseMessages !== false;
+    }
     if (window.qizi.getDebugMode) {
       const debugInfo = await window.qizi.getDebugMode();
       applyLocalDebugMode(debugInfo?.mode || '');
@@ -9005,6 +9099,8 @@ async function populateSettingsForm() {
   }
   if (settingsLaunchAtLogin) settingsLaunchAtLogin.checked = snapshot.launchAtLogin === true;
   if (settingsShowMainOnLaunch) settingsShowMainOnLaunch.checked = snapshot.showMainOnLaunch !== false;
+  if (settingsConciseMessages) settingsConciseMessages.checked = snapshot.conciseMessages !== false;
+  conciseMessages = snapshot.conciseMessages !== false;
   applyMessageSoundSettings(snapshot);
   if (settingsMessageSound) settingsMessageSound.checked = messageSoundEnabled;
   if (settingsMessageSoundSelect) settingsMessageSoundSelect.value = messageSoundId;
@@ -9055,6 +9151,7 @@ async function saveSettingsFromForm() {
       tokenless: settingsTokenlessInput?.checked === true,
       launchAtLogin: settingsLaunchAtLogin?.checked === true,
       showMainOnLaunch: settingsShowMainOnLaunch?.checked !== false,
+      conciseMessages: settingsConciseMessages?.checked !== false,
       messageSoundEnabled: settingsMessageSound?.checked === true,
       messageSoundId: settingsMessageSoundSelect?.value || MESSAGE_SOUNDS[0].id,
     });
@@ -9063,8 +9160,13 @@ async function saveSettingsFromForm() {
       return;
     }
     applyMessageSoundSettings(result.snapshot);
+    conciseMessages = result.snapshot?.conciseMessages !== false;
     closeSettingsModal();
+    lastSyncedHistorySignature = '';
     await checkConnection();
+    if (window.qizi.pokeHistoryWindow) {
+      try { await window.qizi.pokeHistoryWindow(); } catch { /* history window may be closed */ }
+    }
   } catch (err) {
     setSettingsStatus(err?.message || '保存失败', 'error');
   } finally {
