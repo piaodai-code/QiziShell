@@ -162,6 +162,38 @@
       return stripOneTextPrefix(String(text || ''), committedAssistantPrefix(runId));
     }
 
+    function turnStillOpen(message) {
+      const list = msgs();
+      const idx = list.indexOf(message);
+      if (idx < 0) return false;
+      for (let i = idx + 1; i < list.length; i += 1) {
+        const later = list[i];
+        if (later.who === 'me' && String(later.text || '').trim()) return false;
+      }
+      return true;
+    }
+
+    // 同一轮被提前收成白气泡后，后到的全文是它的加长，而不是另一条回复。
+    function canReopenAssistant(message, incoming) {
+      if (!message || message.streaming || message.who !== 'them' || isToolMsg(message)) return false;
+      if (!turnStillOpen(message)) return false;
+      const lastText = String(message.text || '').trim();
+      const nextText = String(incoming || '').trim();
+      if (!lastText || !nextText || textSame(lastText, nextText)) return false;
+      return nextText.startsWith(lastText);
+    }
+
+    function reopenAssistant(runId, incoming) {
+      const lastSame = findLastAssistantBubble(runId);
+      const lastAny = findLastAssistantBubble(null);
+      const target = canReopenAssistant(lastSame, incoming)
+        ? lastSame
+        : (lastAny !== lastSame && canReopenAssistant(lastAny, incoming) ? lastAny : null);
+      if (!target) return null;
+      if (runId != null) target.runId = runId;
+      return target;
+    }
+
     function createStreamingBubble(runId, extra = {}) {
       const list = msgs();
       for (let i = list.length - 1; i >= 0; i -= 1) {
@@ -309,9 +341,11 @@
 
       let target = findStreaming(runId);
       if (!target) {
+        const lastAny = findLastAssistantBubble(null);
+        if (lastAny && !lastAny.streaming && turnStillOpen(lastAny) && textSame(lastAny.text, incoming)) return;
         const last = findLastAssistantBubble(runId);
         if (last && !last.streaming && textSame(last.text, incoming)) return;
-        target = createStreamingBubble(runId, itemExtra(item));
+        target = reopenAssistant(runId, incoming) || createStreamingBubble(runId, itemExtra(item));
       }
 
       target.text = item.replace ? incoming : absorbAssistantText(target.text, incoming);
@@ -335,7 +369,11 @@
       const segmentText = text ? stripCommittedAssistantPrefix(runId, text) : '';
       if (!segmentText.trim()) return;
       let target = findStreaming(runId);
-      if (!target) target = createStreamingBubble(runId);
+      if (!target) {
+        const lastAny = findLastAssistantBubble(null);
+        if (lastAny && !lastAny.streaming && turnStillOpen(lastAny) && textSame(lastAny.text, segmentText)) return;
+        target = reopenAssistant(runId, segmentText) || createStreamingBubble(runId);
+      }
       target.text = absorbAssistantText(target.text, segmentText);
       target.streaming = true;
       target.lastDeltaAt = Date.now();

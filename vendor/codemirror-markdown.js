@@ -29956,7 +29956,7 @@ var QiziMarkdownEditor = (() => {
     return builder.finish();
   }
   function buildLiveDecorations(state) {
-    ensureSyntaxTree(state, state.doc.length, 8);
+    ensureSyntaxTree(state, state.doc.length, 1);
     const doc2 = state.doc;
     const active = activeLines(state);
     const frontEnd = frontmatterEnd(doc2);

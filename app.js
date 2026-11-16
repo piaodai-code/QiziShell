@@ -313,6 +313,10 @@ function ensureChatTimeline() {
         cancelAnimationFrame(streamPaintRaf);
         streamPaintRaf = null;
       }
+      if (streamPaintTimer) {
+        clearTimeout(streamPaintTimer);
+        streamPaintTimer = null;
+      }
       if (userAborted && !error && !aborted) return;
       purgeStreamingAssistantForRun(runId);
       syncMemoryToArchive();
@@ -442,7 +446,9 @@ const passiveSessionRefreshTimers = new Map();
 let streamRenderTimer = null;
 let streamRenderRunId = null;
 let streamPaintRaf = null;
+let streamPaintTimer = null;
 let lastStreamRenderAt = 0;
+const STREAM_PAINT_MIN_MS = 80;
 
 // 把 File 转成 dataUrl（base64）
 function readFileAsDataUrl(file) {
@@ -745,13 +751,21 @@ function findStreamingMessageByRunId(runId) {
 
 function normalizeStreamingFlags() {
   if (busy) return;
+  const nowMs = Date.now();
   for (const message of messages) {
-    if (message.streaming) message.streaming = false;
+    if (!message.streaming) continue;
+    if (activeRunId != null && runIdsMatch(message.runId, activeRunId)) continue;
+    const touched = message.lastDeltaAt || message.streamingStartedAt || 0;
+    if (touched && nowMs - touched < 15000) continue;
+    message.streaming = false;
   }
 }
 
 // streaming=true 时只做 HTML 转义（流式快）；结束后才走 Markdown
-function renderMessageContent(text, { streaming = false, extraImages = [] } = {}) {
+const MARKDOWN_SYNC_CHARS = 12000;
+let renderEpoch = 0;
+
+function renderMessageContent(text, { streaming = false, extraImages = [], fullMarkdown = false } = {}) {
   const imageRegex = /\[image:(data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+)\]/g;
   const images = [...extraImages];
   let plainText = String(text || '').replace(imageRegex, (_m, dataUrl) => {
@@ -774,11 +788,18 @@ function renderMessageContent(text, { streaming = false, extraImages = [] } = {}
       html += '<span class="msg-typing-indicator" aria-hidden="true">…</span>';
     } else if (streaming) {
       html += `<pre class="msg-stream-plain">${wrapInlineEmojisForHtml(plainText, { escape: true })}</pre>`;
+    } else if (!fullMarkdown && plainText.length > MARKDOWN_SYNC_CHARS) {
+      html += `<div class="msg-large-text">${escapeHtml(plainText)}</div>`;
     } else {
       html += parseMarkdown(textWithEmojis, { breaks: true });
     }
   }
-  return { html, plainText, images };
+  return {
+    html,
+    plainText,
+    images,
+    deferMarkdown: !streaming && !fullMarkdown && plainText.length > MARKDOWN_SYNC_CHARS,
+  };
 }
 
 const IMAGE_ONLY_CAPTIONS = new Set([
@@ -1047,12 +1068,89 @@ function renderActiveMessageView(options = {}) {
   if (!window.MeetingView?.isVisible?.()) render(options);
 }
 
+function buildMessageRow(index, options = {}) {
+  const m = messages[index];
+  const row = document.createElement('div');
+  row.className = 'msg ' + m.who;
+  row.dataset.msgIndex = String(index);
+  if (m.id) row.dataset.msgId = String(m.id);
+  if (m.runId != null) row.dataset.runId = String(m.runId);
+  row.innerHTML = `
+    ${renderMessageAvatarHtml(m.who)}
+    <div class="msg-content">
+      <div class="msg-bubble"></div>
+      <div class="msg-meta">${m.time || ''}${m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '')}</div>
+    </div>
+    ${renderMessageSelectCheckHtml(index)}
+  `;
+  const content = renderMessageBubbleContent(m, index, options);
+  const bubble = row.querySelector('.msg-bubble');
+  bubble.innerHTML = content.html;
+  if (content.deferMarkdown) row.dataset.mdDeferred = '1';
+  else window.QiziCodeBlocks?.decorate(bubble);
+  return row;
+}
+
+function splitMarkdownPieces(text) {
+  const parts = [];
+  let rest = String(text || '');
+  const limit = 6000;
+  while (rest.length > limit) {
+    let cut = rest.lastIndexOf('\n\n', limit);
+    if (cut < limit * 0.4) cut = rest.lastIndexOf('\n', limit);
+    if (cut < limit * 0.4) cut = limit;
+    parts.push(rest.slice(0, cut));
+    rest = rest.slice(cut).replace(/^\n+/, '');
+  }
+  if (rest) parts.push(rest);
+  return parts;
+}
+
+const deferredMarkdownHtml = new WeakMap();
+
+function upgradeDeferredMarkdown(epoch) {
+  if (epoch !== renderEpoch || !messagesEl) return;
+  const row = messagesEl.querySelector('[data-md-deferred="1"]');
+  if (!row) return;
+  const index = Number(row.dataset.msgIndex);
+  const message = messages[index];
+  const holder = row.querySelector('.msg-large-text');
+  if (!message || !holder) {
+    delete row.dataset.mdDeferred;
+    deferredMarkdownHtml.delete(row);
+    return;
+  }
+  const text = message.who === 'me' ? getUserMessageDisplayText(message) : String(message.text || '');
+  const pieces = splitMarkdownPieces(text);
+  const piece = Number(row.dataset.mdPiece || '0');
+  if (piece >= pieces.length) {
+    delete row.dataset.mdDeferred;
+    deferredMarkdownHtml.delete(row);
+    return;
+  }
+  const html = `${deferredMarkdownHtml.get(row) || ''}${parseMarkdown(wrapInlineEmojisForHtml(pieces[piece]), { breaks: true })}`;
+  deferredMarkdownHtml.set(row, html);
+  const next = piece + 1;
+  row.dataset.mdPiece = String(next);
+  if (next >= pieces.length) {
+    holder.outerHTML = html;
+    const bubble = row.querySelector('.msg-bubble');
+    if (bubble) window.QiziCodeBlocks?.decorate(bubble);
+    delete row.dataset.mdDeferred;
+    delete row.dataset.mdPiece;
+    deferredMarkdownHtml.delete(row);
+  }
+  requestAnimationFrame(() => upgradeDeferredMarkdown(epoch));
+}
+
 function render(options = {}) {
   renderDraftCapsule();
   if (window.MeetingView?.isVisible?.()) return;
   if (!messagesEl) return;
   const prevScrollTop = messagesEl.scrollTop;
   normalizeStreamingFlags();
+  renderEpoch += 1;
+  const epoch = renderEpoch;
   if (messages.length === 0) {
     messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
     settleMessageListScroll(messagesEl, {
@@ -1062,40 +1160,52 @@ function render(options = {}) {
     });
     return;
   }
-  messagesEl.innerHTML = '';
-  let renderedCount = 0;
+  const visible = [];
   for (let i = 0; i < messages.length; i += 1) {
-    const m = messages[i];
-    if (isToolTimelineMessage(m)) continue;
-    try {
-      renderedCount += 1;
-      const row = document.createElement('div');
-      row.className = 'msg ' + m.who;
-      if (m.id) row.dataset.msgId = String(m.id);
-      if (m.runId != null) row.dataset.runId = String(m.runId);
-      row.innerHTML = `
-        ${renderMessageAvatarHtml(m.who)}
-        <div class="msg-content">
-          <div class="msg-bubble"></div>
-          <div class="msg-meta">${m.time || ''}${m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '')}</div>
-        </div>
-        ${renderMessageSelectCheckHtml(i)}
-      `;
-      row.querySelector('.msg-bubble').innerHTML = renderMessageBubbleContent(m, i).html;
-      messagesEl.appendChild(row);
-    } catch (e) {
-      console.error('render error:', e);
-    }
+    if (!isToolTimelineMessage(messages[i])) visible.push(i);
   }
-  if (renderedCount === 0) {
+  messagesEl.innerHTML = '';
+  if (visible.length === 0) {
     messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
+    return;
   }
-  window.QiziCodeBlocks?.decorate(messagesEl);
+  const tailCount = 48;
+  const followTail = options.scrollToBottom === true
+    || (options.preserveScroll !== true && isMessageListPinned(messagesEl));
+  const tailStart = followTail ? Math.max(0, visible.length - tailCount) : 0;
+  const paintIndexes = (indexes) => {
+    const frag = document.createDocumentFragment();
+    for (const index of indexes) {
+      try {
+        frag.appendChild(buildMessageRow(index));
+      } catch (e) {
+        console.error('render error:', e);
+      }
+    }
+    return frag;
+  };
+  messagesEl.appendChild(paintIndexes(visible.slice(tailStart)));
   settleMessageListScroll(messagesEl, {
     prevScrollTop,
-    preserveScroll: options.preserveScroll === true,
-    scrollToBottom: options.scrollToBottom === true,
+    preserveScroll: options.preserveScroll === true && tailStart === 0,
+    scrollToBottom: options.scrollToBottom === true || tailStart > 0,
   });
+  requestAnimationFrame(() => upgradeDeferredMarkdown(epoch));
+  if (tailStart === 0) return;
+  let cursor = tailStart;
+  const prependOlder = () => {
+    if (epoch !== renderEpoch || !messagesEl) return;
+    const from = Math.max(0, cursor - 24);
+    const pinned = isMessageListPinned(messagesEl);
+    const prevHeight = messagesEl.scrollHeight;
+    const top = messagesEl.scrollTop;
+    messagesEl.insertBefore(paintIndexes(visible.slice(from, cursor)), messagesEl.firstChild);
+    if (pinned) pinMessageList(messagesEl);
+    else messagesEl.scrollTop = top + (messagesEl.scrollHeight - prevHeight);
+    cursor = from;
+    if (cursor > 0) requestAnimationFrame(prependOlder);
+  };
+  requestAnimationFrame(prependOlder);
 }
 
 function getMessageAuthorLabel(msg) {
@@ -2688,7 +2798,7 @@ function showMessageContextMenu(x, y, msgIndex, source = 'chat') {
   msgContextMenuEl.style.top = `${Math.max(8, Math.min(y, maxY))}px`;
 }
 
-function renderMessageBubbleContent(m, msgIndex = -1) {
+function renderMessageBubbleContent(m, msgIndex = -1, options = {}) {
   const extraImages = Array.isArray(m.images) ? m.images : [];
   const files = Array.isArray(m.files) ? m.files : [];
   let text = m.who === 'me' ? getUserMessageDisplayText(m) : (m.text || '');
@@ -2696,11 +2806,15 @@ function renderMessageBubbleContent(m, msgIndex = -1) {
   if ((extraImages.length > 0 || files.length > 0) && isAttachmentPlaceholder(trimmed)) {
     text = '';
   }
+  const renderOptions = {
+    streaming: shouldUseStreamingPlainText(m),
+    fullMarkdown: options.fullMarkdown === true,
+  };
   if (extraImages.length === 0 && text.includes('[image:')) {
-    return renderMessageContent(text, { streaming: shouldUseStreamingPlainText(m) });
+    return renderMessageContent(text, renderOptions);
   }
   const content = renderMessageContent(text, {
-    streaming: shouldUseStreamingPlainText(m),
+    ...renderOptions,
     extraImages,
   });
   if (files.length > 0) {
@@ -2731,10 +2845,12 @@ function assistantTextsMatch(a, b) {
  *    refreshSessionFromGateway：以 Gateway chat.history 为准（同 webchat）
  *
  * 3. 切换 Agent / 重连 / session.changed
- *    syncHistoryFromGateway 拉 chat.history 刷新主界面
+ *    先拿网关最新一页，把本地还没有的绿气泡补上；
+ *    更早的页在这之后补齐。本地归档只是上次对账的副本。
  *
- * 4. localStorage
- *    仅 overlay 图片/文件附件；不作为消息列表主数据源
+ * 4. 本地归档
+ *    打开时先画出来。附件仍从本地贴回网关消息。
+ *    对账结果写回归档，下次打开不用再等整本历史。
  *
  * 转发 = 对目标 session 的 chat.send，成功后 refreshSessionFromGateway；
  * agent 回复由 session-chat 流式写入，结束后 sync 落盘。
@@ -2880,6 +2996,27 @@ function dedupeAssistantMessages(list) {
       if (!prev.runId && msg.runId) {
         out[out.length - 1] = { ...msg, streaming: false };
       }
+      continue;
+    }
+    out.push(msg);
+  }
+  return out;
+}
+
+// 流式中途落盘的半截气泡：正文是相邻助手消息的前缀。只留更长的那条。
+function collapseAssistantPrefixes(list) {
+  if (!Array.isArray(list) || list.length === 0) return list;
+  const out = [];
+  for (const msg of list) {
+    if (msg?.who !== 'them' || msg.streaming) {
+      out.push(msg);
+      continue;
+    }
+    const text = String(msg.text || '').trim();
+    const prev = out.length > 0 ? out[out.length - 1] : null;
+    const prevText = prev?.who === 'them' && !prev.streaming ? String(prev.text || '').trim() : '';
+    if (prevText && text && prevText !== text && (prevText.startsWith(text) || text.startsWith(prevText))) {
+      if (text.length > prevText.length) out[out.length - 1] = msg;
       continue;
     }
     out.push(msg);
@@ -3033,17 +3170,46 @@ function isProcessAssistantMessage(msg) {
   return !String(msg.text || '').trim();
 }
 
+// 归档按到达顺序追加。显示时按发送时间排，后补进来的旧回复不再压住最新一轮。
+function orderHistoryByTime(list) {
+  if (!Array.isArray(list) || list.length < 2) return list;
+  let carry = null;
+  const pending = [];
+  const timed = [];
+  const streaming = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const msg = list[index];
+    if (msg?.streaming) {
+      streaming.push(msg);
+      continue;
+    }
+    const raw = msg?.sentAtMs;
+    const known = typeof raw === 'number' && Number.isFinite(raw);
+    if (known) {
+      carry = raw;
+      timed.push({ msg, index, ms: raw });
+      continue;
+    }
+    if (carry == null) pending.push(msg);
+    else timed.push({ msg, index, ms: carry });
+  }
+  timed.sort((a, b) => a.ms - b.ms || a.index - b.index);
+  return pending.concat(timed.map((item) => item.msg), streaming);
+}
+
 function finalizeHistoryMessages(list) {
   const cleaned = (Array.isArray(list) ? list : []).filter((msg) => !isExecCompletionNoticeText(msg?.text));
   // 一次送达一个气泡。相邻的助手消息各自保留，不把多次 cron / 多次回复合成一条。
-  const deduped = dedupeAssistantMessages(
+  const deduped = collapseAssistantPrefixes(dedupeAssistantMessages(
     dedupeAdjacentUserMessages(dedupeForwardUserMessages(cleaned)),
-  );
-  if (!conciseMessages) return deduped;
-  return deduped.filter((msg) => (
-    !isProcessAssistantMessage(msg)
-    && (msg?.who === 'me' || !isDeliveryMirrorNoticeText(msg?.text))
   ));
+  const visible = conciseMessages
+    ? deduped.filter((msg) => (
+      !isProcessAssistantMessage(msg)
+      && (msg?.who === 'me' || !isDeliveryMirrorNoticeText(msg?.text))
+    ))
+    : deduped;
+  return orderHistoryByTime(visible);
 }
 
 function backfillMessageSentAtMs(msg) {
@@ -3087,15 +3253,25 @@ function readRawStoredMessagesForSession(sessionKey) {
   }
 }
 
+function userMessageHasVisibleBody(msg) {
+  if (!msg || msg.who !== 'me') return false;
+  if (String(msg.text || '').trim()) return true;
+  if (String(msg.quote?.text || '').trim()) return true;
+  if (String(msg.forward?.text || '').trim()) return true;
+  if (Array.isArray(msg.images) && msg.images.length > 0) return true;
+  if (Array.isArray(msg.files) && msg.files.length > 0) return true;
+  return false;
+}
+
 function archiveRecordFromMessage(msg) {
-  if (!msg || msg.streaming || msg.queued) return null;
-  if (msg.kind === 'tool') return null;
-  const m = backfillMessageSentAtMs(normalizeUserMessageRecord({ ...msg, streaming: false }));
+  if (!msg || msg.kind === 'tool') return null;
+  if (msg.who !== 'me' && (msg.streaming || msg.queued) && isStreamingPlaceholderText(msg.text)) return null;
+  const originalText = String(msg.text || '');
+  const m = backfillMessageSentAtMs(normalizeUserMessageRecord({ ...msg, streaming: false, queued: false }));
   if (m.who === 'them' && isStreamingPlaceholderText(m.text)) return null;
-  if (m.who === 'me' && !String(m.text || '').trim()
-    && !(Array.isArray(m.images) && m.images.length)
-    && !(Array.isArray(m.files) && m.files.length)) {
-    return null;
+  if (m.who === 'me' && !userMessageHasVisibleBody(m)) {
+    if (!originalText.trim()) return null;
+    m.text = originalText;
   }
   return {
     who: m.who,
@@ -3176,8 +3352,29 @@ function appendCompletedMessageToArchive(sessionKey, msg) {
   appendCompletedMessagesToArchive(sessionKey, [msg]);
 }
 
+function liveMessagesBelongToSession(sessionKey) {
+  if (!sessionKey || messages.length === 0) return false;
+  let tagged = 0;
+  for (const msg of messages) {
+    if (!msg || msg.kind === 'tool') continue;
+    if (!msg.sessionKey) continue;
+    tagged += 1;
+    if (msg.sessionKey !== sessionKey) return false;
+  }
+  return tagged > 0;
+}
+
 function exportHistoryArchiveForSession(sessionKey) {
-  return finalizeHistoryMessages(readRawStoredMessagesForSession(sessionKey));
+  const key = String(sessionKey || '').trim();
+  if (key === currentSessionKey && liveMessagesBelongToSession(key)) {
+    const live = [];
+    for (const msg of messages) {
+      const record = archiveRecordFromMessage(msg);
+      if (record) live.push(record);
+    }
+    if (live.length > 0) return finalizeHistoryMessages(live);
+  }
+  return finalizeHistoryMessages(readRawStoredMessagesForSession(key));
 }
 
 function syncCurrentRunIdFromMessages() {
@@ -3445,6 +3642,52 @@ function mergeGatewayHistory(localMessages, serverMessages) {
   if (!unknownServer.length) return finalizeHistoryMessages(local);
   const appended = overlayLocalAttachmentsOntoServerHistory(unknownServer, []);
   return finalizeHistoryMessages([...local, ...appended]);
+}
+
+/** 最新一页先补进当前列表。不拿这一页替换整本，避免更早的消息先被抽掉。 */
+function absorbServerMessages(localMessages, serverMessages) {
+  const base = (Array.isArray(localMessages) ? localMessages : []).map((message) => (
+    message.streaming ? { ...message } : { ...message, streaming: false }
+  ));
+  const server = dedupeForwardUserMessages(
+    (Array.isArray(serverMessages) ? serverMessages : []).map((message) => normalizeUserMessageRecord(message)),
+  );
+  for (const message of server) {
+    if (!isKnownInHistory(message, base)) base.push(message);
+  }
+  return finalizeHistoryMessages(base);
+}
+
+function storedMessageIdentity(msg) {
+  const text = String(msg?.text || '').trim();
+  const quote = String(msg?.quote?.text || '').trim();
+  const forward = String(msg?.forward?.text || '').trim();
+  const ms = Number.isFinite(msg?.sentAtMs) ? String(msg.sentAtMs) : '';
+  return `${msg?.who || ''}\0${ms}\0${text}\0${quote}\0${forward}`;
+}
+
+function rememberReconciledHistory(sessionKey, list) {
+  const key = String(sessionKey || '').trim();
+  if (!ENABLE_LOCAL_MESSAGE_SAVE || !key || !Array.isArray(list) || list.length === 0) return;
+  const records = [];
+  const seen = new Set();
+  for (const raw of list) {
+    const record = archiveRecordFromMessage(raw);
+    if (!record) continue;
+    const id = storedMessageIdentity(record);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    records.push(record);
+  }
+  if (!records.length) return;
+  const payload = finalizeHistoryMessages(records);
+  messageArchiveCache.set(key, payload);
+  void persistMessageArchive(key, payload);
+  if (window.qizi?.pokeHistoryWindow) void window.qizi.pokeHistoryWindow();
+}
+
+function syncedArchiveList(sessionKey, serverMessages, localMessages) {
+  return buildDisplayHistoryFromGateway(serverMessages, localMessages || readRawStoredMessagesForSession(sessionKey));
 }
 
 /** 以 Gateway 历史为底，overlay 本地附件 / 元数据（webchat 同源） */
@@ -4448,16 +4691,32 @@ function updateStreamingBubble(runId) {
   }
   const bubble = row.querySelector('.msg-bubble');
   if (bubble) {
-    bubble.innerHTML = renderMessageBubbleContent(m, msgIndex).html;
-    window.QiziCodeBlocks?.decorate(bubble);
+    const plain = bubble.querySelector(':scope > pre.msg-stream-plain');
+    const onlyPlain = plain && bubble.childElementCount === 1;
+    if (onlyPlain && m.streaming) {
+      const next = renderMessageContent(m.text || '', { streaming: true }).plainText;
+      if (plain.textContent !== next) plain.textContent = next;
+    } else {
+      bubble.innerHTML = renderMessageBubbleContent(m, msgIndex).html;
+      if (!m.streaming) window.QiziCodeBlocks?.decorate(bubble);
+    }
   }
   const meta = row.querySelector('.msg-meta');
   if (meta) {
     const suffix = m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '');
-    meta.textContent = `${m.time || ''}${suffix}`;
+    const nextMeta = `${m.time || ''}${suffix}`;
+    if (meta.textContent !== nextMeta) meta.textContent = nextMeta;
   }
-  if (isMessageListPinned(messagesEl)) pinMessageList(messagesEl);
-  else syncScrollBottomButton();
+  if (isMessageListPinned(messagesEl)) {
+    const top = messagesEl.scrollHeight;
+    if (messagesEl.scrollTop !== top) {
+      suppressScrollPinUpdate += 1;
+      messagesEl.scrollTop = top;
+      suppressScrollPinUpdate -= 1;
+    }
+  } else {
+    syncScrollBottomButton();
+  }
 }
 
 function isLocalOwnedActiveRun() {
@@ -4473,11 +4732,20 @@ function stopSessionWatch() {
   }
 }
 
+function composerHasFocus() {
+  const active = document.activeElement;
+  return Boolean(active && composerEl && composerEl.contains(active));
+}
+
 async function tickSessionWatch() {
   if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (sessionSwitchSettling) return;
   if (window.MeetingView?.isVisible?.()) return;
   if (!connected) return;
+  // 本机流式走 IPC。这时再拉 chat.history 会整表重绘，输入跟着卡，
+  // 网关空闲标志一闪还会把还在跑的回合收掉。
+  if (isLocalOwnedActiveRun()) return;
+  if (composerHasFocus() && !busy && !messages.some((m) => m.streaming)) return;
 
   const nowMs = Date.now();
   if (nowMs - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
@@ -4489,13 +4757,16 @@ async function tickSessionWatch() {
     lastSessionSyncAt = nowMs;
 
     if (!sessionInfo.hasActiveRun) {
+      // 本机这一轮还在，网关的 hasActiveRun 却会在工具之间闪成 false。
+      // 这时收掉气泡并放开发送，前台就像已经结束，后台其实还在跑。
+      if (isLocalOwnedActiveRun()) return;
       const waiting = busy || messages.some((m) => m.streaming);
-      const ownedJustStarted = isLocalOwnedActiveRun() && messages.some((m) => {
-        if (m.who !== 'them' || !m.streaming || m.external) return false;
+      const liveRecently = messages.some((m) => {
+        if (m.who !== 'them' || !m.streaming || isToolTimelineMessage(m)) return false;
         const started = m.lastDeltaAt || m.streamingStartedAt || 0;
-        return started > 0 && Date.now() - started < 8000;
+        return started > 0 && Date.now() - started < 15000;
       });
-      if (waiting && !ownedJustStarted) {
+      if (waiting && !liveRecently) {
         await syncHistoryFromGateway({ force: true });
         clearStaleStreamingState({ force: true });
         render();
@@ -4531,10 +4802,17 @@ function startSessionWatch() {
 
 let lastOwnedRunFinishedAt = 0;
 
+function continuationExtendsShown(payload) {
+  const shown = getLastFinalizedAssistantText().trim();
+  const incoming = String(payload?.text || payload?.delta || '').trim();
+  if (!shown || !incoming || incoming.length <= shown.length) return false;
+  return incoming.startsWith(shown);
+}
+
 function applyCurrentSessionContinuation(payload) {
   if (payload.state === 'delta') {
-    // owned run 刚结束时的同 session 迟到续流（webchat 不展示），避免 phantom 气泡
-    if (!busy && Date.now() - lastOwnedRunFinishedAt < 15000) return;
+    // 刚结束的回声丢掉。真的还在往下写（全文比已显示的更长）要接回同一个气泡。
+    if (!busy && Date.now() - lastOwnedRunFinishedAt < 15000 && !continuationExtendsShown(payload)) return;
     if (!busy) {
       setBusy(true);
       if (payload.runId != null) activeRunId = payload.runId;
@@ -4578,7 +4856,9 @@ async function applyGatewaySessionChat(payload) {
 
   if (payload.passive) {
     const terminal = payload.state === 'final' || payload.state === 'aborted' || payload.state === 'error';
-    if (!isViewing) {
+    if (isViewing) {
+      if (terminal) void reconcileOpenSessionTail();
+    } else {
       schedulePassiveSessionRefresh(sessionKey, { immediate: terminal });
     }
     if (isViewing && terminal && !busy) setStatus('已连接', 'ok');
@@ -4668,12 +4948,19 @@ function findAssistantStreamTarget(runId) {
 
 function paintStreamingBubble(runId) {
   streamRenderRunId = runId;
-  if (streamPaintRaf != null) return;
-  streamPaintRaf = requestAnimationFrame(() => {
+  if (streamPaintRaf != null || streamPaintTimer) return;
+  const wait = STREAM_PAINT_MIN_MS - (Date.now() - lastStreamRenderAt);
+  const paint = () => {
     streamPaintRaf = null;
+    streamPaintTimer = null;
     lastStreamRenderAt = Date.now();
     updateStreamingBubble(streamRenderRunId);
-  });
+  };
+  if (wait > 0) {
+    streamPaintTimer = setTimeout(paint, wait);
+    return;
+  }
+  streamPaintRaf = requestAnimationFrame(paint);
 }
 
 function scheduleStreamingUpdate(runId) {
@@ -4754,15 +5041,81 @@ async function syncHistoryFromGateway(options = {}) {
   return run;
 }
 
+function historyViewMovedOn(epoch, sessionKey) {
+  return epoch !== chatScopeEpoch || sessionKey !== currentSessionKey;
+}
+
+/** 一轮结束时对最新一页，把本地还没有的消息补上并保存。 */
+async function reconcileOpenSessionTail() {
+  if (!ENABLE_GATEWAY_HISTORY_SYNC || !window.qizi?.loadHistory) return false;
+  if (gatewayTailWouldInterruptLiveRun()) return false;
+  const epochAtStart = chatScopeEpoch;
+  const sessionAtStart = currentSessionKey;
+  let tail = null;
+  try {
+    tail = await window.qizi.loadHistory({ scope: 'tail' });
+  } catch (err) {
+    console.warn('[qizi] 拉取最新一页失败', err);
+    return false;
+  }
+  if (!tail?.ok || !Array.isArray(tail.messages)) return false;
+  const tailKey = String(tail.sessionKey || sessionAtStart).trim();
+  if (historyViewMovedOn(epochAtStart, sessionAtStart) || (tailKey && tailKey !== currentSessionKey)) {
+    rememberReconciledHistory(
+      tailKey,
+      absorbServerMessages(readRawStoredMessagesForSession(tailKey), tail.messages),
+    );
+    return false;
+  }
+  if (gatewayTailWouldInterruptLiveRun()) return false;
+  const priorInflight = messages.filter((message) => message.streaming);
+  let nextMessages = absorbServerMessages(messages, tail.messages);
+  if (priorInflight.length > 0) {
+    nextMessages = reattachInFlightStreaming(nextMessages, priorInflight);
+  }
+  const changed = historySignature(nextMessages) !== historySignature(messages);
+  if (changed) {
+    messages = nextMessages;
+    render({ scrollToBottom: isMessageListPinned(messagesEl) });
+  }
+  rememberReconciledHistory(sessionAtStart, messages);
+  return changed;
+}
+
+function gatewayTailWouldInterruptLiveRun() {
+  if (isLocalOwnedActiveRun()) return true;
+  return messages.some((message) => message.who === 'them' && message.streaming && !message.external);
+}
+
 async function syncHistoryFromGatewayOnce(options = {}) {
   if (!ENABLE_GATEWAY_HISTORY_SYNC) return;
   if (sessionSwitchSettling && options.duringSwitch !== true) return;
   if (!window.qizi.loadHistory) return;
   const epochAtStart = chatScopeEpoch;
   const sessionAtStart = currentSessionKey;
+  const fullPromise = window.qizi.loadHistory().catch((err) => {
+    console.warn('[qizi] 拉取服务端历史失败', err);
+    return null;
+  });
   try {
-    const result = await window.qizi.loadHistory();
-    if (epochAtStart !== chatScopeEpoch || sessionAtStart !== currentSessionKey) return;
+    const externalStreamOpen = messages.some((message) => message.external && message.streaming);
+    if (!externalStreamOpen) {
+      await reconcileOpenSessionTail();
+      if (historyViewMovedOn(epochAtStart, sessionAtStart)) return;
+    }
+
+    const result = await fullPromise;
+    if (result?.ok && Array.isArray(result.messages) && result.messages.length > 0) {
+      const savedKey = String(result.sessionKey || sessionAtStart).trim();
+      if (historyViewMovedOn(epochAtStart, sessionAtStart)) {
+        rememberReconciledHistory(
+          savedKey,
+          syncedArchiveList(savedKey, result.messages),
+        );
+        return;
+      }
+    }
+    if (!result || historyViewMovedOn(epochAtStart, sessionAtStart)) return;
     if (!result?.ok || !Array.isArray(result.messages)) return;
 
     if (applyLoadedSessionKey(result)) {
@@ -4770,10 +5123,18 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     }
 
     if (isLocalOwnedActiveRun() && options.force !== true) {
+      rememberReconciledHistory(
+        currentSessionKey,
+        syncedArchiveList(currentSessionKey, result.messages),
+      );
       return;
     }
 
     if (!options.force && messages.some((m) => m.who === 'them' && m.streaming && !m.external)) {
+      rememberReconciledHistory(
+        currentSessionKey,
+        syncedArchiveList(currentSessionKey, result.messages),
+      );
       return;
     }
 
@@ -4791,8 +5152,13 @@ async function syncHistoryFromGatewayOnce(options = {}) {
           scheduleStreamingUpdate(sm.runId);
         }
       }
+      const countBefore = messages.length;
       adoptConciseLivePreview(result.messages);
-      render();
+      rememberReconciledHistory(
+        currentSessionKey,
+        syncedArchiveList(currentSessionKey, result.messages),
+      );
+      if (messages.length !== countBefore) render();
       return;
     }
 
@@ -4805,6 +5171,7 @@ async function syncHistoryFromGatewayOnce(options = {}) {
     }
 
     const nextSignature = historySignature(nextMessages);
+    rememberReconciledHistory(currentSessionKey, nextMessages);
     if (nextSignature === lastSyncedHistorySignature) return;
     lastSyncedHistorySignature = nextSignature;
     messages = nextMessages;
@@ -4883,15 +5250,59 @@ async function resumeInterruptedSession(options = {}) {
     return;
   }
 
+  const history = await window.qizi.loadHistory();
+  const serverText = history?.ok
+    ? String([...history.messages].reverse().find((message) => message.who === 'them')?.text || '')
+    : '';
+
   const localStreaming = [...messages].reverse().find((m) => m.who === 'them' && m.streaming);
   if (localStreaming) {
+    if (serverText && assistantTextCovers(localStreaming.text, serverText)) {
+      localStreaming.streaming = false;
+      if (!messages.some((message) => message.streaming)) setBusy(false);
+      render();
+      return;
+    }
+    if (
+      serverText.trim().startsWith(String(localStreaming.text || '').trim())
+      && serverText.trim().length > String(localStreaming.text || '').trim().length
+    ) {
+      localStreaming.text = serverText;
+      localStreaming.lastDeltaAt = Date.now();
+    }
     setBusy(true);
     activeRunId = localStreaming.runId;
     startExternalStreamHistoryPoll(localStreaming.runId);
+    render();
     return;
   }
 
-  const history = await window.qizi.loadHistory();
+  const shown = lastAssistantMessage();
+  if (shown && serverText && assistantTextCovers(shown.text, serverText)) {
+    return;
+  }
+  if (
+    shown
+    && !shown.streaming
+    && serverText.trim().startsWith(String(shown.text || '').trim())
+    && serverText.trim().length > String(shown.text || '').trim().length
+  ) {
+    shown.text = serverText;
+    shown.streaming = true;
+    shown.external = Boolean(options.external);
+    shown.lastDeltaAt = Date.now();
+    if (shown.runId == null) {
+      currentRunId += 1;
+      shown.runId = currentRunId;
+    }
+    setBusy(true);
+    activeRunId = shown.runId;
+    render();
+    setStatus(options.external ? 'Webchat 回复中，同步…' : '检测到进行中的回复，正在续传…', 'pending');
+    await pollExternalStreamHistoryOnce(shown.runId);
+    if (shown.external) startExternalStreamHistoryPoll(shown.runId);
+    return;
+  }
 
   currentRunId += 1;
   const target = {
@@ -5438,14 +5849,30 @@ function applyCachedAgentChrome(agentId) {
 
 function showSessionMessages(sessionKey) {
   const parked = liveSessionSnapshots.get(sessionKey);
-  if (parked) {
-    liveSessionSnapshots.delete(sessionKey);
-    messages = parked;
-    return;
+  liveSessionSnapshots.delete(sessionKey);
+  // 此时 currentSessionKey 已经是下一本，内存里的 messages 仍是上一本。只读这一本的存档。
+  messages = finalizeHistoryMessages(readRawStoredMessagesForSession(sessionKey));
+  if (!parked) return;
+  const streaming = parked.filter((message) => (
+    message?.streaming && !isKnownInHistory(message, messages)
+  ));
+  if (streaming.length > 0) messages = messages.concat(streaming);
+}
+
+function assistantTextCovers(shown, incoming) {
+  const have = String(shown || '').trim();
+  const next = String(incoming || '').trim();
+  if (!next) return false;
+  if (!have) return false;
+  return have === next || have.startsWith(next);
+}
+
+function lastAssistantMessage() {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message.who === 'them' && !isToolTimelineMessage(message)) return message;
   }
-  messages = [];
-  loadMessages();
-  messages = finalizeHistoryMessages(messages);
+  return null;
 }
 
 function adoptBackgroundRun(summary) {
@@ -5454,11 +5881,40 @@ function adoptBackgroundRun(summary) {
   let target = [...messages].reverse().find((message) => (
     message.who === 'them' && message.streaming && runIdsMatch(message.runId, summary.clientRunId)
   ));
+  const incoming = String(summary.text || '');
   if (!target) {
+    const last = lastAssistantMessage();
+    if (last && assistantTextCovers(last.text, incoming)) {
+      // 切回来时正文已经是目前的全文。保持白气泡，只把停止按钮留着。
+      last.runId = summary.clientRunId;
+      last.sessionKey = currentSessionKey;
+      last.chatEpoch = chatScopeEpoch;
+      userAborted = false;
+      setBusy(true);
+      activeRunId = summary.clientRunId;
+      return;
+    }
+    if (
+      last
+      && !last.streaming
+      && incoming.trim().startsWith(String(last.text || '').trim())
+      && incoming.trim().length > String(last.text || '').trim().length
+    ) {
+      last.text = incoming;
+      last.streaming = true;
+      last.runId = summary.clientRunId;
+      last.sessionKey = currentSessionKey;
+      last.chatEpoch = chatScopeEpoch;
+      last.lastDeltaAt = Date.now();
+      userAborted = false;
+      setBusy(true);
+      activeRunId = summary.clientRunId;
+      return;
+    }
     target = {
       id: allocMessageId(),
       who: 'them',
-      text: summary.text || '…',
+      text: incoming.trim() ? incoming : '…',
       time: now(),
       streaming: true,
       runId: summary.clientRunId,
@@ -5468,8 +5924,8 @@ function adoptBackgroundRun(summary) {
       lastDeltaAt: Date.now(),
     };
     messages.push(target);
-  } else if (summary.text && summary.text.length > String(target.text || '').length) {
-    target.text = summary.text;
+  } else if (incoming && incoming.length > String(target.text || '').length) {
+    target.text = incoming;
   }
   target.sessionKey = currentSessionKey;
   target.chatEpoch = chatScopeEpoch;
@@ -5506,7 +5962,10 @@ async function switchToAgent(agentId) {
     toAgent: agentId,
     fromSessionKey: prevSessionKey,
   });
-  if (prevSessionKey) liveSessionSnapshots.set(prevSessionKey, messages);
+  if (prevSessionKey) {
+    syncMemoryToArchive(prevSessionKey);
+    liveSessionSnapshots.set(prevSessionKey, messages);
+  }
 
   const nextSessionKey = shellSessionKeyForAgent(agentId);
   chatScopeEpoch += 1;
@@ -8167,6 +8626,7 @@ inputEl.addEventListener('paste', async (e) => {
     renderUnreadAgentStack();
     loadMessages();
     messages = finalizeHistoryMessages(messages);
+    stampMessagesToCurrentScope(messages);
     syncCurrentRunIdFromMessages();
     render();
     await refreshAgentTitleFromGateway();
@@ -9419,7 +9879,10 @@ function beginShellSessionView(nextSessionKey) {
   if (multiSelectMode) exitMultiSelectMode();
   dismissBtwSideCard();
   clearPendingOutbound();
-  if (currentSessionKey) liveSessionSnapshots.set(currentSessionKey, messages);
+  if (currentSessionKey) {
+    syncMemoryToArchive(currentSessionKey);
+    liveSessionSnapshots.set(currentSessionKey, messages);
+  }
   chatScopeEpoch += 1;
   resetChatTimeline();
   pendingImages = [];

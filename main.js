@@ -4109,11 +4109,14 @@ function handleOwnedGatewayChatEvent(payload, matched) {
       run.suppressProcessText = true;
       return;
     }
-    if (isConciseMessagesEnabled() && stopReason && stopReason !== 'stop') {
+    if (isConciseMessagesEnabled() && stopReason !== 'stop') {
+      // 没有 stop 的 final 只是工具轮之间的过程稿。收掉的话界面会变空、发送变亮，
+      // 而网关还在跑；下一段全文再进来就会另开一个黑框气泡。
       const finalText = extractAssistantStreamText(payload.message);
       const view = commitConciseFinal(run.conciseShown, finalText);
       if (view && view !== run.conciseShown) {
         run.conciseShown = view;
+        run.fullText = view;
         sendStreamDeltaToRenderer(run, clientRunId, view, true);
       }
       run.suppressProcessText = true;
@@ -5602,6 +5605,23 @@ async function loadChatHistoryForSession(sessionKey) {
   }
 }
 
+async function loadChatHistoryTail() {
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const sessionKey = getSessionKey();
+    const page = await requestDisplayHistoryPage(client, sessionKey, 0);
+    return {
+      ok: true,
+      sessionKey,
+      partial: true,
+      messages: presentChatHistory(page?.messages),
+    };
+  } catch (err) {
+    return { ok: false, error: formatGatewayError(err) };
+  }
+}
+
 async function loadChatHistory() {
   try {
     const client = ensureGateway();
@@ -6704,20 +6724,8 @@ async function pollBackgroundOwnedRuns() {
           finishClientRun(clientRunId, { ok: true, text: next, replace: true });
           continue;
         }
-        const info = result?.sessionInfo;
-        const gatewayIdle = info && info.hasActiveRun === false;
-        if (gatewayIdle && Date.now() - (run.startedAt || 0) > 8000) {
-          run.quietPolls = (run.quietPolls || 0) + 1;
-          if (run.quietPolls >= 2) {
-            const text = next || shown || String(run.fullText || '');
-            if (text) {
-              run.fullText = text;
-              finishClientRun(clientRunId, { ok: true, text, replace: true });
-            }
-          }
-        } else {
-          run.quietPolls = 0;
-        }
+        // 网关在长工具轮里会短暂报空闲。这里不再据此结束，否则前台停止按钮消失、
+        // 气泡被收掉，后台其实还在跑。正式结束以历史里的 stop 或 chat final 为准。
         continue;
       }
       if (!conciseFollow && onScreen && (run.lastEventAt || 0) !== observedAt) {
@@ -6735,14 +6743,10 @@ async function pollBackgroundOwnedRuns() {
       const info = result?.sessionInfo;
       const gatewayIdle = info && info.hasActiveRun === false;
       const replyAlreadyFinal = run.sawChatFinal === true;
-      if ((gatewayIdle || replyAlreadyFinal) && Date.now() - (run.startedAt || 0) > 4000) {
-        run.quietPolls = (run.quietPolls || 0) + 1;
-        const needQuietPolls = (onScreen && (run.sawChatFinal || run.sawToolResult)) ? 1 : 2;
-        if (run.quietPolls >= needQuietPolls) {
-          finishClientRun(clientRunId, { ok: true, text: run.fullText || text });
-        }
-      } else {
-        run.quietPolls = 0;
+      const quietFor = Date.now() - (run.lastEventAt || 0);
+      const idleLongEnough = gatewayIdle && quietFor > 20000;
+      if ((idleLongEnough || replyAlreadyFinal) && Date.now() - (run.startedAt || 0) > 4000) {
+        finishClientRun(clientRunId, { ok: true, text: run.fullText || text });
       }
     } catch (err) {
       debugEvent('session', 'background_run_poll_failed', { error: err.message || String(err) });
@@ -6962,8 +6966,9 @@ ipcMain.handle('openclaw:session:switch', (event, agentId) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return switchToAgent(agentId);
 });
-ipcMain.handle('openclaw:history', (event) => {
+ipcMain.handle('openclaw:history', (event, payload) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
+  if (payload?.scope === 'tail') return loadChatHistoryTail();
   return loadChatHistory();
 });
 ipcMain.handle('openclaw:history:session', (event, payload) => {

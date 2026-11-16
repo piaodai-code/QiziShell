@@ -36,6 +36,8 @@ function prepareMessagesForDisplay(list) {
     .filter((m) => {
       if (m.who === 'them' && isStreamingPlaceholderText(m.text)) return false;
       if (m.who === 'me' && !String(m.text || '').trim()
+        && !String(m.quote?.text || '').trim()
+        && !String(m.forward?.text || '').trim()
         && !(Array.isArray(m.images) && m.images.length)
         && !(Array.isArray(m.files) && m.files.length)) {
         return false;

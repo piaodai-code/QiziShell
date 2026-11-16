@@ -2557,6 +2557,11 @@ svg.msg-context-icon {
 .msg-bubble h1 { font-size: 16px; }
 .msg-bubble h2 { font-size: 15px; }
 .msg-bubble h3 { font-size: 14px; }
+.msg-bubble .msg-large-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .msg-bubble pre.msg-stream-plain {
   margin: 0;
   padding: 12px;

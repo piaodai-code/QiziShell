@@ -24,7 +24,7 @@ contextBridge.exposeInMainWorld('qizi', {
     return () => ipcRenderer.removeListener('openclaw:history:message-action', handler);
   },
   checkConnection: () => ipcRenderer.invoke('openclaw:check'),
-  loadHistory: () => ipcRenderer.invoke('openclaw:history'),
+  loadHistory: (payload) => ipcRenderer.invoke('openclaw:history', payload),
   loadHistoryForSession: (payload) => ipcRenderer.invoke('openclaw:history:session', payload),
   listMessageArchives: () => ipcRenderer.invoke('openclaw:archive:list'),
   readMessageArchive: (sessionKey) => ipcRenderer.invoke('openclaw:archive:read', sessionKey),
