@@ -89,6 +89,11 @@ const https = require('https');
 const http = require('http');
 const { GatewayWsClient, isRetryableGatewayDisconnect } = require('./gateway-ws');
 const { extractMessageSentTimeFromRaw, stripLeadingEnvelopeTimestamp, stripSenderUntrustedMetadata } = require('./message-time');
+const { loadSnapshot: loadSystemZoneSnapshot } = require('./system-local-time');
+
+ipcMain.on('qizi:local-time-zone', (event) => {
+  event.returnValue = loadSystemZoneSnapshot();
+});
 const {
   initSttManager,
   getSttStatus,

@@ -218,10 +218,12 @@
   }
 
   function formatMessageMeta(m) {
-    const parts = [];
-    const time = String(m.sentTime || m.time || '').trim();
-    if (time) parts.push(time);
-    return parts.join(' · ');
+    if (m && typeof m.sentAtMs === 'number' && Number.isFinite(m.sentAtMs)
+      && typeof window.MessageTime?.formatGatewayEnvelopeTime === 'function') {
+      const formatted = window.MessageTime.formatGatewayEnvelopeTime(m.sentAtMs);
+      if (formatted) return formatted;
+    }
+    return String(m?.sentTime || m?.time || '').trim();
   }
 
   function renderSelectCheckHtml(index, msg, multiSelect) {

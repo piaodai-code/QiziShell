@@ -1,4 +1,5 @@
 const { formatForwardForAgent } = require('./forward-format');
+const { localParts } = require('./message-time');
 const {
   isMeetingClosingMessage,
   isModeratorPostCloseStub,
@@ -86,7 +87,11 @@ function findModeratorFinalMessage(messages, moderatorAgentId) {
 function formatMeetingNoteStamp(input) {
   const date = input ? new Date(input) : new Date();
   if (Number.isNaN(date.getTime())) return '';
+  const parts = typeof localParts === 'function' ? localParts(date.getTime()) : null;
   const pad = (n) => String(n).padStart(2, '0');
+  if (parts) {
+    return `${parts.year}-${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
+  }
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 

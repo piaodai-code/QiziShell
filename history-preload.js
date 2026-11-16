@@ -1,5 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+function readSystemZoneSnapshot() {
+  try {
+    return ipcRenderer.sendSync('qizi:local-time-zone');
+  } catch {
+    return null;
+  }
+}
+
+contextBridge.exposeInMainWorld('qiziLocalTime', {
+  snapshot: readSystemZoneSnapshot(),
+});
+
 contextBridge.exposeInMainWorld('qiziHistory', {
   getContext: () => ipcRenderer.invoke('openclaw:history:context'),
   loadLocalMessages: (payload) => ipcRenderer.invoke('openclaw:history:read-local', payload),

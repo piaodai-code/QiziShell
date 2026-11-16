@@ -306,7 +306,8 @@
     const parts = [];
     const speaker = speakerDisplay(m);
     if (speaker.label) parts.push(speaker.label);
-    if (m.time) parts.push(m.time);
+    const clock = window.MessageTime?.messageClockLabel?.(m) || m.time;
+    if (clock) parts.push(clock);
     if (m.streaming) parts.push('输入中…');
     return parts.join(' · ');
   }

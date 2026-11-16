@@ -1079,7 +1079,7 @@ function buildMessageRow(index, options = {}) {
     ${renderMessageAvatarHtml(m.who)}
     <div class="msg-content">
       <div class="msg-bubble"></div>
-      <div class="msg-meta">${m.time || ''}${m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '')}</div>
+      <div class="msg-meta">${messageClockLabel(m)}${m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '')}</div>
     </div>
     ${renderMessageSelectCheckHtml(index)}
   `;
@@ -1841,7 +1841,8 @@ function buildMergedForwardSnapshot(indices) {
     if (!isMessageSelectable(msg)) continue;
     const text = getMessageSelectableText(msg);
     const author = getMessageAuthorLabel(msg);
-    const stamp = msg.time ? ` · ${msg.time}` : '';
+    const clock = messageClockLabel(msg);
+    const stamp = clock ? ` · ${clock}` : '';
     blocks.push(`【${author}${stamp}】\n${text}`);
     const originalTime = resolveMessageOriginalSentTime(msg);
     if (!earliestTime && originalTime) earliestTime = originalTime;
@@ -1861,7 +1862,7 @@ function buildExportEntryForMessage(msg) {
   const forwardRef = resolveMessageForwardRef(msg);
   const entry = {
     author: getMessageAuthorLabel(msg),
-    time: msg.time || '',
+    time: messageClockLabel(msg),
     text: contextMenuSource === 'meeting'
       ? String(msg.text || '').trim()
       : (msg.who === 'me'
@@ -2405,6 +2406,17 @@ function clipDraftPreview(text) {
 }
 
 function formatDraftTime(ms) {
+  const parts = typeof MessageTimeApi.localParts === 'function' ? MessageTimeApi.localParts(ms || 0) : null;
+  const todayParts = typeof MessageTimeApi.localParts === 'function' ? MessageTimeApi.localParts(Date.now()) : null;
+  if (parts && todayParts) {
+    const hm = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+    const todayKey = Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day);
+    const dayKey = Date.UTC(parts.year, parts.month - 1, parts.day);
+    const days = Math.round((todayKey - dayKey) / 86400000);
+    if (days === 0) return hm;
+    if (days === 1) return `昨天 ${hm}`;
+    return `${parts.month}月${parts.day}日 ${hm}`;
+  }
   const date = new Date(ms || 0);
   const hm = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
   const today = new Date();
@@ -4145,7 +4157,18 @@ function splitMessageForSend(userMsg) {
   };
 }
 
+function messageClockLabel(msg) {
+  if (typeof MessageTimeApi.messageClockLabel === 'function') {
+    return MessageTimeApi.messageClockLabel(msg);
+  }
+  return msg?.time || '';
+}
+
 function now() {
+  if (typeof MessageTimeApi.formatClock === 'function') {
+    const clock = MessageTimeApi.formatClock(Date.now());
+    if (clock) return clock;
+  }
   const d = new Date();
   return d.getHours().toString().padStart(2, '0') + ':' +
          d.getMinutes().toString().padStart(2, '0');
@@ -4704,7 +4727,7 @@ function updateStreamingBubble(runId) {
   const meta = row.querySelector('.msg-meta');
   if (meta) {
     const suffix = m.queued ? ' · 排队中' : (m.streaming ? ' · 输入中…' : '');
-    const nextMeta = `${m.time || ''}${suffix}`;
+    const nextMeta = `${messageClockLabel(m)}${suffix}`;
     if (meta.textContent !== nextMeta) meta.textContent = nextMeta;
   }
   if (isMessageListPinned(messagesEl)) {

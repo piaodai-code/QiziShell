@@ -24,6 +24,7 @@
   const imgModal = document.getElementById('img-modal');
   const imgModalImg = document.getElementById('img-modal-img');
   const composerEl = document.getElementById('composer');
+  const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
   const composerBodyEl = document.getElementById('composer-body');
   const contextMenuEl = document.getElementById('msg-context-menu');
   const quoteEl = document.getElementById('composer-quote');
@@ -41,6 +42,7 @@
   let connected = false;
   let busy = false;
   let pinned = true;
+  let suppressScrollPin = 0;
   let activityTimer = null;
   let activityStarted = 0;
   let activityDetail = '';
@@ -63,6 +65,10 @@
   }
 
   function nowLabel() {
+    if (typeof window.MessageTime?.formatClock === 'function') {
+      const clock = window.MessageTime.formatClock(Date.now());
+      if (clock) return clock;
+    }
     return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
@@ -332,12 +338,41 @@
     return messagesEl.scrollHeight - messagesEl.clientHeight - messagesEl.scrollTop <= 40;
   }
 
+  function positionScrollBottomButton() {
+    if (!scrollBottomBtn) return;
+    const height = composerEl && !composerEl.hidden ? composerEl.offsetHeight : 0;
+    scrollBottomBtn.style.bottom = `${height + 12}px`;
+  }
+
+  function syncScrollBottomButton() {
+    positionScrollBottomButton();
+    if (!scrollBottomBtn) return;
+    scrollBottomBtn.hidden = !(messages.length > 0 && !pinned && !nearBottom());
+  }
+
+  function pinToLatest() {
+    pinned = true;
+    const apply = () => {
+      suppressScrollPin += 1;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+      suppressScrollPin -= 1;
+    };
+    apply();
+    requestAnimationFrame(() => {
+      if (!pinned) return;
+      apply();
+      syncScrollBottomButton();
+    });
+    syncScrollBottomButton();
+  }
+
   function render(options = {}) {
     const prevScroll = messagesEl.scrollTop;
     const follow = !options.preserveScroll && (pinned || nearBottom());
     messagesEl.classList.toggle('is-multiselect', multiSelectMode && messages.length > 0);
     if (!messages.length) {
       messagesEl.innerHTML = '<div class="msg-hint">No messages yet</div>';
+      syncScrollBottomButton();
       return;
     }
     messagesEl.innerHTML = '';
@@ -355,8 +390,11 @@
       messagesEl.appendChild(row);
     });
     window.QiziCodeBlocks?.decorate(messagesEl);
-    if (follow) messagesEl.scrollTop = messagesEl.scrollHeight;
-    else if (options.preserveScroll) messagesEl.scrollTop = prevScroll;
+    if (follow) {
+      pinned = true;
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } else if (options.preserveScroll) messagesEl.scrollTop = prevScroll;
+    syncScrollBottomButton();
   }
 
   function replaceHistory(list) {
@@ -1048,9 +1086,11 @@
     }
     function onDrag(event) {
       applyHeight(event.clientY);
+      positionScrollBottomButton();
     }
     function onUp(event) {
       if (typeof event.clientY === 'number') applyHeight(event.clientY);
+      positionScrollBottomButton();
       document.removeEventListener('mousemove', onDrag);
       document.removeEventListener('mouseup', onUp);
     }
@@ -1059,9 +1099,33 @@
   bindComposerResize();
 
   messagesEl.addEventListener('scroll', () => {
+    if (suppressScrollPin > 0) return;
     pinned = nearBottom();
+    syncScrollBottomButton();
     hideContextMenu();
   });
+
+  if (scrollBottomBtn) {
+    scrollBottomBtn.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+    });
+    scrollBottomBtn.addEventListener('click', () => {
+      pinToLatest();
+    });
+  }
+
+  window.addEventListener('resize', () => {
+    if (pinned && !nearBottom()) pinToLatest();
+    else syncScrollBottomButton();
+  });
+
+  if (typeof ResizeObserver !== 'undefined' && composerEl) {
+    const composerResizeObserver = new ResizeObserver(() => {
+      if (pinned && !nearBottom()) pinToLatest();
+      else syncScrollBottomButton();
+    });
+    composerResizeObserver.observe(composerEl);
+  }
 
   window.bindComposerMarkdownInput?.(inputEl);
 

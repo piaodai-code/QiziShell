@@ -1,9 +1,10 @@
+const { formatClock } = require('./message-time');
+
 /**
  * Shell 侧会议 transcript（UI 唯一数据源，与 Gateway main 私聊无关）
  */
 function nowTimeLabel() {
-  const d = new Date();
-  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  return formatClock(Date.now());
 }
 
 function createMeetingTranscript(config) {

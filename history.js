@@ -105,6 +105,13 @@ function originalSentTime(msg) {
   return String(msg?.sentTime || msg?.time || '').trim();
 }
 
+function messageClockLabel(msg) {
+  if (typeof window.MessageTime?.messageClockLabel === 'function') {
+    return window.MessageTime.messageClockLabel(msg);
+  }
+  return msg?.time || '';
+}
+
 function stripHeavyPayload(text) {
   return String(text || '')
     .replace(/\[image:data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+\]/g, '')
@@ -181,7 +188,7 @@ function copyTextForMessage(msg) {
 function exportEntryForMessage(msg) {
   const entry = {
     author: historyAuthorLabel(msg),
-    time: msg?.time || '',
+    time: messageClockLabel(msg),
     text: String(msg?.text || '').replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n').trim(),
   };
   if (msg?.who === 'me' && msg.forward?.text) {
@@ -223,7 +230,8 @@ function preparedForwardForSelection(indices) {
     if (!isHistoryMessageSelectable(msg)) continue;
     const text = selectableText(msg);
     const author = historyAuthorLabel(msg);
-    const stamp = msg.time ? ` · ${msg.time}` : '';
+    const clock = messageClockLabel(msg);
+    const stamp = clock ? ` · ${clock}` : '';
     blocks.push(`【${author}${stamp}】\n${text}`);
     const sent = originalSentTime(msg);
     if (!earliestTime && sent) earliestTime = sent;

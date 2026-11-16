@@ -2,11 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { HermesClient } = require('./hermes-client');
+const { formatClock } = require('./message-time');
 
 const MAX_TRANSCRIPT = 200;
 
 function nowLabel() {
-  return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return formatClock(Date.now());
 }
 
 function readJson(file) {
