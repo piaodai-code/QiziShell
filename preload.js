@@ -82,6 +82,11 @@ contextBridge.exposeInMainWorld('qizi', {
     ipcRenderer.on('openclaw:tool-event', handler);
     return () => ipcRenderer.removeListener('openclaw:tool-event', handler);
   },
+  onAgentLifecycle: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('openclaw:agent-lifecycle', handler);
+    return () => ipcRenderer.removeListener('openclaw:agent-lifecycle', handler);
+  },
   onChatSegment: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('openclaw:chat-segment', handler);

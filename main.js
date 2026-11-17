@@ -2663,15 +2663,55 @@ function isConciseMessagesEnabled() {
 }
 
 function isDeliveryMirrorNoticeText(text) {
-  const raw = String(text || '').trim();
+  const raw = stripLeadingEnvelopeTimestamp(stripSenderUntrustedMetadata(String(text || ''))).trim();
   if (!raw) return false;
-  if (/^Model switched from\b/i.test(raw)) return true;
-  return /Learned:\s*updated\b/.test(raw);
+  if (/model switched from\b/i.test(raw)) return true;
+  if (/selected model\b/i.test(raw) && /\brestored\b/i.test(raw)) return true;
+  if (/learned:\s*updated\b/i.test(raw)) return true;
+  if (/模型回退/.test(raw)) return true;
+  return false;
 }
 
+function deliveryMirrorModelName(model) {
+  if (typeof model === 'string') return model.trim().toLowerCase();
+  if (model && typeof model === 'object') {
+    return String(model.id || model.name || model.model || '').trim().toLowerCase();
+  }
+  return '';
+}
+
+function rawAssistantText(message) {
+  if (!message) return '';
+  if (typeof message === 'string') return message;
+  if (typeof message.content === 'string') return message.content;
+  if (!Array.isArray(message.content)) return '';
+  return message.content.map((block) => {
+    if (typeof block === 'string') return block;
+    if (typeof block?.text === 'string') return block.text;
+    return '';
+  }).filter(Boolean).join('\n');
+}
+
+/** 系统留痕，不是模型的正式回复。channel-final 是投递出去的正文镜像，不能当成回退通知丢掉。 */
 function isDeliveryMirrorNotice(message) {
-  if (message?.openclawDeliveryMirror) return true;
-  return isDeliveryMirrorNoticeText(extractMessageText(message));
+  if (typeof message === 'string') return isDeliveryMirrorNoticeText(message);
+  if (!message || typeof message !== 'object') return false;
+  const mirror = message.openclawDeliveryMirror || message.openclaw_delivery_mirror;
+  const kind = mirror && typeof mirror === 'object' ? String(mirror.kind || '').trim() : '';
+  if (kind === 'channel-final') return false;
+  const provider = String(message.provider || '').trim().toLowerCase();
+  const model = deliveryMirrorModelName(message.model);
+  const marked = Boolean(mirror)
+    || (provider === 'openclaw' && (model === 'delivery-mirror' || model === 'gateway-injected'));
+  if (marked) return true;
+  return isDeliveryMirrorNoticeText(rawAssistantText(message))
+    || isDeliveryMirrorNoticeText(extractMessageText(message));
+}
+
+function isDeliveryMirrorEvent(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  if (isDeliveryMirrorNotice(payload) || isDeliveryMirrorNotice(payload.message)) return true;
+  return isDeliveryMirrorNoticeText(payload.text) || isDeliveryMirrorNoticeText(payload.deltaText);
 }
 
 function conciseDisplayText(run) {
@@ -3393,6 +3433,8 @@ function markOwnedRunToolActivity(gatewayRunId, phase) {
   matched.run.lastEventAt = Date.now();
   matched.run.quietPolls = 0;
   if (phase === 'result') matched.run.sawToolResult = true;
+  // 超时按「多久没有新事件」计算。命令还在跑就不能把这一轮收掉。
+  armRunTimeout(matched.clientRunId, matched.run);
 }
 
 function isToolAgentEventPayload(payload) {
@@ -3418,6 +3460,16 @@ function handleGatewayAgentLifecycleEvent(payload) {
   if (phase !== 'end' && phase !== 'error') return;
   const gatewayRunId = payload.runId == null ? '' : String(payload.runId);
   if (!gatewayRunId) return;
+  const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
+  if (!sessionKey || sessionKey === getSessionKey()) {
+    if (!(activeMeetingSessionKey && sessionKey === activeMeetingSessionKey) && !isMeetingA2ASessionKey(sessionKey)) {
+      broadcastToRenderers('openclaw:agent-lifecycle', {
+        phase,
+        sessionKey,
+        runId: gatewayRunId,
+      });
+    }
+  }
   const matched = findClientRunByGatewayRunId(gatewayRunId);
   if (!matched) return;
   const { clientRunId, run } = matched;
@@ -3473,7 +3525,7 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
     const stopReason = assistantStopReason(payload.message) || assistantStopReason(payload);
     const messageText = payload.message == null ? '' : extractAssistantStreamText(payload.message);
     const deltaText = typeof payload.deltaText === 'string' ? payload.deltaText : '';
-    if (isDeliveryMirrorNotice(payload.message) || isDeliveryMirrorNoticeText(messageText) || isDeliveryMirrorNoticeText(deltaText) || isDeliveryMirrorNoticeText(payload.text)) {
+    if (isDeliveryMirrorEvent(payload)) {
       return;
     }
     if (payload.state === 'delta') {
@@ -4088,6 +4140,13 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   run.stableHistoryPolls = 0;
   run.quietPolls = 0;
   clearRunRecoverTimer(run);
+  armRunTimeout(clientRunId, run);
+
+  if (isConciseMessagesEnabled() && isDeliveryMirrorEvent(payload)) {
+    // 模型回退、skill 留痕这类系统消息带 stop，不能把它当成这一轮的正式回复。
+    run.suppressProcessText = true;
+    return;
+  }
 
   if (payload.state === 'delta') {
     if (isConciseMessagesEnabled()) {
@@ -4110,10 +4169,6 @@ function handleOwnedGatewayChatEvent(payload, matched) {
 
   if (payload.state === 'final') {
     const stopReason = assistantStopReason(payload.message);
-    if (isConciseMessagesEnabled() && isDeliveryMirrorNotice(payload.message)) {
-      run.suppressProcessText = true;
-      return;
-    }
     if (isConciseMessagesEnabled() && stopReason !== 'stop') {
       // 没有 stop 的 final 只是工具轮之间的过程稿。收掉的话界面会变空、发送变亮，
       // 而网关还在跑；下一段全文再进来就会另开一个黑框气泡。

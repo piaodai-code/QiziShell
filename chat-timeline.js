@@ -421,7 +421,6 @@
         appendFinalBubble({ runId, text: '', error: err });
       }
       removeToolMessages();
-      if (global.ToolStream?.clearState) global.ToolStream.clearState(toolState);
       if (key) finishedRuns.add(key);
       onRender();
       if (onRunDone) onRunDone({ runId, text, error: err, aborted });

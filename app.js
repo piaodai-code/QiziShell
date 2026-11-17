@@ -326,6 +326,15 @@ function ensureChatTimeline() {
         const lastThem = [...messages].reverse().find((m) => m.who === 'them' && !isToolTimelineMessage(m));
         if (lastThem?.text) updateModelBadge(lastThem.text);
       }
+      // 正文回合结束了，命令还在跑。这时收掉的话发送键会亮，Working 条也没了。
+      if (toolsRunning()) {
+        activeRunId = null;
+        stopStreamHistoryPoll();
+        externalSessionRunId = null;
+        setStatus('工具运行中…', 'pending');
+        updateComposerSendBtn();
+        return;
+      }
       setBusy(false);
       activeRunId = null;
       stopStreamHistoryPoll();
@@ -352,6 +361,9 @@ function applyGatewayToolEvent(payload) {
   const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
   if (sessionKey && sessionKey !== currentSessionKey) return;
   if (window.MeetingView?.isVisible?.()) return;
+  if (!busy && !toolHold && !toolsRunning()) {
+    ensureChatTimeline().clearTools?.();
+  }
   ensureChatTimeline().enqueueTool({ payload, runId: activeRunId });
 }
 
@@ -3170,8 +3182,11 @@ function isExecCompletionNoticeText(text) {
 function isDeliveryMirrorNoticeText(text) {
   const raw = String(text || '').trim();
   if (!raw) return false;
-  if (/^Model switched from\b/i.test(raw)) return true;
-  return /Learned:\s*updated\b/.test(raw);
+  if (/model switched from\b/i.test(raw)) return true;
+  if (/selected model\b/i.test(raw) && /\brestored\b/i.test(raw)) return true;
+  if (/learned:\s*updated\b/i.test(raw)) return true;
+  if (/模型回退/.test(raw)) return true;
+  return false;
 }
 
 function isProcessAssistantMessage(msg) {
@@ -3833,6 +3848,7 @@ function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages)
 
 function clearStaleStreamingState(options = {}) {
   const force = options.force === true;
+  if (toolsRunning() || toolHoldFresh()) return false;
   let cleared = false;
   for (const message of messages) {
     if (message.streaming) {
@@ -4782,7 +4798,7 @@ async function tickSessionWatch() {
     if (!sessionInfo.hasActiveRun) {
       // 本机这一轮还在，网关的 hasActiveRun 却会在工具之间闪成 false。
       // 这时收掉气泡并放开发送，前台就像已经结束，后台其实还在跑。
-      if (isLocalOwnedActiveRun()) return;
+      if (isLocalOwnedActiveRun() || toolsRunning() || toolHoldFresh()) return;
       const waiting = busy || messages.some((m) => m.streaming);
       const liveRecently = messages.some((m) => {
         if (m.who !== 'them' || !m.streaming || isToolTimelineMessage(m)) return false;
@@ -7082,6 +7098,26 @@ let runActivityTimer = null;
 let runActivityStarted = 0;
 let runActivityEntries = [];
 let runActivityExpanded = false;
+let toolHold = false;
+let toolHoldRunId = '';
+let toolHoldTouchedAt = 0;
+
+function toolsRunning(entries = runActivityEntries) {
+  return (Array.isArray(entries) ? entries : []).some((entry) => entry && entry.phase !== 'result');
+}
+
+function toolHoldFresh() {
+  return toolHold && Date.now() - toolHoldTouchedAt < 8000;
+}
+
+function rememberToolHold(entries) {
+  const running = (Array.isArray(entries) ? entries : []).filter((entry) => entry && entry.phase !== 'result');
+  if (!running.length) return;
+  toolHold = true;
+  toolHoldTouchedAt = Date.now();
+  const latest = running[running.length - 1];
+  if (latest.runId != null && String(latest.runId)) toolHoldRunId = String(latest.runId);
+}
 
 function formatRunActivityElapsed(ms) {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -7167,14 +7203,18 @@ function stopRunActivity() {
 
 function noteRunActivityTools(entries) {
   if (window.MeetingView?.isVisible?.()) return;
-  const live = busy
-    || runActivityTimer
-    || messages.some((m) => m.who === 'them' && m.streaming && !isToolTimelineMessage(m));
-  if (!live) {
-    chatTimeline?.clearTools?.();
-    return;
+  const list = Array.isArray(entries) ? entries : [];
+  const running = toolsRunning(list);
+  if (!running && !busy && !runActivityTimer && !toolHold) return;
+  runActivityEntries = list;
+  if (running) {
+    rememberToolHold(list);
+    if (!busy) {
+      busy = true;
+      updateComposerSendBtn();
+      setStatus('工具运行中…', 'pending');
+    }
   }
-  runActivityEntries = Array.isArray(entries) ? entries : [];
   if (!runActivityTimer) startRunActivity({ reset: false });
   else {
     paintRunActivity();
@@ -7182,12 +7222,38 @@ function noteRunActivityTools(entries) {
   }
 }
 
+function applyAgentLifecycle(payload) {
+  if (!payload || window.MeetingView?.isVisible?.()) return;
+  const sessionKey = typeof payload.sessionKey === 'string' ? payload.sessionKey.trim() : '';
+  if (sessionKey && sessionKey !== currentSessionKey) return;
+  if (payload.phase !== 'end' && payload.phase !== 'error') return;
+  const runId = payload.runId == null ? '' : String(payload.runId);
+  if (runId && toolHoldRunId && runId !== toolHoldRunId && toolsRunning()) return;
+  runActivityEntries = runActivityEntries.map((entry) => {
+    if (!runId || entry.runId == null || String(entry.runId) === runId) {
+      return { ...entry, phase: 'result' };
+    }
+    return entry;
+  });
+  toolHold = false;
+  toolHoldRunId = '';
+  toolHoldTouchedAt = 0;
+  if (toolsRunning()) return;
+  if (!isLocalOwnedActiveRun()) setBusy(false);
+  else if (runActivityExpanded) paintRunActivityLog();
+}
+
 function setBusy(value) {
   const wasBusy = busy;
   busy = value;
   updateComposerSendBtn();
   if (value) startRunActivity({ reset: !wasBusy && !runActivityTimer });
-  else stopRunActivity();
+  else {
+    toolHold = false;
+    toolHoldRunId = '';
+    toolHoldTouchedAt = 0;
+    stopRunActivity();
+  }
 }
 
 if (runActivityToggle) {
@@ -7871,6 +7937,12 @@ if (window.qizi.onSessionChat) {
 if (window.qizi.onToolEvent) {
   window.qizi.onToolEvent((payload) => {
     applyGatewayToolEvent(payload);
+  });
+}
+
+if (window.qizi.onAgentLifecycle) {
+  window.qizi.onAgentLifecycle((payload) => {
+    applyAgentLifecycle(payload);
   });
 }
 
