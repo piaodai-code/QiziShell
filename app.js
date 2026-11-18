@@ -1018,6 +1018,7 @@ function bindMessageListScrollPin(el) {
   if (!el || el.dataset.scrollPinBound === '1') return;
   el.dataset.scrollPinBound = '1';
   el.addEventListener('wheel', (event) => {
+    if (messageContextMenuJitterWindow()) return;
     if (event.deltaY >= -1) return;
     if (Math.abs(event.deltaX) > Math.abs(event.deltaY)) return;
     if (el.scrollHeight <= el.clientHeight + 1) return;
@@ -1033,6 +1034,11 @@ function bindMessageListScrollPin(el) {
     });
   }, { passive: true });
   el.addEventListener('scroll', () => onMessageListScroll(el), { passive: true });
+  el.addEventListener('wheel', (event) => {
+    if (!messageContextMenuJitterWindow()) return;
+    if (Math.abs(event.deltaY) >= 48 || Math.abs(event.deltaX) >= 48) return;
+    event.preventDefault();
+  }, { passive: false });
   el.addEventListener('load', (event) => {
     if (event.target?.tagName !== 'IMG') return;
     if (isMessageListPinned(el)) pinMessageList(el);
@@ -1164,6 +1170,9 @@ function render(options = {}) {
   if (window.MeetingView?.isVisible?.()) return;
   if (!messagesEl) return;
   const prevScrollTop = messagesEl.scrollTop;
+  const wasPinned = isMessageListPinned(messagesEl);
+  const wasNearBottom = isMessageListNearBottom(messagesEl);
+  const anchorIndex = Number(messagesEl.querySelector('.msg[data-msg-index]')?.dataset?.msgIndex);
   normalizeStreamingFlags();
   renderEpoch += 1;
   const epoch = renderEpoch;
@@ -1180,15 +1189,24 @@ function render(options = {}) {
   for (let i = 0; i < messages.length; i += 1) {
     if (!isToolTimelineMessage(messages[i])) visible.push(i);
   }
+  suppressScrollPinUpdate += 1;
   messagesEl.innerHTML = '';
+  suppressScrollPinUpdate -= 1;
   if (visible.length === 0) {
     messagesEl.innerHTML = '<div class="msg-hint">还没有消息，发个试试 👋</div>';
     return;
   }
   const tailCount = 48;
   const followTail = options.scrollToBottom === true
-    || (options.preserveScroll !== true && isMessageListPinned(messagesEl));
-  const tailStart = followTail ? Math.max(0, visible.length - tailCount) : 0;
+    || (options.preserveScroll !== true && wasPinned);
+  let rangeStart = 0;
+  if (followTail) {
+    rangeStart = Math.max(0, visible.length - tailCount);
+  } else if (Number.isInteger(anchorIndex) && anchorIndex >= 0) {
+    const at = visible.indexOf(anchorIndex);
+    rangeStart = at >= 0 ? at : Math.max(0, visible.length - tailCount);
+  }
+  const stayAtBottom = followTail || (options.preserveScroll === true && wasPinned && wasNearBottom);
   const paintIndexes = (indexes) => {
     const frag = document.createDocumentFragment();
     for (const index of indexes) {
@@ -1200,16 +1218,16 @@ function render(options = {}) {
     }
     return frag;
   };
-  messagesEl.appendChild(paintIndexes(visible.slice(tailStart)));
+  messagesEl.appendChild(paintIndexes(visible.slice(rangeStart)));
   settleMessageListScroll(messagesEl, {
     prevScrollTop,
-    preserveScroll: options.preserveScroll === true && tailStart === 0,
-    scrollToBottom: options.scrollToBottom === true || tailStart > 0,
+    preserveScroll: !stayAtBottom,
+    scrollToBottom: stayAtBottom,
   });
   requestAnimationFrame(() => upgradeDeferredMarkdown(epoch));
-  historyPaint = tailStart === 0 ? null : {
+  historyPaint = rangeStart === 0 ? null : {
     epoch,
-    cursor: tailStart,
+    cursor: rangeStart,
     paint(count) {
       if (this.epoch !== renderEpoch || this.cursor <= 0 || !messagesEl) return;
       const from = Math.max(0, this.cursor - count);
@@ -2024,13 +2042,17 @@ function setMultiSelectMode(enabled) {
   renderActiveMessageView({ preserveScroll: true });
 }
 
+function messageIndexFromRow(row) {
+  const index = Number(row?.dataset?.msgIndex);
+  return Number.isInteger(index) && index >= 0 ? index : -1;
+}
+
 function updateMultiSelectRowUI(index) {
   const container = contextMenuSource === 'meeting' || (multiSelectMode && window.MeetingView?.isVisible?.())
     ? getMeetingMessagesEl()
     : messagesEl;
   if (!container) return;
-  const rows = container.querySelectorAll('.msg');
-  const row = rows[index];
+  const row = container.querySelector(`.msg[data-msg-index="${index}"]`);
   if (!row) {
     renderActiveMessageView({ preserveScroll: true });
     return;
@@ -2718,10 +2740,41 @@ async function applyHistoryMessageAction(payload) {
   }
 }
 
+let messageContextMenuOpenedAt = 0;
+let messageContextMenuScrollAnchor = null;
+
+function messageContextMenuJitterWindow() {
+  return Boolean(msgContextMenuEl && !msgContextMenuEl.hidden)
+    && performance.now() - messageContextMenuOpenedAt < 420;
+}
+
+function noteMessageContextMenuOpened() {
+  messageContextMenuOpenedAt = performance.now();
+  const list = activeMessageList();
+  messageContextMenuScrollAnchor = list ? list.scrollTop : null;
+}
+
+function hideMessageContextMenuOnScroll(scrollEl) {
+  if (!msgContextMenuEl || msgContextMenuEl.hidden) return;
+  const anchor = messageContextMenuScrollAnchor;
+  const delta = scrollEl && anchor != null ? Math.abs(scrollEl.scrollTop - anchor) : 0;
+  if (messageContextMenuJitterWindow() && delta < 32) {
+    if (scrollEl && delta > 0.5) {
+      suppressScrollPinUpdate += 1;
+      scrollEl.scrollTop = anchor;
+      scrollEl.dataset.pinScrollTop = String(anchor);
+      suppressScrollPinUpdate -= 1;
+    }
+    return;
+  }
+  hideMessageContextMenu();
+}
+
 function hideMessageContextMenu() {
   if (!msgContextMenuEl) return;
   msgContextMenuEl.hidden = true;
   contextMenuTargetIndex = -1;
+  messageContextMenuScrollAnchor = null;
 }
 
 function hideComposerContextMenu() {
@@ -2827,6 +2880,7 @@ function showMessageContextMenu(x, y, msgIndex, source = 'chat') {
   const editBtn = msgContextMenuEl.querySelector('[data-action="copy-edit"]');
   if (editBtn) editBtn.disabled = !getMessageSelectableText(getActiveMessages()[msgIndex]);
   msgContextMenuEl.hidden = false;
+  noteMessageContextMenuOpened();
   const menuRect = msgContextMenuEl.getBoundingClientRect();
   const maxX = window.innerWidth - menuRect.width - 8;
   const maxY = window.innerHeight - menuRect.height - 8;
@@ -8028,9 +8082,8 @@ if (messagesEl) {
     if (multiSelectMode) {
       const row = e.target.closest('.msg');
       if (row && !e.target.closest('.msg-quote-toggle, a, .msg-code-btn, .msg-bubble img')) {
-        const rows = [...messagesEl.querySelectorAll('.msg')];
-        const idx = rows.indexOf(row);
-        if (idx >= 0) {
+        const idx = messageIndexFromRow(row);
+        if (idx >= 0 && idx < messages.length) {
           e.preventDefault();
           toggleMultiSelectIndex(idx);
           return;
@@ -8048,8 +8101,7 @@ if (messagesEl) {
     const row = e.target.closest('.msg');
     if (!row || !messagesEl.contains(row)) return;
     e.preventDefault();
-    const rows = [...messagesEl.querySelectorAll('.msg')];
-    const msgIndex = rows.indexOf(row);
+    const msgIndex = messageIndexFromRow(row);
     if (msgIndex < 0 || msgIndex >= messages.length) return;
     const msg = messages[msgIndex];
     if (isToolTimelineMessage(msg)) return;
@@ -8059,7 +8111,7 @@ if (messagesEl) {
     }
     showMessageContextMenu(e.clientX, e.clientY, msgIndex);
   });
-  messagesEl.addEventListener('scroll', hideMessageContextMenu);
+  messagesEl.addEventListener('scroll', () => hideMessageContextMenuOnScroll(messagesEl));
 }
 
 if (msgContextMenuEl) {
@@ -8105,6 +8157,7 @@ if (msgContextMenuEl) {
 
 function onContextMenuSurfaceClick(e) {
   if (msgContextMenuEl && !msgContextMenuEl.hidden) {
+    if (messageContextMenuJitterWindow()) return;
     if (!e.target.closest('#msg-context-menu')) hideMessageContextMenu();
   }
   if (composerContextMenuEl && !composerContextMenuEl.hidden) {
@@ -10407,6 +10460,7 @@ window.QiziShellText = {
 window.QiziShellMsgOps = {
   showContextMenu: (x, y, index, source = 'meeting') => showMessageContextMenu(x, y, index, source),
   hideContextMenu: hideMessageContextMenu,
+  hideContextMenuOnScroll: hideMessageContextMenuOnScroll,
   isMultiSelectMode: () => multiSelectMode,
   exitMultiSelectMode,
   toggleMultiSelectIndex,

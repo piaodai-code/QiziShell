@@ -797,7 +797,7 @@
     });
 
     messagesEl.addEventListener('scroll', () => {
-      window.QiziShellMsgOps?.hideContextMenu?.();
+      window.QiziShellMsgOps?.hideContextMenuOnScroll?.(messagesEl);
     });
   }
 
