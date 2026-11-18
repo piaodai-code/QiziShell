@@ -1478,12 +1478,23 @@
     syncSendButton();
     flushQueuedSend();
   });
+  function paintStreamingText() {
+    const last = messages[messages.length - 1];
+    if (!last?.streaming) return false;
+    const row = messagesEl.lastElementChild;
+    const pre = row?.querySelector('.msg-stream-plain');
+    if (!pre || row.classList.contains('me')) return false;
+    pre.textContent = last.text || '…';
+    if (pinned) messagesEl.scrollTop = messagesEl.scrollHeight;
+    return true;
+  }
+
   window.maintaining.onStream((payload) => {
     const current = streamingMessage();
     current.text = payload?.text || '';
     busy = true;
     if (activityDetail === 'Waiting for Hermes') noteWorking('Writing…');
-    render();
+    if (!paintStreamingText()) render();
     syncSendButton();
   });
   window.maintaining.onComplete((payload) => {

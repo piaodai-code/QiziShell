@@ -29923,6 +29923,14 @@ var QiziMarkdownEditor = (() => {
   function isFenceLine(text) {
     return /^\s{0,3}(`{3,}|~{3,})/.test(text);
   }
+  function isSingleSetextMarker(text) {
+    return /^ {0,3}[-=][ \t]*$/.test(String(text || ""));
+  }
+  function setextUnderlineText(doc2, from, to) {
+    if (to <= from) return "";
+    const end = Math.min(doc2.length, to - 1);
+    return doc2.lineAt(end).text;
+  }
   function mergeHides(ranges) {
     ranges.sort((a, b) => a.from - b.from || b.to - a.to);
     const out = [];
@@ -30019,8 +30027,10 @@ var QiziMarkdownEditor = (() => {
         const name2 = node.name;
         if (name2 === "Document") return;
         if (frontEnd >= 0 && node.to <= frontEnd) return false;
-        if (HEADING[name2]) addLine(doc2.lineAt(node.from).from, HEADING[name2]);
-        else if (name2 === "FencedCode" || name2 === "CodeBlock") {
+        if (HEADING[name2]) {
+          const underline = name2 === "SetextHeading1" || name2 === "SetextHeading2" ? setextUnderlineText(doc2, node.from, node.to) : "";
+          if (!isSingleSetextMarker(underline)) addLine(doc2.lineAt(node.from).from, HEADING[name2]);
+        } else if (name2 === "FencedCode" || name2 === "CodeBlock") {
           addLineSpan(node.from, node.to, "cm-md-codeblock");
           if (name2 === "FencedCode" && !blockActive(node.from, node.to)) {
             const open = doc2.lineAt(node.from);
@@ -30062,7 +30072,10 @@ var QiziMarkdownEditor = (() => {
         if (name2 === "HeaderMark") {
           const line = doc2.lineAt(node.from);
           const mark = doc2.sliceString(node.from, node.to).trim();
-          if (mark && !mark.includes("#") && line.text.trim() === mark) {
+          if (mark === "-" && isSingleSetextMarker(line.text)) {
+            const to = isSpace(doc2.sliceString(node.to, node.to + 1)) ? node.to + 1 : node.to;
+            hideSpan(node.from, to, "bullet");
+          } else if (mark && !mark.includes("#") && line.text.trim() === mark && !isSingleSetextMarker(line.text)) {
             hideSpan(line.from, line.to, "collapse");
           } else if (isSpace(doc2.sliceString(node.to, node.to + 1))) hideMark(node.from, node.to, "after");
           else hideMark(node.from, node.to, "before");
@@ -30100,6 +30113,14 @@ var QiziMarkdownEditor = (() => {
       return emptyLive;
     }
   }
+  function provideLive(field) {
+    return [
+      EditorView.decorations.from(field, (value) => value.lines),
+      EditorView.decorations.from(field, (value) => value.marks),
+      EditorView.decorations.from(field, (value) => value.hides),
+      EditorView.atomicRanges.of((view) => view.state.field(field).atomic)
+    ];
+  }
   var liveField = StateField.define({
     create(state) {
       return safeLiveDecorations(state);
@@ -30111,14 +30132,7 @@ var QiziMarkdownEditor = (() => {
       }
       return safeLiveDecorations(tr.state);
     },
-    provide(field) {
-      return [
-        EditorView.decorations.from(field, (value) => value.lines),
-        EditorView.decorations.from(field, (value) => value.marks),
-        EditorView.decorations.from(field, (value) => value.hides),
-        EditorView.atomicRanges.of((view) => view.state.field(field).atomic)
-      ];
-    }
+    provide: provideLive
   });
   var liveTheme = EditorView.baseTheme({
     ".cm-md-h1": { fontSize: "22px", fontWeight: "700", lineHeight: "1.35" },

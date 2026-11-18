@@ -337,7 +337,18 @@
       let incoming = item.replace
         ? String(item.fullText ?? item.delta ?? '')
         : stripCommittedAssistantPrefix(runId, String(item.delta ?? item.fullText ?? ''));
-      if (!incoming.trim()) return;
+      if (!incoming.trim()) {
+        if (item.replace) {
+          const target = findStreaming(runId);
+          if (target) {
+            const idx = msgs().indexOf(target);
+            if (idx >= 0) msgs().splice(idx, 1);
+            if (onRenderStream && runId != null) onRenderStream(runId);
+            else onRender();
+          }
+        }
+        return;
+      }
 
       let target = findStreaming(runId);
       if (!target) {

@@ -101,6 +101,21 @@ const setextHides = spans(buildLiveDecorations(state(setext, setext.indexOf('尾
 assert.ok(setextHides.some((span) => span.kind === 'collapse' && setext.slice(span.from, span.to).startsWith('=====')));
 assert.ok(spans(buildLiveDecorations(state(setext, setext.indexOf('尾'))).lines).some((span) => span.className === 'cm-md-h1'));
 
+function headingClasses(doc, cursor) {
+  return spans(buildLiveDecorations(state(doc, cursor)).lines)
+    .map((span) => span.className)
+    .filter((name) => name.startsWith('cm-md-h'));
+}
+const oneDash = '正文\n-\n';
+assert.deepEqual(headingClasses(oneDash, 0), []);
+const oneDashBullet = spans(buildLiveDecorations(state(oneDash, 0)).hides).find((span) => span.kind === 'bullet');
+assert.ok(oneDashBullet);
+assert.equal(oneDash.slice(oneDashBullet.from, oneDashBullet.to), '-');
+const indentedDash = '正文\n -\n';
+assert.deepEqual(headingClasses(indentedDash, 0), []);
+const startedList = '正文\n- 项目\n';
+assert.deepEqual(headingClasses(startedList, 0), []);
+
 const both = '***同时***\n\n尾';
 assert.doesNotThrow(() => buildLiveDecorations(state(both, both.indexOf('尾'))));
 const bothMarks = spans(buildLiveDecorations(state(both, both.indexOf('尾'))).marks);

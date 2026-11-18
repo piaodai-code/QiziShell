@@ -776,16 +776,19 @@ function normalizeStreamingFlags() {
 // streaming=true 时只做 HTML 转义（流式快）；结束后才走 Markdown
 const MARKDOWN_SYNC_CHARS = 12000;
 let renderEpoch = 0;
+let historyPaint = null;
 
 function renderMessageContent(text, { streaming = false, extraImages = [], fullMarkdown = false } = {}) {
   const imageRegex = /\[image:(data:image\/[a-zA-Z0-9+.-]+;base64,[A-Za-z0-9+/=]+)\]/g;
   const images = [...extraImages];
-  let plainText = String(text || '').replace(imageRegex, (_m, dataUrl) => {
+  let   plainText = String(text || '').replace(imageRegex, (_m, dataUrl) => {
     images.push(dataUrl);
     return '';
   });
-  // 网关/历史里偶发泄漏的裸 base64 长串（非 [image:…] 包裹）
-  plainText = plainText.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n');
+  // 流式阶段每收到一段都扫整篇，回复一长主线程就被占住。裸 base64 只在定稿时清。
+  if (!streaming) {
+    plainText = plainText.replace(/\n?[A-Za-z0-9+/=\s]{800,}\n?/g, '\n');
+  }
   plainText = plainText.replace(/\n{3,}/g, '\n\n');
   if (!streaming) {
     plainText = plainText.trim();
@@ -1008,6 +1011,7 @@ function onMessageListScroll(el) {
   }
   el.dataset.pinScrollTop = String(next);
   syncScrollBottomButton();
+  paintOlderHistoryIfNeeded(el);
 }
 
 function bindMessageListScrollPin(el) {
@@ -1203,21 +1207,29 @@ function render(options = {}) {
     scrollToBottom: options.scrollToBottom === true || tailStart > 0,
   });
   requestAnimationFrame(() => upgradeDeferredMarkdown(epoch));
-  if (tailStart === 0) return;
-  let cursor = tailStart;
-  const prependOlder = () => {
-    if (epoch !== renderEpoch || !messagesEl) return;
-    const from = Math.max(0, cursor - 24);
-    const pinned = isMessageListPinned(messagesEl);
-    const prevHeight = messagesEl.scrollHeight;
-    const top = messagesEl.scrollTop;
-    messagesEl.insertBefore(paintIndexes(visible.slice(from, cursor)), messagesEl.firstChild);
-    if (pinned) pinMessageList(messagesEl);
-    else messagesEl.scrollTop = top + (messagesEl.scrollHeight - prevHeight);
-    cursor = from;
-    if (cursor > 0) requestAnimationFrame(prependOlder);
+  historyPaint = tailStart === 0 ? null : {
+    epoch,
+    cursor: tailStart,
+    paint(count) {
+      if (this.epoch !== renderEpoch || this.cursor <= 0 || !messagesEl) return;
+      const from = Math.max(0, this.cursor - count);
+      const pinned = isMessageListPinned(messagesEl);
+      const prevHeight = messagesEl.scrollHeight;
+      const top = messagesEl.scrollTop;
+      messagesEl.insertBefore(paintIndexes(visible.slice(from, this.cursor)), messagesEl.firstChild);
+      if (pinned) pinMessageList(messagesEl);
+      else messagesEl.scrollTop = top + (messagesEl.scrollHeight - prevHeight);
+      this.cursor = from;
+    },
   };
-  requestAnimationFrame(prependOlder);
+}
+
+function paintOlderHistoryIfNeeded(el) {
+  if (el !== messagesEl || !historyPaint || historyPaint.cursor <= 0) return;
+  if (isMessageListPinned(el)) return;
+  if (el.scrollHeight <= el.clientHeight + 40) return;
+  if (el.scrollTop > 80) return;
+  historyPaint.paint(24);
 }
 
 function getMessageAuthorLabel(msg) {
@@ -3179,16 +3191,6 @@ function isExecCompletionNoticeText(text) {
   return EXEC_COMPLETION_NOTICE_RE.test(String(text || '').trim());
 }
 
-function isDeliveryMirrorNoticeText(text) {
-  const raw = String(text || '').trim();
-  if (!raw) return false;
-  if (/model switched from\b/i.test(raw)) return true;
-  if (/selected model\b/i.test(raw) && /\brestored\b/i.test(raw)) return true;
-  if (/learned:\s*updated\b/i.test(raw)) return true;
-  if (/模型回退/.test(raw)) return true;
-  return false;
-}
-
 function isProcessAssistantMessage(msg) {
   if (!conciseMessages || !msg || msg.who === 'me') return false;
   const reason = typeof msg.stopReason === 'string' ? msg.stopReason : '';
@@ -3233,7 +3235,6 @@ function finalizeHistoryMessages(list) {
   const visible = conciseMessages
     ? deduped.filter((msg) => (
       !isProcessAssistantMessage(msg)
-      && (msg?.who === 'me' || !isDeliveryMirrorNoticeText(msg?.text))
     ))
     : deduped;
   return orderHistoryByTime(visible);
@@ -4773,7 +4774,16 @@ function stopSessionWatch() {
 
 function composerHasFocus() {
   const active = document.activeElement;
-  return Boolean(active && composerEl && composerEl.contains(active));
+  if (active && composerEl && composerEl.contains(active)) return true;
+  // 输入框被挪进独立窗口后，焦点在那个窗口里，主窗口的 activeElement 看不出来。
+  // 看不出来就会继续整页重拉历史，渲染进程就一直占着。
+  const popup = composerPopupWindow;
+  if (!popup || popup.closed) return false;
+  try {
+    return Boolean(popup.document && popup.document.hasFocus());
+  } catch {
+    return false;
+  }
 }
 
 async function tickSessionWatch() {
@@ -4784,7 +4794,8 @@ async function tickSessionWatch() {
   // 本机流式走 IPC。这时再拉 chat.history 会整表重绘，输入跟着卡，
   // 网关空闲标志一闪还会把还在跑的回合收掉。
   if (isLocalOwnedActiveRun()) return;
-  if (composerHasFocus() && !busy && !messages.some((m) => m.streaming)) return;
+  // 光标在输入区时不要拉历史。整表重绘会把正在打的字卡住，回复进行中也一样。
+  if (composerHasFocus()) return;
 
   const nowMs = Date.now();
   if (nowMs - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
@@ -7963,7 +7974,7 @@ if (window.qizi.onSessionChanged) {
     debugEvent('session', 'session_changed_event', { sessionKey: currentSessionKey });
     scheduleSessionPermissionRefresh();
     dismissBtwSideCard();
-    if (!isLocalOwnedActiveRun()) {
+    if (!isLocalOwnedActiveRun() && !composerHasFocus()) {
       syncHistoryFromGateway({ preserveExternalStream: true });
     }
   });
@@ -8289,6 +8300,9 @@ inputEl.addEventListener('input', () => {
 
 inputEl.addEventListener('blur', () => {
   setTimeout(hideCommandPopup, 120);
+  setTimeout(() => {
+    if (!composerHasFocus()) void tickSessionWatch();
+  }, 180);
 });
 
 if (composerSendBtn) {

@@ -2662,16 +2662,6 @@ function isConciseMessagesEnabled() {
   return loadShellSettings().conciseMessages !== false;
 }
 
-function isDeliveryMirrorNoticeText(text) {
-  const raw = stripLeadingEnvelopeTimestamp(stripSenderUntrustedMetadata(String(text || ''))).trim();
-  if (!raw) return false;
-  if (/model switched from\b/i.test(raw)) return true;
-  if (/selected model\b/i.test(raw) && /\brestored\b/i.test(raw)) return true;
-  if (/learned:\s*updated\b/i.test(raw)) return true;
-  if (/模型回退/.test(raw)) return true;
-  return false;
-}
-
 function deliveryMirrorModelName(model) {
   if (typeof model === 'string') return model.trim().toLowerCase();
   if (model && typeof model === 'object') {
@@ -2692,26 +2682,62 @@ function rawAssistantText(message) {
   }).filter(Boolean).join('\n');
 }
 
-/** 系统留痕，不是模型的正式回复。channel-final 是投递出去的正文镜像，不能当成回退通知丢掉。 */
-function isDeliveryMirrorNotice(message) {
-  if (typeof message === 'string') return isDeliveryMirrorNoticeText(message);
-  if (!message || typeof message !== 'object') return false;
+/** 官方识别：provider=openclaw 且 model 为 delivery-mirror / gateway-injected，或带 openclawDeliveryMirror。channel-final 是已投递正文的镜像，要留下。 */
+function deliveryMirrorKind(message) {
+  if (!message || typeof message !== 'object') return '';
   const mirror = message.openclawDeliveryMirror || message.openclaw_delivery_mirror;
   const kind = mirror && typeof mirror === 'object' ? String(mirror.kind || '').trim() : '';
-  if (kind === 'channel-final') return false;
   const provider = String(message.provider || '').trim().toLowerCase();
   const model = deliveryMirrorModelName(message.model);
   const marked = Boolean(mirror)
     || (provider === 'openclaw' && (model === 'delivery-mirror' || model === 'gateway-injected'));
-  if (marked) return true;
-  return isDeliveryMirrorNoticeText(rawAssistantText(message))
-    || isDeliveryMirrorNoticeText(extractMessageText(message));
+  if (!marked) return '';
+  if (kind) return kind;
+  return model === 'gateway-injected' ? 'gateway-injected' : 'delivery-mirror';
+}
+
+function deliveryMirrorSourceId(message) {
+  const mirror = message?.openclawDeliveryMirror || message?.openclaw_delivery_mirror;
+  if (!mirror || typeof mirror !== 'object') return '';
+  return String(
+    mirror.sourceAssistantMessageId
+    || mirror.source_assistant_message_id
+    || mirror.sourceMessageId
+    || ''
+  ).trim();
+}
+
+/** 精简模式下、画进窗口之前丢掉的行。automation-result 是任务汇报，要留下。 */
+function shouldOmitConciseClientMessage(message) {
+  if (!message || typeof message !== 'object') return false;
+  const role = normalizeHistoryRole(message.role ?? message.who);
+  if (role === 'custom') return true;
+  const provider = String(message.provider || '').trim().toLowerCase();
+  const model = deliveryMirrorModelName(message.model);
+  if (provider === 'openclaw' && model === 'automation-result') return false;
+  if (provider === 'openclaw' && model === 'gateway-injected') return true;
+  const kind = deliveryMirrorKind(message);
+  if (!kind) return false;
+  if (kind === 'channel-final') {
+    // 有 sourceAssistantMessageId：能指到一条原件，是已投递正文的镜像 → 保留
+    // 没有 sourceAssistantMessageId：没有原件可指，就是独立的一行本地通知 → 挡掉
+    if (deliveryMirrorSourceId(message)) return false;
+    return true;
+  }
+  return true;
+}
+
+function shouldOmitConciseClientEvent(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  return shouldOmitConciseClientMessage(payload) || shouldOmitConciseClientMessage(payload.message);
+}
+
+function isDeliveryMirrorNotice(message) {
+  return shouldOmitConciseClientMessage(message);
 }
 
 function isDeliveryMirrorEvent(payload) {
-  if (!payload || typeof payload !== 'object') return false;
-  if (isDeliveryMirrorNotice(payload) || isDeliveryMirrorNotice(payload.message)) return true;
-  return isDeliveryMirrorNoticeText(payload.text) || isDeliveryMirrorNoticeText(payload.deltaText);
+  return shouldOmitConciseClientEvent(payload);
 }
 
 function conciseDisplayText(run) {
@@ -2755,8 +2781,8 @@ function nextConciseText(shown, snapshot, deltaText) {
   const base = String(shown || '');
   const snap = String(snapshot || '').trim();
   const delta = String(deltaText || '');
-  if ((snap && (isDeliveryMirrorNoticeText(snap) || looksLikeLeakedToolPayloadText(snap)))
-    || (delta && (isDeliveryMirrorNoticeText(delta) || looksLikeLeakedToolPayloadText(delta)))) {
+  if ((snap && looksLikeLeakedToolPayloadText(snap))
+    || (delta && looksLikeLeakedToolPayloadText(delta))) {
     return base;
   }
   const baseC = compactStreamText(base);
@@ -2779,7 +2805,7 @@ function nextConciseText(shown, snapshot, deltaText) {
 function commitConciseFinal(shown, finalText) {
   const base = String(shown || '');
   const snap = String(finalText || '').trim();
-  if (!snap || isDeliveryMirrorNoticeText(snap) || looksLikeLeakedToolPayloadText(snap)) return base;
+  if (!snap || looksLikeLeakedToolPayloadText(snap)) return base;
   const baseC = compactStreamText(base);
   const snapC = compactStreamText(snap);
   if (!baseC) return snap;
@@ -3525,9 +3551,7 @@ function handleExternalSessionChatEvent(payload, { allowWhileBusy = false } = {}
     const stopReason = assistantStopReason(payload.message) || assistantStopReason(payload);
     const messageText = payload.message == null ? '' : extractAssistantStreamText(payload.message);
     const deltaText = typeof payload.deltaText === 'string' ? payload.deltaText : '';
-    if (isDeliveryMirrorEvent(payload)) {
-      return;
-    }
+    if (isDeliveryMirrorEvent(payload)) return;
     if (payload.state === 'delta') {
       const view = nextConciseText(run.conciseShown, messageText, deltaText);
       if (view && view !== run.conciseShown) {
@@ -4143,8 +4167,7 @@ function handleOwnedGatewayChatEvent(payload, matched) {
   armRunTimeout(clientRunId, run);
 
   if (isConciseMessagesEnabled() && isDeliveryMirrorEvent(payload)) {
-    // 模型回退、skill 留痕这类系统消息带 stop，不能把它当成这一轮的正式回复。
-    run.suppressProcessText = true;
+    // 系统留痕不进当前气泡，也不回头改已经画出的正文。
     return;
   }
 
@@ -4529,10 +4552,8 @@ function liftComposerOnce() {
   if (!composerWindow || composerWindow.isDestroyed() || !composerWindow.isVisible()) return;
   if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible() || mainWindow.isMinimized()) return;
   liftingComposer = true;
-  const chatWasKey = mainWindow.isFocused();
   try {
     composerWindow.moveAbove(mainWindow.getMediaSourceId());
-    if (chatWasKey && !mainWindow.isFocused()) mainWindow.focus();
   } catch (err) {
     console.warn('[qizi] composer moveAbove failed:', err.message);
     try { composerWindow.moveTop(); } catch { /* ignore */ }

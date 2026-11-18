@@ -347,6 +347,18 @@ function isFenceLine(text) {
   return /^\s{0,3}(`{3,}|~{3,})/.test(text);
 }
 
+// 单独一个 - 或 = 是在起列表，不是给上一行加标题。
+// CommonMark 会把这种只有一个记号的下一行当成 setext 下划线。
+function isSingleSetextMarker(text) {
+  return /^ {0,3}[-=][ \t]*$/.test(String(text || ''));
+}
+
+function setextUnderlineText(doc, from, to) {
+  if (to <= from) return '';
+  const end = Math.min(doc.length, to - 1);
+  return doc.lineAt(end).text;
+}
+
 function mergeHides(ranges) {
   ranges.sort((a, b) => a.from - b.from || b.to - a.to);
   const out = [];
@@ -382,6 +394,7 @@ function finishSet(items, kind) {
 }
 
 export function buildLiveDecorations(state) {
+  // 语法树在后台补全。这里不在按键时同步解析，避免每个字都卡住。
   ensureSyntaxTree(state, state.doc.length, 1);
   const doc = state.doc;
   const active = activeLines(state);
@@ -454,7 +467,12 @@ export function buildLiveDecorations(state) {
       if (name === 'Document') return;
       if (frontEnd >= 0 && node.to <= frontEnd) return false;
 
-      if (HEADING[name]) addLine(doc.lineAt(node.from).from, HEADING[name]);
+      if (HEADING[name]) {
+        const underline = name === 'SetextHeading1' || name === 'SetextHeading2'
+          ? setextUnderlineText(doc, node.from, node.to)
+          : '';
+        if (!isSingleSetextMarker(underline)) addLine(doc.lineAt(node.from).from, HEADING[name]);
+      }
       else if (name === 'FencedCode' || name === 'CodeBlock') {
         addLineSpan(node.from, node.to, 'cm-md-codeblock');
         if (name === 'FencedCode' && !blockActive(node.from, node.to)) {
@@ -500,7 +518,10 @@ export function buildLiveDecorations(state) {
       if (name === 'HeaderMark') {
         const line = doc.lineAt(node.from);
         const mark = doc.sliceString(node.from, node.to).trim();
-        if (mark && !mark.includes('#') && line.text.trim() === mark) {
+        if (mark === '-' && isSingleSetextMarker(line.text)) {
+          const to = isSpace(doc.sliceString(node.to, node.to + 1)) ? node.to + 1 : node.to;
+          hideSpan(node.from, to, 'bullet');
+        } else if (mark && !mark.includes('#') && line.text.trim() === mark && !isSingleSetextMarker(line.text)) {
           hideSpan(line.from, line.to, 'collapse');
         }
         else if (isSpace(doc.sliceString(node.to, node.to + 1))) hideMark(node.from, node.to, 'after');
@@ -548,6 +569,15 @@ function safeLiveDecorations(state) {
   }
 }
 
+function provideLive(field) {
+  return [
+    EditorView.decorations.from(field, (value) => value.lines),
+    EditorView.decorations.from(field, (value) => value.marks),
+    EditorView.decorations.from(field, (value) => value.hides),
+    EditorView.atomicRanges.of((view) => view.state.field(field).atomic),
+  ];
+}
+
 const liveField = StateField.define({
   create(state) {
     return safeLiveDecorations(state);
@@ -559,14 +589,7 @@ const liveField = StateField.define({
     }
     return safeLiveDecorations(tr.state);
   },
-  provide(field) {
-    return [
-      EditorView.decorations.from(field, (value) => value.lines),
-      EditorView.decorations.from(field, (value) => value.marks),
-      EditorView.decorations.from(field, (value) => value.hides),
-      EditorView.atomicRanges.of((view) => view.state.field(field).atomic),
-    ];
-  },
+  provide: provideLive,
 });
 
 const liveTheme = EditorView.baseTheme({

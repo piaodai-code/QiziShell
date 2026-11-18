@@ -8,9 +8,10 @@ alwaysApply: false
 
 After editing files that affect the running Electron app (`main.js`, `gateway-ws.js`, `app.js`, `preload.js`, `index.html`, `style.css`, etc.):
 
-1. Restart with the detached script (do **not** use bare `npm start` in a Cursor background shell — the shell teardown kills Electron).
-2. Wait for the script to finish and confirm it prints `QiziShell started`.
-3. Only ask the user to start manually if `npm run restart` exits non-zero.
+1. If `/Applications/QiziShell.app` is running, quit it first. `npm run restart` only stops the repo's Electron, and the installed app keeps the single-instance lock, so the user keeps using the old build.
+2. Restart with the detached script (do **not** use bare `npm start` in a Cursor background shell — the shell teardown kills Electron).
+3. Wait for the script to finish and confirm it prints `QiziShell started`.
+4. Only ask the user to start manually if `npm run restart` exits non-zero.
 
 ```bash
 npm run restart
