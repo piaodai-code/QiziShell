@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none';">
+  <title>Automation</title>
+  <link rel="stylesheet" href="automation.css">
+</head>
+<body>
+  <p class="auto-status" id="status"></p>
+  <div class="auto-wrap">
+    <table class="auto-table">
+      <thead>
+        <tr>
+          <th>Agent</th>
+          <th>任务</th>
+          <th>计划运行</th>
+          <th>下次运行</th>
+          <th>上次运行</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <script src="message-time.js"></script>
+  <script src="automation.js"></script>
+</body>
+</html>

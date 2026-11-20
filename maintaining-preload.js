@@ -13,6 +13,13 @@ contextBridge.exposeInMainWorld('qiziLocalTime', {
 });
 
 contextBridge.exposeInMainWorld('maintaining', {
+  openKeepalive: () => ipcRenderer.invoke('keepalive:open'),
+  openAutomation: () => ipcRenderer.invoke('automation:open'),
+  onAlerts: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('maintaining:alerts', handler);
+    return () => ipcRenderer.removeListener('maintaining:alerts', handler);
+  },
   boot: () => ipcRenderer.invoke('hermes:boot'),
   login: (payload) => ipcRenderer.invoke('hermes:login', payload),
   testConnection: (payload) => ipcRenderer.invoke('hermes:test', payload),

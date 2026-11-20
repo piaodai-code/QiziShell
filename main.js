@@ -5,6 +5,8 @@ const openLinksExternally = !process.argv.includes('--open-links-in-shell');
 
 const { shouldAllowInsecureTls, rejectUnauthorizedForUrl } = require('./tls-policy');
 const { MaintainingSession } = require('./maintaining-session');
+const { createKeepaliveFeature } = require('./keepalive-main');
+const { createAutomationFeature } = require('./automation-main');
 const { buildExportMarkdown } = require('./export-html');
 const { buildExportDocx } = require('./export-docx');
 const { checkForUpdate, downloadAndInstallUpdate } = require('./update-checker');
@@ -404,7 +406,9 @@ function shellWindowVisible(win) {
 function dockWanted() {
   return shellWindowVisible(mainWindow)
     || shellWindowVisible(maintainingWindow)
-    || shellWindowVisible(controlUiWindow);
+    || shellWindowVisible(controlUiWindow)
+    || keepaliveFeature.isVisible()
+    || automationFeature.isVisible();
 }
 
 // 状态栏点击还在跟踪时切 NSApplicationActivationPolicy，macOS 会把这次点击
@@ -587,6 +591,65 @@ let activeMeetingTranscript = [];
 let meetingHistoryPollTimer = null;
 let controlUiWindow = null;
 let controlUiLaunchUrl = null;
+// Created here, ahead of dockWanted()'s first run. Everything it is handed is a hoisted function.
+const keepaliveFeature = createKeepaliveFeature({
+  app,
+  BrowserWindow,
+  ipcMain,
+  screen,
+  presentWindow,
+  cancelPresent,
+  syncDockVisibility,
+  safeSendTo,
+  isMainWindowSender: (event) => Boolean(getAuthorizedMainWindow(event)),
+  isMaintainingWindowSender: (event) => Boolean(getAuthorizedMaintainingWindow(event)),
+  dialog,
+  forbiddenResult: forbiddenSenderResult,
+  // The keep-alive server runs next to OpenClaw, so its host is the first guess for the address.
+  gatewayHost: () => {
+    try {
+      return new URL(loadOpenClawConfig().wsUrl).hostname;
+    } catch {
+      return '';
+    }
+  },
+  relayToMaintainer: async (text) => {
+    const session = getMaintainingSession();
+    await session.ensureConnected();
+    if (!session.client.connected) {
+      throw new Error(session.error || 'Maintainer 还没登录');
+    }
+    await session.send({ text });
+  },
+  onKeepaliveAlert: (failed) => {
+    composerAlerts.keepalive = failed === true;
+    publishComposerAlerts();
+  },
+});
+const composerAlerts = { keepalive: false, automation: false };
+function publishComposerAlerts() {
+  if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
+  safeSendTo(maintainingWindow.webContents, 'maintaining:alerts', { ...composerAlerts });
+}
+const automationFeature = createAutomationFeature({
+  app,
+  BrowserWindow,
+  ipcMain,
+  screen,
+  presentWindow,
+  cancelPresent,
+  syncDockVisibility,
+  isMaintainingWindowSender: (event) => Boolean(getAuthorizedMaintainingWindow(event)),
+  gatewayRequest: async (method, params) => {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    return client.request(method, params, { timeoutMs: 25000 });
+  },
+  onAutomationAlert: (failed) => {
+    composerAlerts.automation = failed === true;
+    publishComposerAlerts();
+  },
+});
 let tray = null;
 let trayMenu = null;
 let isQuitting = false;
@@ -4714,7 +4777,7 @@ function recoverChatRenderer(details) {
   if (chatRendererReloads.length > 2) {
     dialog.showMessageBox(mainWindow, {
       type: 'error',
-      title: '启孜',
+      title: 'QiziShell',
       message: '界面进程反复崩溃，已停止自动恢复。',
       detail: `原因：${reason}`,
       buttons: ['关闭'],
@@ -6630,7 +6693,6 @@ ipcMain.handle('openclaw:open-control', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   return openOpenClawControl();
 });
-
 ipcMain.handle('openclaw:quit', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   isQuitting = true;
@@ -7809,6 +7871,7 @@ function openMaintainingWindow() {
   maintainingWindow.on('show', () => syncDockVisibility());
   maintainingWindow.once('ready-to-show', () => {
     presentWindow(maintainingWindow, { dock: true });
+    publishComposerAlerts();
   });
   maintainingWindow.on('closed', () => {
     maintainingWindow = null;

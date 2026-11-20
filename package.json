@@ -1,10 +1,11 @@
 {
   "name": "qizi-shell",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "restart": "bash scripts/restart-dev.sh",
+    "prebuild": "bash scripts/pack-keepalive-server.sh",
     "build": "electron-builder --mac --publish never",
     "ship": "bash scripts/ship.sh",
     "release": "bash scripts/release-mac.sh",
@@ -13,6 +14,9 @@
     "test:hermes-client": "node scripts/hermes-client-smoke.js",
     "test:gateway-disconnect": "node scripts/gateway-disconnect-smoke.js",
     "test:markdown-live": "node scripts/markdown-live-smoke.mjs",
+    "test:keepalive-server": "node keepalive-server/test/smoke.js",
+    "test:keepalive-window": "electron scripts/keepalive-window-smoke.js",
+    "pack:keepalive-server": "bash scripts/pack-keepalive-server.sh",
     "build:editor": "esbuild scripts/codemirror-entry.js --bundle --format=iife --global-name=QiziMarkdownEditor --outfile=vendor/codemirror-markdown.js"
   },
   "build": {
@@ -24,7 +28,7 @@
       "category": "public.app-category.productivity",
       "identity": null,
       "extendInfo": {
-        "NSMicrophoneUsageDescription": "启孜 Shell 需要访问麦克风，用于语音转文字与设置中的识别测试。"
+        "NSMicrophoneUsageDescription": "QiziShell 需要访问麦克风，用于语音转文字与设置中的识别测试。"
       }
     },
     "files": [
@@ -47,6 +51,22 @@
       "maintaining.js",
       "maintaining.css",
       "maintaining-preload.js",
+      "keepalive-main.js",
+      "keepalive-client.js",
+      "keepalive-preload.js",
+      "keepalive.html",
+      "keepalive.css",
+      "keepalive.js",
+      "automation-main.js",
+      "automation-preload.js",
+      "automation.html",
+      "automation.css",
+      "automation.js",
+      "keepalive-server/服务端安装.md",
+      "keepalive-server/保活维护.md",
+      "keepalive-server/日常发布.md",
+      "keepalive-bundle/qizi-keepalive-server.tgz",
+      "keepalive-bundle/version",
       "copy-edit.html",
       "copy-edit.css",
       "copy-edit.js",

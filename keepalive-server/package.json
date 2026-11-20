@@ -1,0 +1,19 @@
+{
+  "name": "qizi-keepalive-server",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Keeps sandboxed Chrome sessions alive on the OpenClaw host and reports their state to QiziShell.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/smoke.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "electron": "^42.3.3",
+    "playwright-core": "^1.65.1",
+    "ws": "^8.21.0"
+  }
+}

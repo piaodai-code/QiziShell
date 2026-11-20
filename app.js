@@ -9444,7 +9444,7 @@ async function startSttRecording(mode) {
     sttMediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   } catch (err) {
     const msg = err?.name === 'NotAllowedError'
-      ? '未授予麦克风权限，请在系统设置中允许启孜 Shell 使用麦克风'
+      ? '未授予麦克风权限，请在系统设置中允许 QiziShell 使用麦克风'
       : (err.message || '无法打开麦克风');
     if (mode === 'test') setSttRecordTestResult('failure');
     else setStatus(msg, 'error');

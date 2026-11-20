@@ -1291,6 +1291,19 @@
     }
   });
 
+  function applyComposerAlerts(payload) {
+    document.getElementById('keepalive-alert').hidden = !payload?.keepalive;
+    document.getElementById('automation-alert').hidden = !payload?.automation;
+  }
+
+  document.getElementById('keepalive-open-btn').addEventListener('click', () => {
+    window.maintaining.openKeepalive();
+  });
+  document.getElementById('automation-open-btn').addEventListener('click', () => {
+    window.maintaining.openAutomation();
+  });
+  window.maintaining.onAlerts(applyComposerAlerts);
+
   attachBtn.addEventListener('click', (event) => {
     event.stopPropagation();
     showAttach();

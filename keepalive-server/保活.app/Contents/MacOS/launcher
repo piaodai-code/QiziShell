@@ -1,0 +1,12 @@
+#!/bin/bash
+ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+PORT=55557
+DATA="/var/folders/dr/741gdpks46lf63yk_yzmw3600000gn/T/qizi-keepalive-window-data-LPw1ZR/server"
+if curl -sf -m 3 -o /dev/null "http://127.0.0.1:$PORT/api/state"; then
+  curl -sf -m 30 -X POST "http://127.0.0.1:$PORT/api/window/show" >/dev/null
+  exit 0
+fi
+cd "$ROOT" || exit 1
+mkdir -p "$DATA"
+nohup node server.js --port "$PORT" --data-dir "$DATA" >> "$DATA/keepalive.log" 2>&1 &

@@ -148,6 +148,7 @@ contextBridge.exposeInMainWorld('qizi', {
   openAbout: () => ipcRenderer.invoke('openclaw:open-about'),
   openUpdate: () => ipcRenderer.invoke('openclaw:open-update'),
   openControl: () => ipcRenderer.invoke('openclaw:open-control'),
+  openKeepalive: () => ipcRenderer.invoke('keepalive:open'),
   startMeeting: (config) => ipcRenderer.invoke('qizi-meeting:start', config),
   cancelMeeting: () => ipcRenderer.invoke('qizi-meeting:cancel'),
   getMeetingStatus: () => ipcRenderer.invoke('qizi-meeting:status'),

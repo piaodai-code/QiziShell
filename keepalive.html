@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Chrome Keep-alive</title>
+  <link rel="stylesheet" href="keepalive.css">
+</head>
+<body>
+  <header class="ka-top">
+    <form class="ka-server" id="ka-server-form">
+      <label for="ka-server-url">保活服务</label>
+      <input type="text" id="ka-server-url" spellcheck="false" autocomplete="off" placeholder="服务器地址，例如 192.168.1.20">
+      <button type="submit" class="ka-btn" id="ka-server-connect">连接</button>
+    </form>
+    <p class="ka-link" id="ka-link" data-state="connecting">正在连接…</p>
+  </header>
+
+  <main class="ka-main">
+    <button type="button" class="ka-btn" id="ka-add" hidden>添加平台</button>
+    <section id="ka-platforms" aria-live="polite"></section>
+  </main>
+
+  <footer class="ka-docs" id="ka-docs">
+    <p class="ka-docs-hint">下载这些文件，交给相应agent，让agent按照说明执行</p>
+    <div class="ka-docs-row">
+      <button type="button" class="ka-btn" data-doc="program">服务端程序</button>
+      <button type="button" class="ka-btn" data-doc="install">服务端安装</button>
+      <button type="button" class="ka-btn" data-doc="maintainer">保活维护</button>
+      <button type="button" class="ka-btn" data-doc="publish">日常发布</button>
+    </div>
+  </footer>
+
+  <dialog class="ka-dialog" id="ka-dialog">
+    <form class="ka-form" id="ka-platform-form" method="dialog">
+      <h2 class="ka-section-title" id="ka-dialog-title">添加平台</h2>
+      <label for="ka-f-type">平台类型</label>
+      <select id="ka-f-type"></select>
+      <label for="ka-f-id">平台 ID</label>
+      <input type="text" id="ka-f-id" spellcheck="false" autocomplete="off" placeholder="字母、数字、下划线，例如 channels_01">
+      <label for="ka-f-name">名称</label>
+      <input type="text" id="ka-f-name" autocomplete="off">
+      <label for="ka-f-url">入口网址</label>
+      <input type="text" id="ka-f-url" spellcheck="false" autocomplete="off" placeholder="创作者后台的地址">
+      <label for="ka-f-port">CDP 端口</label>
+      <input type="number" id="ka-f-port" min="1024" max="65535">
+      <label for="ka-f-profile">沙盒目录</label>
+      <input type="text" id="ka-f-profile" spellcheck="false" autocomplete="off" placeholder="留空则放在保活服务的数据目录下">
+      <label for="ka-f-interval">保活间隔</label>
+      <div class="ka-inline">
+        <input type="number" id="ka-f-interval" min="1" step="any"><span>分钟，前后漂移</span>
+        <input type="number" id="ka-f-jitter" min="0" step="any" aria-label="时间漂移（分钟）"><span>分钟</span>
+      </div>
+      <label for="ka-f-lock">占用锁过期</label>
+      <div class="ka-inline">
+        <input type="number" id="ka-f-lock" min="1" step="any"><span>分钟后自动解除（Agent 没解锁时）</span>
+      </div>
+      <label for="ka-f-args">附加启动参数</label>
+      <input type="text" id="ka-f-args" spellcheck="false" autocomplete="off" placeholder="可不填，例如 --window-size=1280,800">
+      <span></span>
+      <label class="ka-check"><input type="checkbox" id="ka-f-restart">Chrome 意外退出后自动重启</label>
+      <span></span>
+      <label class="ka-check"><input type="checkbox" id="ka-f-enabled">启用这个平台</label>
+      <p class="ka-form-error" id="ka-f-error" hidden></p>
+      <div class="ka-form-actions">
+        <button type="button" class="ka-btn ka-btn-danger" id="ka-f-delete" hidden>删除平台</button>
+        <span class="ka-spacer"></span>
+        <button type="button" class="ka-btn" id="ka-f-cancel">取消</button>
+        <button type="submit" class="ka-btn ka-btn-primary" id="ka-f-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="ka-toast" id="ka-toast" hidden role="status"></div>
+  <script src="keepalive.js"></script>
+</body>
+</html>
