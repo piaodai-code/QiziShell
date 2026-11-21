@@ -142,6 +142,7 @@ function createAutomationFeature({
   isMaintainingWindowSender,
   gatewayRequest,
   onAutomationAlert,
+  openBesideMaintainer,
 }) {
   let win = null;
   let pollTimer = null;
@@ -247,12 +248,21 @@ function createAutomationFeature({
     return { ok: true };
   }
 
+  const sideSenders = new Set();
+
+  function attach(contents) {
+    sideSenders.add(contents);
+    contents.once('destroyed', () => sideSenders.delete(contents));
+  }
+
   function fromWindow(event) {
+    if (sideSenders.has(event.sender)) return true;
     return Boolean(win && !win.isDestroyed() && BrowserWindow.fromWebContents(event.sender) === win);
   }
 
   ipcMain.handle('automation:open', (event) => {
     if (!isMaintainingWindowSender(event)) return { ok: false, error: 'Forbidden' };
+    if (typeof openBesideMaintainer === 'function') return openBesideMaintainer('automation');
     return open();
   });
 
@@ -285,6 +295,7 @@ function createAutomationFeature({
 
   return {
     open,
+    attach,
     failed: () => failed,
     isVisible: () => Boolean(win && !win.isDestroyed() && win.isVisible()),
   };

@@ -128,6 +128,8 @@ function createKeepaliveFeature({
   gatewayHost,
   relayToMaintainer,
   onKeepaliveAlert,
+  getMaintainingWindow,
+  openBesideMaintainer,
 }) {
   let win = null;
   const client = new KeepaliveClient();
@@ -165,9 +167,16 @@ function createKeepaliveFeature({
     return host ? `http://${host}:${DEFAULT_PORT}` : '';
   }
 
+  const sideSenders = new Set();
+
+  function attach(contents) {
+    sideSenders.add(contents);
+    contents.once('destroyed', () => sideSenders.delete(contents));
+  }
+
   function push(channel, payload) {
-    if (!win || win.isDestroyed()) return;
-    safeSendTo(win.webContents, channel, payload);
+    if (win && !win.isDestroyed()) safeSendTo(win.webContents, channel, payload);
+    for (const contents of sideSenders) safeSendTo(contents, channel, payload);
   }
 
   const relayed = new Set();
@@ -291,7 +300,14 @@ function createKeepaliveFeature({
   }
 
   function fromKeepaliveWindow(event) {
+    if (sideSenders.has(event.sender)) return true;
     return Boolean(win && !win.isDestroyed() && BrowserWindow.fromWebContents(event.sender) === win);
+  }
+
+  function dialogParent(event) {
+    return BrowserWindow.fromWebContents(event.sender)
+      || (typeof getMaintainingWindow === 'function' ? getMaintainingWindow() : null)
+      || win;
   }
 
   async function boot() {
@@ -312,6 +328,7 @@ function createKeepaliveFeature({
 
   ipcMain.handle('keepalive:open', (event) => {
     const fromMaintainer = typeof isMaintainingWindowSender === 'function' && isMaintainingWindowSender(event);
+    if (fromMaintainer && typeof openBesideMaintainer === 'function') return openBesideMaintainer('keepalive');
     if (!isMainWindowSender(event) && !fromMaintainer) return forbiddenResult();
     return open();
   });
@@ -322,7 +339,9 @@ function createKeepaliveFeature({
     const fileName = GUIDE_FILES[which] || '';
     if (which !== 'program' && !fileName) return { ok: false, error: '没有这份文件' };
     if (!dialog) return { ok: false, error: '还没选择下载目录' };
-    const picked = await dialog.showOpenDialog(win, {
+    const parent = dialogParent(event);
+    if (!parent) return { ok: false, error: '还没选择下载目录' };
+    const picked = await dialog.showOpenDialog(parent, {
       title: '选择下载目录',
       buttonLabel: '下载到这里',
       properties: ['openDirectory', 'createDirectory'],
@@ -373,6 +392,7 @@ function createKeepaliveFeature({
 
   return {
     open,
+    attach,
     isVisible: () => Boolean(win && !win.isDestroyed() && win.isVisible()),
   };
 }

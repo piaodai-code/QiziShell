@@ -1,4 +1,4 @@
-const { app, BrowserWindow, clipboard, ipcMain, shell, Tray, Menu, nativeImage, dialog, screen } = require('electron');
+const { app, BrowserWindow, clipboard, ipcMain, shell, Tray, Menu, nativeImage, dialog, screen, WebContentsView } = require('electron');
 const { spawn } = require('child_process');
 
 const openLinksExternally = !process.argv.includes('--open-links-in-shell');
@@ -115,6 +115,10 @@ let composerLiftTimer = null;
 let composerLiftArmed = false;
 let composerGrowSnapshot = null;
 let maintainingWindow = null;
+let maintainerSideKind = '';
+let maintainerSideWidth = 0;
+const maintainerSideWidths = { keepalive: 520, automation: 760 };
+const maintainerSideViews = {};
 let maintainingSession = null;
 
 const FORWARD_DEDUP_MS = 120_000;
@@ -625,6 +629,8 @@ const keepaliveFeature = createKeepaliveFeature({
     composerAlerts.keepalive = failed === true;
     publishComposerAlerts();
   },
+  getMaintainingWindow: () => (maintainingWindow && !maintainingWindow.isDestroyed() ? maintainingWindow : null),
+  openBesideMaintainer: (kind) => toggleMaintainerSide(kind),
 });
 const composerAlerts = { keepalive: false, automation: false };
 function publishComposerAlerts() {
@@ -649,6 +655,7 @@ const automationFeature = createAutomationFeature({
     composerAlerts.automation = failed === true;
     publishComposerAlerts();
   },
+  openBesideMaintainer: (kind) => toggleMaintainerSide(kind),
 });
 let tray = null;
 let trayMenu = null;
@@ -7794,6 +7801,12 @@ function loadMaintainingWindowState() {
   };
   try {
     const saved = JSON.parse(fs.readFileSync(maintainingStatePath(), 'utf8'));
+    if (saved.sideWidths && typeof saved.sideWidths === 'object') {
+      for (const key of ['keepalive', 'automation']) {
+        const savedWidth = Number(saved.sideWidths[key]);
+        if (savedWidth >= 360 && savedWidth <= 1600) maintainerSideWidths[key] = savedWidth;
+      }
+    }
     const width = Math.max(MAINTAINING_MIN_WIDTH, Math.min(2400, Number(saved.width) || fallback.width));
     const height = Math.max(MAINTAINING_MIN_HEIGHT, Math.min(1600, Number(saved.height) || fallback.height));
     const x = Number(saved.x);
@@ -7817,15 +7830,156 @@ function saveMaintainingWindowState() {
   if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
   try {
     const bounds = maintainingWindow.getBounds();
+    const width = maintainerSideKind
+      ? Math.max(MAINTAINING_MIN_WIDTH, bounds.width - maintainerSideWidth)
+      : bounds.width;
     fs.writeFileSync(maintainingStatePath(), JSON.stringify({
       x: bounds.x,
       y: bounds.y,
-      width: bounds.width,
+      width,
       height: bounds.height,
+      sideWidths: maintainerSideWidths,
     }));
   } catch {
     // non-fatal
   }
+}
+
+const SIDE_MIN_CHAT = 440;
+const SIDE_MIN_PANEL = { keepalive: 520, automation: 1000 };
+let maintainerChatWidth = 0;
+
+function sideMinPanel(kind) {
+  return SIDE_MIN_PANEL[kind] || SIDE_MIN_PANEL.keepalive;
+}
+
+function maintainerSideState() {
+  return {
+    open: Boolean(maintainerSideKind),
+    kind: maintainerSideKind,
+    width: maintainerSideKind ? maintainerSideWidth : 0,
+  };
+}
+
+function publishMaintainerSide() {
+  pushMaintaining('maintaining:side', maintainerSideState());
+}
+
+function ensureMaintainerSideView(kind) {
+  if (maintainerSideViews[kind]) return maintainerSideViews[kind];
+  const file = kind === 'keepalive' ? 'keepalive.html' : 'automation.html';
+  const preload = kind === 'keepalive' ? 'keepalive-preload.js' : 'automation-preload.js';
+  const view = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, preload),
+      contextIsolation: true,
+      nodeIntegration: false,
+      backgroundThrottling: false,
+      devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
+    },
+  });
+  view.setBackgroundColor('#f2f2f2');
+  if (kind === 'keepalive') keepaliveFeature.attach(view.webContents);
+  else automationFeature.attach(view.webContents);
+  view.webContents.loadFile(path.join(__dirname, file));
+  maintainerSideViews[kind] = view;
+  return view;
+}
+
+function layoutMaintainerSide({ fromSplit = false } = {}) {
+  if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
+  const [width, height] = maintainingWindow.getContentSize();
+  if (!maintainerSideKind) {
+    for (const view of Object.values(maintainerSideViews)) {
+      try { maintainingWindow.contentView.removeChildView(view); } catch { /* not attached */ }
+    }
+    maintainerSideWidth = 0;
+    maintainerChatWidth = 0;
+    maintainingWindow.setMinimumSize(MAINTAINING_MIN_WIDTH, MAINTAINING_MIN_HEIGHT);
+    publishMaintainerSide();
+    return;
+  }
+  if (width < 50 || height < 50) return;
+  const minPanel = sideMinPanel(maintainerSideKind);
+  if (!fromSplit) {
+    if (!maintainerChatWidth) maintainerChatWidth = Math.max(SIDE_MIN_CHAT, width - maintainerSideWidth);
+    let panel = width - maintainerChatWidth;
+    if (panel < minPanel) {
+      maintainerChatWidth = Math.max(SIDE_MIN_CHAT, width - minPanel);
+      panel = Math.max(minPanel, width - maintainerChatWidth);
+    }
+    maintainerSideWidth = panel;
+  }
+  maintainerSideWidth = Math.round(maintainerSideWidth);
+  maintainerChatWidth = Math.round(maintainerChatWidth);
+  maintainerSideWidths[maintainerSideKind] = maintainerSideWidth;
+  const minWindow = SIDE_MIN_CHAT + minPanel;
+  const [minW, minH] = maintainingWindow.getMinimumSize();
+  if (minW !== minWindow || minH !== MAINTAINING_MIN_HEIGHT) {
+    maintainingWindow.setMinimumSize(minWindow, MAINTAINING_MIN_HEIGHT);
+  }
+  const titlebar = 38;
+  const view = ensureMaintainerSideView(maintainerSideKind);
+  for (const [kind, other] of Object.entries(maintainerSideViews)) {
+    if (kind === maintainerSideKind) continue;
+    try { maintainingWindow.contentView.removeChildView(other); } catch { /* not attached */ }
+  }
+  const children = maintainingWindow.contentView.children || [];
+  if (!children.includes(view)) maintainingWindow.contentView.addChildView(view);
+  view.setBounds({
+    x: Math.max(0, width - maintainerSideWidth),
+    y: titlebar,
+    width: Math.max(0, maintainerSideWidth),
+    height: Math.max(0, height - titlebar),
+  });
+  publishMaintainerSide();
+}
+
+function placeMaintainerWidth(nextWidth) {
+  const bounds = maintainingWindow.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  const area = display.workArea;
+  const width = Math.round(Math.min(Math.max(nextWidth, SIDE_MIN_CHAT + sideMinPanel(maintainerSideKind)), area.width));
+  let x = Math.round(bounds.x);
+  if (x + width > area.x + area.width) x = Math.round(area.x + area.width - width);
+  if (x < area.x) x = Math.round(area.x);
+  maintainingWindow.setBounds({ x, y: bounds.y, width, height: bounds.height });
+}
+
+function toggleMaintainerSide(kind) {
+  if (!maintainingWindow || maintainingWindow.isDestroyed()) return { ok: false, error: 'Maintainer 没开' };
+  const bounds = maintainingWindow.getBounds();
+  if (maintainerSideKind === kind) {
+    const chatWidth = Math.max(MAINTAINING_MIN_WIDTH, bounds.width - maintainerSideWidth);
+    maintainerSideKind = '';
+    maintainingWindow.setMinimumSize(MAINTAINING_MIN_WIDTH, MAINTAINING_MIN_HEIGHT);
+    maintainingWindow.setBounds({ x: bounds.x, y: bounds.y, width: chatWidth, height: bounds.height });
+    layoutMaintainerSide();
+    saveMaintainingWindowState();
+    return { ok: true, ...maintainerSideState() };
+  }
+  const chatWidth = maintainerSideKind
+    ? Math.max(SIDE_MIN_CHAT, bounds.width - maintainerSideWidth)
+    : bounds.width;
+  maintainerChatWidth = chatWidth;
+  maintainerSideKind = kind;
+  maintainerSideWidth = Math.max(sideMinPanel(kind), maintainerSideWidths[kind] || sideMinPanel(kind));
+  placeMaintainerWidth(chatWidth + maintainerSideWidth);
+  layoutMaintainerSide();
+  saveMaintainingWindowState();
+  return { ok: true, ...maintainerSideState() };
+}
+
+function setMaintainerSideWidth(next) {
+  if (!maintainerSideKind || !maintainingWindow || maintainingWindow.isDestroyed()) return;
+  const [width] = maintainingWindow.getContentSize();
+  const wanted = Number(next);
+  if (!Number.isFinite(wanted)) return;
+  const minPanel = sideMinPanel(maintainerSideKind);
+  const room = Math.max(minPanel, width - SIDE_MIN_CHAT);
+  maintainerSideWidth = Math.round(Math.min(Math.max(minPanel, wanted), room));
+  maintainerChatWidth = Math.round(Math.max(SIDE_MIN_CHAT, width - maintainerSideWidth));
+  layoutMaintainerSide({ fromSplit: true });
 }
 
 function openMaintainingWindow() {
@@ -7857,7 +8011,10 @@ function openMaintainingWindow() {
   }
   maintainingWindow = new BrowserWindow(options);
   maintainingWindow.setMenu(null);
-  maintainingWindow.on('resize', saveMaintainingWindowState);
+  maintainingWindow.on('resize', () => {
+    layoutMaintainerSide();
+    saveMaintainingWindowState();
+  });
   maintainingWindow.on('move', saveMaintainingWindowState);
   maintainingWindow.on('close', (event) => {
     saveMaintainingWindowState();
@@ -7868,7 +8025,10 @@ function openMaintainingWindow() {
       syncDockVisibility();
     }
   });
-  maintainingWindow.on('show', () => syncDockVisibility());
+  maintainingWindow.on('show', () => {
+    syncDockVisibility();
+    layoutMaintainerSide();
+  });
   maintainingWindow.once('ready-to-show', () => {
     presentWindow(maintainingWindow, { dock: true });
     publishComposerAlerts();
@@ -7878,6 +8038,11 @@ function openMaintainingWindow() {
   });
   maintainingWindow.loadFile(path.join(__dirname, 'maintaining.html'));
 }
+
+ipcMain.on('maintaining:side-width', (event, width) => {
+  if (!getAuthorizedMaintainingWindow(event)) return;
+  setMaintainerSideWidth(width);
+});
 
 ipcMain.handle('hermes:open', (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();

@@ -13,15 +13,16 @@
       .replace(/"/g, '&quot;');
   }
 
-  function formatWhen(ms) {
+  function formatDistance(ms, suffix) {
     const at = Number(ms);
     if (!at) return '—';
-    const pad = (value) => String(value).padStart(2, '0');
-    const parts = window.MessageTime?.localParts?.(at);
-    if (parts) return `${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)}`;
-    const date = new Date(at);
-    if (Number.isNaN(date.getTime())) return '—';
-    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    const minute = 60 * 1000;
+    const hour = 60 * minute;
+    const day = 24 * hour;
+    const delta = Math.max(0, suffix === '后' ? at - Date.now() : Date.now() - at);
+    if (delta > day) return `${Math.floor(delta / day)}天${suffix}`;
+    if (delta >= hour) return `${Math.floor(delta / hour)}小时${suffix}`;
+    return `${Math.max(1, Math.floor(delta / minute))}分钟${suffix}`;
   }
 
   function lastCell(job) {
@@ -29,7 +30,7 @@
       const title = job.lastError ? ` title="${escapeHtml(job.lastError)}"` : '';
       return `<span class="auto-dot"${title}></span>`;
     }
-    if (job.lastOk === true) return escapeHtml(formatWhen(job.lastRunAtMs));
+    if (job.lastOk === true) return escapeHtml(formatDistance(job.lastRunAtMs, '前'));
     return '—';
   }
 
@@ -57,7 +58,7 @@
         <td>${escapeHtml(job.agentName)}</td>
         <td class="task">${task}</td>
         <td>${escapeHtml(job.scheduleLabel)}</td>
-        <td>${escapeHtml(formatWhen(job.nextRunAtMs))}</td>
+        <td>${escapeHtml(formatDistance(job.nextRunAtMs, '后'))}</td>
         <td>${lastCell(job)}</td>
         <td><button type="button" class="auto-run${busy ? ' is-busy' : ''}" data-id="${escapeHtml(job.id)}" title="${action}" aria-label="${action}" ${busy ? 'disabled' : ''}>${face}</button></td>
       </tr>`;

@@ -1296,13 +1296,53 @@
     document.getElementById('automation-alert').hidden = !payload?.automation;
   }
 
-  document.getElementById('keepalive-open-btn').addEventListener('click', () => {
-    window.maintaining.openKeepalive();
+  const sideSplit = document.getElementById('side-split');
+  const sideCollapse = document.getElementById('side-collapse');
+  let sideWidth = 0;
+  let sideKind = '';
+  let sideDrag = null;
+
+  function applySide(state) {
+    const open = Boolean(state?.open);
+    sideKind = open ? state.kind || '' : '';
+    sideWidth = open ? Number(state.width) || 0 : 0;
+    document.documentElement.style.setProperty('--side-w', `${sideWidth}px`);
+    document.body.classList.toggle('side-open', open && sideWidth > 0);
+    sideSplit.hidden = !(open && sideWidth > 0);
+    sideCollapse.hidden = !(open && sideWidth > 0);
+    document.getElementById('keepalive-open-btn').classList.toggle('is-open', open && state.kind === 'keepalive');
+    document.getElementById('automation-open-btn').classList.toggle('is-open', open && state.kind === 'automation');
+  }
+
+  document.getElementById('keepalive-open-btn').addEventListener('click', async () => {
+    applySide(await window.maintaining.openKeepalive());
   });
-  document.getElementById('automation-open-btn').addEventListener('click', () => {
-    window.maintaining.openAutomation();
+  document.getElementById('automation-open-btn').addEventListener('click', async () => {
+    applySide(await window.maintaining.openAutomation());
   });
   window.maintaining.onAlerts(applyComposerAlerts);
+  window.maintaining.onSide(applySide);
+  sideCollapse.addEventListener('click', async () => {
+    if (sideKind === 'keepalive') applySide(await window.maintaining.openKeepalive());
+    else if (sideKind === 'automation') applySide(await window.maintaining.openAutomation());
+  });
+
+  sideSplit.addEventListener('pointerdown', (event) => {
+    if (sideSplit.hidden) return;
+    sideDrag = { x: event.screenX, width: sideWidth };
+    sideSplit.classList.add('is-drag');
+    sideSplit.setPointerCapture(event.pointerId);
+  });
+  sideSplit.addEventListener('pointermove', (event) => {
+    if (!sideDrag) return;
+    window.maintaining.setSideWidth(sideDrag.width - (event.screenX - sideDrag.x));
+  });
+  const endSideDrag = () => {
+    sideDrag = null;
+    sideSplit.classList.remove('is-drag');
+  };
+  sideSplit.addEventListener('pointerup', endSideDrag);
+  sideSplit.addEventListener('pointercancel', endSideDrag);
 
   attachBtn.addEventListener('click', (event) => {
     event.stopPropagation();

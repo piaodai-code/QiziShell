@@ -15,6 +15,12 @@ contextBridge.exposeInMainWorld('qiziLocalTime', {
 contextBridge.exposeInMainWorld('maintaining', {
   openKeepalive: () => ipcRenderer.invoke('keepalive:open'),
   openAutomation: () => ipcRenderer.invoke('automation:open'),
+  setSideWidth: (width) => ipcRenderer.send('maintaining:side-width', width),
+  onSide: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('maintaining:side', handler);
+    return () => ipcRenderer.removeListener('maintaining:side', handler);
+  },
   onAlerts: (callback) => {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('maintaining:alerts', handler);
