@@ -12,6 +12,8 @@
   const pending = new Map();
   const openEventLists = new Set();
   let editingId = null;
+  /** Platform card left open. Empty until the first choice, which keeps the first card open. */
+  let expandedId = '';
   let deleteArmed = false;
   let toastTimer = null;
   /** platformId -> { at, ok, error } for a notice this window has seen forwarded. */
@@ -154,6 +156,18 @@
     return 'warn';
   }
 
+  function cardExpanded(id) {
+    if (expandedId && state?.platforms.some((item) => item.platform_id === expandedId)) return expandedId === id;
+    return state?.platforms[0]?.platform_id === id;
+  }
+
+  function statusLine(platform) {
+    const next = nextKeepaliveFact(platform);
+    if (next === '—') return headline(platform)[1];
+    if (next === '已暂停' || next === '重新登录后恢复' || next === '等保活脚本') return next;
+    return `下次保活 ${next}`;
+  }
+
   function renderPlatform(platform) {
     const s = platform.status;
     const id = platform.platform_id;
@@ -162,6 +176,7 @@
     const alert = alertOf(platform);
     const busy = pending.has(id) || Boolean(s.transition);
     const locked = !connected() || busy;
+    const expanded = cardExpanded(id);
     const shownPort = s.cdp_port || platform.cdp_port;
     const browser = s.browser_alive
       ? `运行中，CDP 端口 ${shownPort}${s.shared_window ? '（各平台共用）' : ''}${s.chrome_pid ? `，进程 ${s.chrome_pid}` : ''}`
@@ -178,30 +193,39 @@
     ];
     const events = s.events.map((event) => `<li><time>${clock(event.at)}</time><span>${escapeHtml(event.text)}</span></li>`).join('');
     const chromeOff = locked || !platform.enabled;
+    const lampTitle = lamp === 'ok' ? '保活正常' : lamp === 'lost' ? '保活失败' : lamp === 'warn' ? '还不能保活' : '';
     return `
-      <article class="ka-card${platform.enabled ? '' : ' is-disabled'}" data-id="${escapeHtml(id)}">
-        <header class="ka-card-head">
-          <div class="ka-card-title"><span class="ka-lamp" data-state="${lamp}" title="${lamp === 'ok' ? '保活正常' : lamp === 'lost' ? '保活失败' : lamp === 'warn' ? '还不能保活' : ''}" ${lamp ? '' : 'hidden'}></span><strong>${escapeHtml(platform.name)}</strong><span class="ka-id">${escapeHtml(id)}</span></div>
-          <span class="ka-badge" data-tone="${tone}">${text}</span>
-          <button type="button" class="ka-text-btn" data-act="edit">编辑</button>
-        </header>
-        ${alert ? `<p class="ka-alert" data-tone="${alert[0]}">${escapeHtml(alert[1])}</p>` : ''}
-        <dl class="ka-facts">${facts.map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join('')}</dl>
-        <div class="ka-controls">
-          <label class="ka-switch${chromeOff ? ' is-off' : ''}">
-            <input type="checkbox" data-act="chrome" ${s.chrome_on ? 'checked' : ''} ${chromeOff ? 'disabled' : ''}>
-            <span class="ka-switch-track"></span>沙盒 Chrome
-          </label>
-          <label class="ka-switch${locked ? ' is-off' : ''}">
-            <input type="checkbox" data-act="pause" ${s.paused ? 'checked' : ''} ${locked ? 'disabled' : ''}>
-            <span class="ka-switch-track"></span>暂停保活
-          </label>
-          <button type="button" class="ka-btn" data-act="check" ${locked || !s.browser_alive ? 'disabled' : ''}>立即检测</button>
+      <article class="ka-card${expanded ? ' expanded' : ''}${platform.enabled ? '' : ' is-disabled'}" data-id="${escapeHtml(id)}">
+        <button type="button" class="ka-card-toggle" aria-expanded="${expanded ? 'true' : 'false'}">
+          <span class="ka-title-row">
+            <span class="ka-lamp" data-state="${lamp}" title="${lampTitle}" ${lamp ? '' : 'hidden'}></span>
+            <strong class="ka-title">${escapeHtml(platform.name)}</strong>
+            <span class="ka-id">${escapeHtml(id)}</span>
+            <span class="ka-badge" data-tone="${tone}">${text}</span>
+            <span class="ka-affordance" aria-hidden="true">⌄</span>
+          </span>
+          <span class="ka-status">${statusLine(platform)}</span>
+        </button>
+        <div class="ka-card-body">
+          ${alert ? `<p class="ka-alert" data-tone="${alert[0]}">${escapeHtml(alert[1])}</p>` : ''}
+          <dl class="ka-facts">${facts.map(([label, value]) => `<dt>${label}</dt><dd>${value}</dd>`).join('')}</dl>
+          <div class="ka-controls">
+            <label class="ka-switch${chromeOff ? ' is-off' : ''}">
+              <input type="checkbox" data-act="chrome" ${s.chrome_on ? 'checked' : ''} ${chromeOff ? 'disabled' : ''}>
+              <span class="ka-switch-track"></span>沙盒 Chrome
+            </label>
+            <label class="ka-switch${locked ? ' is-off' : ''}">
+              <input type="checkbox" data-act="pause" ${s.paused ? 'checked' : ''} ${locked ? 'disabled' : ''}>
+              <span class="ka-switch-track"></span>暂停保活
+            </label>
+            <button type="button" class="ka-text-btn" data-act="edit">编辑</button>
+            <button type="button" class="ka-btn" data-act="check" ${locked || !s.browser_alive ? 'disabled' : ''}>立即检测</button>
+          </div>
+          <details class="ka-events" ${openEventLists.has(id) ? 'open' : ''}>
+            <summary>最近记录</summary>
+            <ol>${events || '<li><span>还没有记录</span></li>'}</ol>
+          </details>
         </div>
-        <details class="ka-events" ${openEventLists.has(id) ? 'open' : ''}>
-          <summary>最近记录</summary>
-          <ol>${events || '<li><span>还没有记录</span></li>'}</ol>
-        </details>
       </article>`;
   }
 
@@ -294,6 +318,13 @@
   });
 
   platformsEl.addEventListener('click', (event) => {
+    const toggle = event.target.closest('.ka-card-toggle');
+    if (toggle) {
+      expandedId = toggle.closest('.ka-card').dataset.id;
+      renderPlatforms();
+      platformsEl.querySelector(`.ka-card[data-id="${CSS.escape(expandedId)}"] .ka-card-toggle`)?.focus();
+      return;
+    }
     const button = event.target.closest('button[data-act]');
     if (!button) return;
     const id = button.closest('.ka-card').dataset.id;

@@ -106,8 +106,9 @@
   z-index: 300;
 }
 .hermes-login[hidden] { display: none !important; }
+body.side-open .hermes-login { right: var(--side-w, 0px); }
 .hermes-login-panel {
-  width: min(400px, calc(100vw - 32px));
+  width: min(400px, calc(100% - 32px));
   background: #fff;
   border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2);
@@ -218,6 +219,12 @@
 }
 body.side-open .chat-screen,
 body.side-open .composer { margin-right: var(--side-w, 0px); }
+body.side-open .scroll-bottom-btn {
+  left: calc((100% - var(--side-w, 0px)) / 2);
+}
+.scroll-bottom-btn { opacity: 0.32; }
+.scroll-bottom-btn:hover,
+.scroll-bottom-btn:active { opacity: 0.5; }
 body.side-open .titlebar { padding-right: calc(var(--side-w, 0px) + 14px); }
 body.side-open .titlebar-center { left: calc((100% - var(--side-w, 0px)) / 2); }
 .side-split {
@@ -232,23 +239,31 @@ body.side-open .titlebar-center { left: calc((100% - var(--side-w, 0px)) / 2); }
 }
 .side-split[hidden] { display: none !important; }
 .side-collapse {
-  position: absolute;
-  top: 0;
-  z-index: 140;
-  left: calc(100% - var(--side-w, 0px) + 10px);
+  position: fixed;
+  z-index: 150;
+  left: calc(100% - var(--side-w, 0px));
+  top: calc((100% + 38px) / 2);
+  transform: translate(calc(-50% - 9px), -50%);
   display: flex;
   align-items: center;
   justify-content: center;
   width: 28px;
-  height: 38px;
+  height: 28px;
   padding: 0;
   border: 0;
   background: transparent;
   cursor: pointer;
   -webkit-app-region: no-drag;
 }
-.side-collapse img { width: 18px; height: 18px; display: block; pointer-events: none; }
-.side-collapse:hover { opacity: 0.65; }
+.side-collapse img {
+  width: 18px;
+  height: 18px;
+  display: block;
+  pointer-events: none;
+  opacity: 0.38;
+}
+.side-collapse:hover { opacity: 1; }
+.side-collapse:hover img { opacity: 0.62; }
 .side-collapse[hidden] { display: none !important; }
 .side-split::after {
   content: '';
@@ -261,3 +276,69 @@ body.side-open .titlebar-center { left: calc((100% - var(--side-w, 0px)) / 2); }
 }
 .side-split:hover::after,
 .side-split.is-drag::after { background: #b9b9be; }
+
+body,
+.app,
+.chat-screen {
+  background: #f7f7f9;
+}
+
+.messages {
+  padding: 28px 24px 12px;
+  gap: 14px;
+  background: #f7f7f9;
+}
+
+.msg {
+  align-self: flex-start;
+  max-width: calc(100% - 3em);
+  padding: 0;
+}
+
+.msg.me { align-self: flex-end; }
+
+.msg-content {
+  max-width: 100%;
+  margin: 0;
+}
+
+.msg-bubble {
+  border: none;
+  border-radius: 15px 15px 15px 6px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+  color: #29292e;
+  padding: 13px 16px;
+  line-height: 1.62;
+}
+
+.msg.me .msg-bubble {
+  background: #C5EBD4;
+  border-color: #C5EBD4;
+  color: var(--text);
+  border-radius: 15px 15px 6px 15px;
+}
+
+.msg-meta { margin-top: 4px; }
+
+#composer {
+  background: transparent;
+  padding: 0 18px 16px;
+}
+
+#composer .composer-tools {
+  border-bottom: none;
+  padding: 0 0 6px;
+  background: transparent;
+}
+
+#composer .composer-input-wrap {
+  background: #fff;
+  border: 1px solid #dedee4;
+  border-radius: 14px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.025);
+}
+
+#composer textarea {
+  background: transparent;
+}

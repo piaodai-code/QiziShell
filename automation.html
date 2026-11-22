@@ -8,8 +8,17 @@
 </head>
 <body>
   <div class="pane">
-  <p class="auto-status" id="status"></p>
-  <div class="auto-wrap">
+    <header class="monitor-head">
+      <div class="monitor-title">Cron 监控</div>
+      <div class="monitor-meta"><i></i><span id="live-label">实时状态</span></div>
+    </header>
+    <p class="auto-status" id="status"></p>
+    <div class="stats">
+      <div class="stat"><div class="stat-label">运行中</div><div class="stat-value" id="stat-running">—</div></div>
+      <div class="stat"><div class="stat-label">下一次运行</div><div class="stat-value" id="stat-next">—</div></div>
+      <div class="stat"><div class="stat-label">今日剩余</div><div class="stat-value" id="stat-today">—</div></div>
+    </div>
+    <div class="auto-wrap">
     <table class="auto-table">
       <thead>
         <tr>
@@ -23,8 +32,10 @@
       </thead>
       <tbody id="rows"></tbody>
     </table>
+    </div>
+    <div class="monitor-foot" id="foot"></div>
   </div>
-  </div>
+  <div class="clip-tip" id="clip-tip" hidden></div>
   <script src="message-time.js"></script>
   <script src="automation.js"></script>
 </body>

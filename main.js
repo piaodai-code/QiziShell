@@ -114,7 +114,11 @@ let composerGrowSnapshot = null;
 let maintainingWindow = null;
 let maintainerSideKind = '';
 let maintainerSideWidth = 0;
-const maintainerSideWidths = { keepalive: 520, automation: 760 };
+let maintainerSideApplying = false;
+const AUTOMATION_SIDE_WIDTH = 640;
+// One keep-alive card at 540px, plus the panel's 12px page inset, 1px border and 16px card padding on each side.
+const KEEPALIVE_SIDE_WIDTH = 598;
+const maintainerSideWidths = { keepalive: KEEPALIVE_SIDE_WIDTH, automation: AUTOMATION_SIDE_WIDTH };
 const maintainerSideViews = {};
 let maintainingSession = null;
 
@@ -7724,12 +7728,6 @@ function loadMaintainingWindowState() {
   };
   try {
     const saved = JSON.parse(fs.readFileSync(maintainingStatePath(), 'utf8'));
-    if (saved.sideWidths && typeof saved.sideWidths === 'object') {
-      for (const key of ['keepalive', 'automation']) {
-        const savedWidth = Number(saved.sideWidths[key]);
-        if (savedWidth >= 360 && savedWidth <= 1600) maintainerSideWidths[key] = savedWidth;
-      }
-    }
     const width = Math.max(MAINTAINING_MIN_WIDTH, Math.min(2400, Number(saved.width) || fallback.width));
     const height = Math.max(MAINTAINING_MIN_HEIGHT, Math.min(1600, Number(saved.height) || fallback.height));
     const x = Number(saved.x);
@@ -7769,7 +7767,12 @@ function saveMaintainingWindowState() {
 }
 
 const SIDE_MIN_CHAT = 440;
-const SIDE_MIN_PANEL = { keepalive: 520, automation: 1000 };
+const SIDE_MIN_PANEL = { keepalive: KEEPALIVE_SIDE_WIDTH, automation: AUTOMATION_SIDE_WIDTH };
+const SIDE_FIXED_WIDTH = { keepalive: KEEPALIVE_SIDE_WIDTH, automation: AUTOMATION_SIDE_WIDTH };
+
+function sideFixedWidth(kind) {
+  return SIDE_FIXED_WIDTH[kind] || 0;
+}
 let maintainerChatWidth = 0;
 
 function sideMinPanel(kind) {
@@ -7801,7 +7804,7 @@ function ensureMaintainerSideView(kind) {
       devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
     },
   });
-  view.setBackgroundColor('#f2f2f2');
+  view.setBackgroundColor(kind === 'automation' ? '#f7f7f9' : '#f2f2f2');
   if (kind === 'keepalive') keepaliveFeature.attach(view.webContents);
   else automationFeature.attach(view.webContents);
   view.webContents.loadFile(path.join(__dirname, file));
@@ -7809,22 +7812,50 @@ function ensureMaintainerSideView(kind) {
   return view;
 }
 
-function layoutMaintainerSide({ fromSplit = false } = {}) {
-  if (!maintainingWindow || maintainingWindow.isDestroyed()) return;
+function maintainerContentSize() {
   const [width, height] = maintainingWindow.getContentSize();
+  return { width, height };
+}
+
+function detachMaintainerSideViews() {
+  const { width, height } = maintainerContentSize();
+  for (const view of Object.values(maintainerSideViews)) {
+    try {
+      view.setBounds({
+        x: Math.max(0, width - 1),
+        y: Math.max(0, height - 1),
+        width: 1,
+        height: 1,
+      });
+      view.setVisible(false);
+    } catch { /* gone */ }
+    try { maintainingWindow.contentView.removeChildView(view); } catch { /* not attached */ }
+  }
+}
+
+function layoutMaintainerSide({ fromSplit = false } = {}) {
+  if (!maintainingWindow || maintainingWindow.isDestroyed() || maintainerSideApplying) return;
+  const { width, height } = maintainerContentSize();
   if (!maintainerSideKind) {
-    for (const view of Object.values(maintainerSideViews)) {
-      try { maintainingWindow.contentView.removeChildView(view); } catch { /* not attached */ }
-    }
+    detachMaintainerSideViews();
     maintainerSideWidth = 0;
     maintainerChatWidth = 0;
-    maintainingWindow.setMinimumSize(MAINTAINING_MIN_WIDTH, MAINTAINING_MIN_HEIGHT);
+    const [minW, minH] = maintainingWindow.getMinimumSize();
+    if (minW !== MAINTAINING_MIN_WIDTH || minH !== MAINTAINING_MIN_HEIGHT) {
+      maintainerSideApplying = true;
+      try { maintainingWindow.setMinimumSize(MAINTAINING_MIN_WIDTH, MAINTAINING_MIN_HEIGHT); }
+      finally { maintainerSideApplying = false; }
+    }
     publishMaintainerSide();
     return;
   }
   if (width < 50 || height < 50) return;
   const minPanel = sideMinPanel(maintainerSideKind);
-  if (!fromSplit) {
+  const fixed = sideFixedWidth(maintainerSideKind);
+  if (fixed) {
+    maintainerSideWidth = fixed;
+    maintainerChatWidth = Math.max(SIDE_MIN_CHAT, width - maintainerSideWidth);
+  } else if (!fromSplit) {
     if (!maintainerChatWidth) maintainerChatWidth = Math.max(SIDE_MIN_CHAT, width - maintainerSideWidth);
     let panel = width - maintainerChatWidth;
     if (panel < minPanel) {
@@ -7833,22 +7864,21 @@ function layoutMaintainerSide({ fromSplit = false } = {}) {
     }
     maintainerSideWidth = panel;
   }
-  maintainerSideWidth = Math.round(maintainerSideWidth);
+  const maxSide = Math.max(0, width - SIDE_MIN_CHAT);
+  maintainerSideWidth = Math.min(Math.round(maintainerSideWidth), maxSide);
+  maintainerChatWidth = Math.max(SIDE_MIN_CHAT, width - maintainerSideWidth);
   maintainerChatWidth = Math.round(maintainerChatWidth);
-  maintainerSideWidths[maintainerSideKind] = maintainerSideWidth;
-  const minWindow = SIDE_MIN_CHAT + minPanel;
-  const [minW, minH] = maintainingWindow.getMinimumSize();
-  if (minW !== minWindow || minH !== MAINTAINING_MIN_HEIGHT) {
-    maintainingWindow.setMinimumSize(minWindow, MAINTAINING_MIN_HEIGHT);
-  }
+  if (!fixed) maintainerSideWidths[maintainerSideKind] = maintainerSideWidth;
   const titlebar = 38;
   const view = ensureMaintainerSideView(maintainerSideKind);
   for (const [kind, other] of Object.entries(maintainerSideViews)) {
     if (kind === maintainerSideKind) continue;
+    try { other.setVisible(false); } catch { /* gone */ }
     try { maintainingWindow.contentView.removeChildView(other); } catch { /* not attached */ }
   }
   const children = maintainingWindow.contentView.children || [];
   if (!children.includes(view)) maintainingWindow.contentView.addChildView(view);
+  view.setVisible(true);
   view.setBounds({
     x: Math.max(0, width - maintainerSideWidth),
     y: titlebar,
@@ -7869,16 +7899,36 @@ function placeMaintainerWidth(nextWidth) {
   maintainingWindow.setBounds({ x, y: bounds.y, width, height: bounds.height });
 }
 
+function resizeMaintainerToChat(chatContentWidth) {
+  const frame = maintainingWindow.getBounds();
+  const { width: contentW } = maintainerContentSize();
+  const inset = Math.max(0, frame.width - contentW);
+  const width = Math.max(MAINTAINING_MIN_WIDTH, Math.round(chatContentWidth)) + inset;
+  maintainingWindow.setBounds({ x: frame.x, y: frame.y, width, height: frame.height }, false);
+}
+
 function toggleMaintainerSide(kind) {
   if (!maintainingWindow || maintainingWindow.isDestroyed()) return { ok: false, error: 'Maintainer 没开' };
   const bounds = maintainingWindow.getBounds();
   if (maintainerSideKind === kind) {
-    const chatWidth = Math.max(MAINTAINING_MIN_WIDTH, bounds.width - maintainerSideWidth);
+    const { width: contentW } = maintainerContentSize();
+    const chatWidth = Math.max(MAINTAINING_MIN_WIDTH, contentW - maintainerSideWidth);
     maintainerSideKind = '';
-    maintainingWindow.setMinimumSize(MAINTAINING_MIN_WIDTH, MAINTAINING_MIN_HEIGHT);
-    maintainingWindow.setBounds({ x: bounds.x, y: bounds.y, width: chatWidth, height: bounds.height });
-    layoutMaintainerSide();
-    saveMaintainingWindowState();
+    maintainerSideApplying = true;
+    try {
+      detachMaintainerSideViews();
+      maintainingWindow.setMinimumSize(MAINTAINING_MIN_WIDTH, MAINTAINING_MIN_HEIGHT);
+    } finally {
+      maintainerSideApplying = false;
+    }
+    publishMaintainerSide();
+    setImmediate(() => {
+      if (!maintainingWindow || maintainingWindow.isDestroyed() || maintainerSideKind) return;
+      resizeMaintainerToChat(chatWidth);
+      layoutMaintainerSide();
+      maintainingWindow.webContents.invalidate();
+      saveMaintainingWindowState();
+    });
     return { ok: true, ...maintainerSideState() };
   }
   const chatWidth = maintainerSideKind
@@ -7886,16 +7936,31 @@ function toggleMaintainerSide(kind) {
     : bounds.width;
   maintainerChatWidth = chatWidth;
   maintainerSideKind = kind;
-  maintainerSideWidth = Math.max(sideMinPanel(kind), maintainerSideWidths[kind] || sideMinPanel(kind));
+  maintainerSideWidth = sideFixedWidth(kind) || Math.max(sideMinPanel(kind), maintainerSideWidths[kind] || sideMinPanel(kind));
+  const minWindow = SIDE_MIN_CHAT + sideMinPanel(kind);
+  maintainerSideApplying = true;
+  try { maintainingWindow.setMinimumSize(minWindow, MAINTAINING_MIN_HEIGHT); }
+  finally { maintainerSideApplying = false; }
   placeMaintainerWidth(chatWidth + maintainerSideWidth);
   layoutMaintainerSide();
   saveMaintainingWindowState();
   return { ok: true, ...maintainerSideState() };
 }
 
+function setMaintainerChatWidth(next) {
+  const fixed = sideFixedWidth(maintainerSideKind);
+  if (!fixed || !maintainingWindow || maintainingWindow.isDestroyed()) return;
+  const chat = Number(next);
+  if (!Number.isFinite(chat)) return;
+  maintainerSideWidth = fixed;
+  maintainerChatWidth = Math.max(SIDE_MIN_CHAT, Math.round(chat));
+  placeMaintainerWidth(maintainerChatWidth + maintainerSideWidth);
+  layoutMaintainerSide({ fromSplit: true });
+}
+
 function setMaintainerSideWidth(next) {
-  if (!maintainerSideKind || !maintainingWindow || maintainingWindow.isDestroyed()) return;
-  const [width] = maintainingWindow.getContentSize();
+  if (!maintainerSideKind || sideFixedWidth(maintainerSideKind) || !maintainingWindow || maintainingWindow.isDestroyed()) return;
+  const { width } = maintainerContentSize();
   const wanted = Number(next);
   if (!Number.isFinite(wanted)) return;
   const minPanel = sideMinPanel(maintainerSideKind);
@@ -7934,7 +7999,9 @@ function openMaintainingWindow() {
   }
   maintainingWindow = new BrowserWindow(options);
   maintainingWindow.setMenu(null);
+  maintainingWindow.contentView.setBackgroundColor('#00000000');
   maintainingWindow.on('resize', () => {
+    if (maintainerSideApplying) return;
     layoutMaintainerSide();
     saveMaintainingWindowState();
   });
@@ -7965,6 +8032,11 @@ function openMaintainingWindow() {
 ipcMain.on('maintaining:side-width', (event, width) => {
   if (!getAuthorizedMaintainingWindow(event)) return;
   setMaintainerSideWidth(width);
+});
+
+ipcMain.on('maintaining:chat-width', (event, width) => {
+  if (!getAuthorizedMaintainingWindow(event)) return;
+  setMaintainerChatWidth(width);
 });
 
 ipcMain.handle('hermes:open', (event) => {

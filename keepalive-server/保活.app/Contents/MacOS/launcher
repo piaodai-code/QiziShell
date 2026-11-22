@@ -1,8 +1,8 @@
 #!/bin/bash
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
-PORT=55557
-DATA="/var/folders/dr/741gdpks46lf63yk_yzmw3600000gn/T/qizi-keepalive-window-data-LPw1ZR/server"
+PORT=61952
+DATA="/var/folders/dr/741gdpks46lf63yk_yzmw3600000gn/T/qizi-keepalive-window-data-ivI6yb/server"
 if curl -sf -m 3 -o /dev/null "http://127.0.0.1:$PORT/api/state"; then
   curl -sf -m 30 -X POST "http://127.0.0.1:$PORT/api/window/show" >/dev/null
   exit 0

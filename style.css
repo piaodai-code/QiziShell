@@ -43,10 +43,11 @@ html, body {
 .app { display: flex; flex-direction: column; height: 100vh; }
 .titlebar {
   --titlebar-height: 38px;
-  height: var(--titlebar-height); background: var(--titlebar-bg); display: flex; align-items: center;
+  height: var(--titlebar-height); background: rgba(255, 255, 255, 0.86); display: flex; align-items: center;
+  backdrop-filter: blur(18px);
   -webkit-app-region: drag;
   justify-content: space-between; padding: 0 14px;
-  border-bottom: 1px solid var(--border); flex-shrink: 0;
+  border-bottom: 1px solid #e7e7eb; flex-shrink: 0;
   position: relative;
   overflow: visible;
   z-index: 120;
@@ -417,10 +418,15 @@ body.meeting-mode .titlebar-identity {
   background: var(--border);
 }
 .status-pill {
-  font-size: 11px; color: var(--meta-text); max-width: 140px;
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--meta-text); max-width: 160px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.status-pill[data-kind="ok"] { color: #2e7d32; }
+.status-pill[data-kind="ok"] { color: #4b8759; }
+.status-pill[data-kind="ok"]::before {
+  content: '';
+  width: 7px; height: 7px; border-radius: 50%; background: #34a853; flex: none;
+}
 .status-pill[data-kind="error"] { color: #c62828; }
 .status-pill[data-kind="pending"] { color: #ef6c00; }
 .debug-pill {
@@ -437,6 +443,11 @@ body.meeting-mode .titlebar-identity {
 .messages {
   flex: 1; overflow-y: auto; padding: 32px 0 20px;
   display: flex; flex-direction: column; gap: 22px;
+}
+.chat-screen .messages {
+  padding: 32px 24px 18px;
+  gap: 18px;
+  background: #f5f5f7;
 }
 .scroll-bottom-btn {
   position: fixed;
@@ -467,6 +478,7 @@ body.meeting-mode .titlebar-identity {
   opacity: 0.88;
   transform: translateX(-50%) scale(0.96);
 }
+.chat-screen { background: #f5f5f7; }
 .chat-screen,
 .meeting-screen {
   flex: 1;
@@ -616,6 +628,31 @@ body.meeting-mode .composer {
 }
 .msg-meta { font-size: 11px; color: var(--meta-text); margin-top: 4px; padding: 0 4px; }
 .msg.me .msg-meta { text-align: right; }
+.chat-screen .msg-avatar { display: none; }
+.chat-screen .msg {
+  align-self: flex-start;
+  max-width: calc(100% - 3em);
+  padding: 0;
+}
+.chat-screen .msg.me { align-self: flex-end; }
+.chat-screen .msg-content,
+.chat-screen .msg-tool .msg-content { max-width: 100%; margin: 0; }
+.chat-screen .msg-bubble {
+  border: none;
+  border-radius: 16px 16px 16px 6px;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.035);
+  color: #242429;
+  padding: 14px 18px;
+  line-height: 1.68;
+}
+.chat-screen .msg.me .msg-bubble {
+  background: #d1ecda;
+  border-color: #d1ecda;
+  color: #254a32;
+  border-radius: 16px 16px 6px 16px;
+}
+.chat-screen .msg-meta { margin-top: 5px; padding: 0 7px; color: #909097; }
 
 .msg-tool .msg-content { max-width: min(var(--msg-content-max-w), 92%); }
 .chat-tool-card {
@@ -791,8 +828,9 @@ body.meeting-mode .composer {
 }
 
 .composer {
-  background: var(--bg); flex-shrink: 0; position: relative;
+  background: #f5f5f7; flex-shrink: 0; position: relative;
   display: flex; flex-direction: column;
+  padding-bottom: 16px;
 }
 .composer--resized .composer-body {
   flex: 1; min-height: 0;
@@ -850,18 +888,23 @@ body.meeting-mode .composer {
   width: 30px; height: 3px; border-top: 1px solid #bbb;
 }
 .composer-tools {
-  display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid #eee;
-  flex-shrink: 0; position: relative; z-index: 3;
+  display: flex; align-items: center; gap: 8px; padding: 8px 18px 6px; border-bottom: none;
+  flex-shrink: 0; position: relative; z-index: 3; background: transparent;
 }
 .composer-tools-left {
   display: flex; align-items: center; gap: 2px; flex-shrink: 0;
 }
 .composer-tools-separator {
-  margin: 0 10px;
-  color: #b0b0b0;
-  font-size: 12px;
-  line-height: 1;
+  width: 1px;
+  height: 17px;
+  margin: 0 3px;
+  background: #d7d7dc;
+  color: transparent;
+  font-size: 0;
+  line-height: 0;
+  overflow: hidden;
   user-select: none;
+  flex: none;
 }
 .attach-picker-wrap {
   position: relative;
@@ -1079,19 +1122,20 @@ body.meeting-mode .composer {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 27px;
   max-width: 132px;
-  border: none;
+  border: 1px solid #e5e5e9;
   cursor: pointer;
   font-family: var(--font);
   font-size: 11px;
-  font-weight: 500;
-  color: #555;
-  background: #e8e8e8;
-  padding: 3px 8px;
-  border-radius: 10px;
+  font-weight: 400;
+  color: #5a5a61;
+  background: #f0f0f3;
+  padding: 0 10px;
+  border-radius: 999px;
   transition: background 0.15s, color 0.15s;
 }
-.session-controls-btn:hover { background: #dcdcdc; }
+.session-controls-btn:hover { background: #e8e8ec; }
 .session-controls-btn:disabled { opacity: 0.6; cursor: wait; }
 .session-controls-btn.open { background: var(--me-bubble-bg); color: var(--accent); }
 #session-controls-badge {
@@ -1280,18 +1324,19 @@ body.meeting-mode .composer {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  height: 27px;
   max-width: 180px;
-  border: none;
+  border: 1px solid #e5e5e9;
   cursor: pointer;
   font-size: 11px;
-  color: #555;
-  background: #e8e8e8;
-  padding: 3px 8px;
-  border-radius: 10px;
-  font-weight: 500;
+  font-weight: 400;
+  color: #5a5a61;
+  background: #f0f0f3;
+  padding: 0 10px;
+  border-radius: 999px;
   transition: background 0.15s;
 }
-.model-picker-btn:hover { background: #dcdcdc; }
+.model-picker-btn:hover { background: #e8e8ec; }
 .model-picker-btn:disabled { opacity: 0.6; cursor: wait; }
 .model-picker-btn.open { background: var(--me-bubble-bg); color: var(--accent); }
 #model-badge {
@@ -1382,9 +1427,9 @@ body.meeting-mode .composer {
 }
 .composer-pending {
   display: flex; flex-wrap: wrap; gap: 8px;
-  padding: 8px 16px 0 16px;
-  border-top: 1px solid #e0e0e0;
-  background: var(--bg);
+  padding: 8px 18px 0;
+  border-top: none;
+  background: transparent;
 }
 .composer-pending[hidden] { display: none; }
 
@@ -1392,8 +1437,8 @@ body.meeting-mode .composer {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px 16px 0 16px;
-  background: var(--bg);
+  padding: 8px 18px 0;
+  background: transparent;
 }
 .composer-quote[hidden] { display: none !important; }
 .composer-quote-remove {
@@ -2011,6 +2056,11 @@ svg.msg-context-icon {
   position: relative;
   flex-shrink: 0;
   isolation: isolate;
+  margin: 0 18px;
+  background: #fff;
+  border: 1px solid #dedee4;
+  border-radius: 14px;
+  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.025);
 }
 .composer--resized .composer-input-wrap {
   flex: 1;
@@ -2033,7 +2083,7 @@ svg.msg-context-icon {
   height: calc(90px + 6mm); min-height: calc(90px + 6mm);
   border: none; resize: none;
   padding: 12px 52px 12px 16px; font-size: 14px; font-family: var(--font);
-  line-height: 1.6; outline: none; background: var(--bg); color: var(--text);
+  line-height: 1.6; outline: none; background: transparent; color: var(--text);
 }
 .composer--resized textarea {
   flex: 1; min-height: 0; height: auto; max-height: none; overflow-y: auto;
@@ -2141,6 +2191,20 @@ svg.msg-context-icon {
   opacity: 0.82;
 }
 .icon-btn-img:hover img { opacity: 1; }
+.composer .icon-btn-img {
+  width: 31px;
+  height: 31px;
+  border-radius: 9px;
+  color: #7e8186;
+}
+.composer .icon-btn-img:hover { background: #ededf0; }
+.composer .icon-btn-img img { opacity: 0.72; }
+.composer .icon-btn-img:hover img { opacity: 1; }
+#settings-btn {
+  color: #666;
+  font-size: 18px;
+  padding: 4px 8px;
+}
 .icon-btn-img:disabled img { opacity: 0.45; }
 .icon-btn-mic:disabled,
 .icon-btn-mic.is-disabled {
@@ -2171,13 +2235,13 @@ svg.msg-context-icon {
   max-width: 160px;
   padding: 0 8px;
   border: none;
-  border-radius: 6px;
+  border-radius: 9px;
   background: transparent;
   cursor: pointer;
   font-family: var(--font);
-  font-size: 13px;
-  font-weight: 400;
-  color: rgba(0, 0, 0, 0.82);
+  font-size: 12px;
+  font-weight: 300;
+  color: #b0b0b6;
   line-height: 1;
   white-space: nowrap;
   overflow: hidden;
@@ -2185,8 +2249,8 @@ svg.msg-context-icon {
 }
 .channel-picker-btn:hover,
 .channel-picker-btn.open {
-  background: #ececec;
-  color: #000;
+  background: #ededf0;
+  color: #8a8a92;
 }
 .channel-picker-btn.is-pending { opacity: 0.72; }
 .channel-popup {

@@ -12,14 +12,16 @@
       <button type="button" class="ce-btn" id="ce-stash" title="先存起来，稍后从聊天窗口右上角继续">暂存修改</button>
       <button type="button" class="ce-btn" id="ce-discard" title="清掉所有修改和批注，并关闭编辑器">放弃修改</button>
     </div>
-    <button type="button" class="ce-btn" id="ce-drop-text" title="删掉选中的文字，不留下修订痕迹">丢弃</button>
-    <div class="ce-views" role="tablist" aria-label="视图">
-      <button type="button" class="ce-view is-active" data-view="markup" role="tab" aria-selected="true">修订</button>
-      <button type="button" class="ce-view" data-view="final" role="tab" aria-selected="false">终稿</button>
-      <button type="button" class="ce-view" data-view="original" role="tab" aria-selected="false">原稿</button>
+    <div class="ce-toolbar-group ce-toolbar-right">
+      <button type="button" class="ce-btn" id="ce-drop-text" title="删掉选中的文字，不留下修订痕迹">丢弃</button>
+      <div class="ce-views" role="tablist" aria-label="视图">
+        <button type="button" class="ce-view is-active" data-view="markup" role="tab" aria-selected="true">修订</button>
+        <button type="button" class="ce-view" data-view="final" role="tab" aria-selected="false">终稿</button>
+        <button type="button" class="ce-view" data-view="original" role="tab" aria-selected="false">原稿</button>
+      </div>
+      <button type="button" class="ce-btn" id="ce-postscript-open" title="写一段附言，发送时放在消息最后">附言</button>
+      <button type="button" class="ce-btn ce-btn-primary" id="ce-send" title="把未处理的修订和批注发给当前对话">发送给 AI 优化</button>
     </div>
-    <button type="button" class="ce-btn" id="ce-postscript-open" title="写一段附言，发送时放在消息最后">附言</button>
-    <button type="button" class="ce-btn ce-btn-primary" id="ce-send" title="把未处理的修订和批注发给当前对话">发送给 AI 优化</button>
   </header>
   <div class="ce-sub">
     <span id="ce-meta"></span>

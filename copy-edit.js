@@ -392,7 +392,7 @@ function patchPreview(patch) {
 function renderSidebar() {
   const items = [...doc.patches].sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
   if (!items.length) {
-    sideList.innerHTML = '<div class="ce-empty-side">还没有修订。直接输入会标成新增，选中文字后删除、替换、拖动或加批注。</div>';
+    sideList.innerHTML = '<div class="ce-empty-side">还没有修订。直接输入会标成新增；选中文字后删除、替换、拖动或加批注。</div>';
     return;
   }
   sideList.innerHTML = items.map((patch) => {

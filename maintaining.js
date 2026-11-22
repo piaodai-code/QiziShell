@@ -155,11 +155,6 @@
     if (credentials.password) passwordEl.value = credentials.password;
   }
 
-  function avatarHtml(who) {
-    if (who === 'me') return '<div class="msg-avatar msg-avatar-me" role="img" aria-label="Me">我</div>';
-    return '<div class="msg-avatar msg-avatar-them" role="img" aria-label="Maintaining"><img src="assets/maintaining-avatar.png" alt="Maintaining"></div>';
-  }
-
   function authorLabel(message) {
     return message?.who === 'me' ? '我' : 'Maintaining';
   }
@@ -380,7 +375,6 @@
       const row = document.createElement('div');
       row.className = `msg ${message.who === 'me' ? 'me' : 'them'}`;
       row.innerHTML = `
-        ${avatarHtml(message.who)}
         <div class="msg-content">
           <div class="msg-bubble"></div>
           <div class="msg-meta">${escapeHtml(message.time || '')}</div>
@@ -1329,13 +1323,18 @@
 
   sideSplit.addEventListener('pointerdown', (event) => {
     if (sideSplit.hidden) return;
-    sideDrag = { x: event.screenX, width: sideWidth };
+    sideDrag = { x: event.screenX, width: sideWidth, windowWidth: window.innerWidth, kind: sideKind };
     sideSplit.classList.add('is-drag');
     sideSplit.setPointerCapture(event.pointerId);
   });
   sideSplit.addEventListener('pointermove', (event) => {
     if (!sideDrag) return;
-    window.maintaining.setSideWidth(sideDrag.width - (event.screenX - sideDrag.x));
+    const dx = event.screenX - sideDrag.x;
+    if (sideDrag.kind === 'automation' || sideDrag.kind === 'keepalive') {
+      window.maintaining.setChatWidth(sideDrag.windowWidth - sideDrag.width + dx);
+      return;
+    }
+    window.maintaining.setSideWidth(sideDrag.width - dx);
   });
   const endSideDrag = () => {
     sideDrag = null;

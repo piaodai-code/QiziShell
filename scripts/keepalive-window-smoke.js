@@ -165,7 +165,7 @@ async function main() {
     await waitUntil(async () => !(await page('document.getElementById("ka-dialog").open')), 5000, 'the dialog to close');
     check((await text('.ka-badge')) === '已停止', 'the new platform shows as stopped');
     check(await page('Boolean(document.getElementById("ka-add").compareDocumentPosition(document.getElementById("ka-platforms")) & Node.DOCUMENT_POSITION_FOLLOWING)'), 'add platform sits above the cards');
-    check(await page('Math.round(document.querySelector(".ka-card").getBoundingClientRect().width)') <= 452, 'a platform card stays at the window minimum width');
+    check(await page('Math.round(document.querySelector(".ka-card").getBoundingClientRect().width)') <= 540, 'a platform card stays within the side-panel width');
     check(await page('document.querySelector(".ka-lamp").hidden') === true, 'a stopped platform shows no lamp');
     check((await text('.ka-facts')).includes('占用后 45 分钟自动解除'), 'the configured lock expiry is shown');
     await shot('03-stopped');
