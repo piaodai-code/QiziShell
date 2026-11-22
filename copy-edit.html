@@ -12,11 +12,13 @@
       <button type="button" class="ce-btn" id="ce-stash" title="先存起来，稍后从聊天窗口右上角继续">暂存修改</button>
       <button type="button" class="ce-btn" id="ce-discard" title="清掉所有修改和批注，并关闭编辑器">放弃修改</button>
     </div>
+    <button type="button" class="ce-btn" id="ce-drop-text" title="删掉选中的文字，不留下修订痕迹">丢弃</button>
     <div class="ce-views" role="tablist" aria-label="视图">
       <button type="button" class="ce-view is-active" data-view="markup" role="tab" aria-selected="true">修订</button>
       <button type="button" class="ce-view" data-view="final" role="tab" aria-selected="false">终稿</button>
       <button type="button" class="ce-view" data-view="original" role="tab" aria-selected="false">原稿</button>
     </div>
+    <button type="button" class="ce-btn" id="ce-postscript-open" title="写一段附言，发送时放在消息最后">附言</button>
     <button type="button" class="ce-btn ce-btn-primary" id="ce-send" title="把未处理的修订和批注发给当前对话">发送给 AI 优化</button>
   </header>
   <div class="ce-sub">
@@ -39,6 +41,15 @@
   <div id="ce-drop-caret" class="ce-drop-caret" hidden></div>
   <div id="ce-pop" class="ce-pop" hidden role="menu" aria-label="撤销这条修订">
     <button type="button" data-decide="undo" role="menuitem">撤销</button>
+  </div>
+  <div id="ce-postscript-layer" class="ce-postscript-layer" hidden>
+    <form id="ce-postscript" class="ce-postscript">
+      <textarea id="ce-postscript-input" placeholder="写在发给 AI 的消息最后。例如：语气再克制一点，不要加新事实。"></textarea>
+      <div class="ce-postscript-actions">
+        <button type="button" class="ce-btn" id="ce-postscript-cancel">取消</button>
+        <button type="submit" class="ce-btn ce-btn-primary">确定</button>
+      </div>
+    </form>
   </div>
   <form id="ce-note" class="ce-note" hidden>
     <textarea id="ce-note-input" rows="4" placeholder="写出希望 AI 怎么改。例如：这里想更有科技感，但我词穷了。"></textarea>

@@ -58,6 +58,8 @@ button, textarea { font: inherit; }
   flex-shrink: 0;
 }
 
+#ce-drop-text { flex-shrink: 0; }
+
 .ce-view, .ce-btn, .ce-float button, .ce-pop button, .ce-menu button {
   border: 1px solid transparent;
   background: transparent;
@@ -101,6 +103,11 @@ button, textarea { font: inherit; }
 }
 
 .ce-btn-primary:hover { background: #0f652c; }
+
+.ce-btn.is-set {
+  border-color: #137333;
+  color: #137333;
+}
 .ce-btn-primary:disabled { background: #b7d7c2; border-color: #b7d7c2; color: #fff; }
 
 .ce-sub {
@@ -126,16 +133,42 @@ button, textarea { font: inherit; }
 .ce-main {
   min-width: 0;
   min-height: 0;
-  padding: 12px;
+  overflow-x: hidden;
+  overflow-y: scroll;
+  scrollbar-gutter: stable;
+  background: #e6e6e8;
+  padding: 28px 16px 48px;
+  container-type: inline-size;
+}
+
+.ce-main::-webkit-scrollbar {
+  width: 14px;
+}
+
+.ce-main::-webkit-scrollbar-track {
+  background: #e6e6e8;
+}
+
+.ce-main::-webkit-scrollbar-thumb {
+  background: #6d6d72;
+  border: 3px solid #e6e6e8;
+  border-radius: 8px;
 }
 
 .ce-editor {
-  height: 100%;
-  overflow: auto;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 20px 28px;
+  width: min(100%, 216mm);
+  min-height: calc(min(100cqw, 216mm) * 279 / 216);
+  margin: 0 auto;
+  box-sizing: border-box;
+  overflow: visible;
+  background: #fff;
+  border: none;
+  border-radius: 1px;
+  box-shadow:
+    0 1px 1px rgba(0, 0, 0, 0.05),
+    0 8px 18px rgba(0, 0, 0, 0.12),
+    0 22px 44px rgba(0, 0, 0, 0.14);
+  padding: clamp(28px, 6.5%, 22mm) clamp(24px, 7.4%, 20mm) clamp(36px, 8%, 24mm);
   font-size: 16px;
   line-height: 1.75;
   white-space: pre-wrap;
@@ -144,11 +177,11 @@ button, textarea { font: inherit; }
 }
 
 .ce-editor.is-readonly {
-  background: #fafafa;
+  background: #fff;
   color: #333;
 }
 
-.ce-editor:focus { border-color: #c8c8c8; }
+.ce-editor:focus { border-color: transparent; }
 
 .ce-piece { border-radius: 2px; }
 
@@ -295,6 +328,47 @@ button, textarea { font: inherit; }
 
 .ce-editor.is-dragging,
 .ce-editor.is-dragging * { cursor: grabbing; }
+
+.ce-postscript-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.ce-postscript {
+  width: min(440px, 100%);
+  padding: 12px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.16);
+}
+
+.ce-postscript textarea {
+  display: block;
+  width: 100%;
+  min-height: 13.5em;
+  max-height: 70vh;
+  resize: none;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.ce-postscript-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
 
 .ce-note {
   width: min(360px, calc(100vw - 24px));

@@ -51,6 +51,7 @@ const {
   dmScopeRank,
 } = require('./private-channel');
 const { createMessageArchiveStore } = require('./message-archive');
+const { composeServerTranscript } = require('./message-compose');
 
 function isSafeExternalHttpUrl(url) {
   if (typeof url !== 'string') return false;
@@ -60,10 +61,6 @@ function isSafeExternalHttpUrl(url) {
   } catch {
     return false;
   }
-}
-
-function isExternalUrl(url) {
-  return isSafeExternalHttpUrl(url);
 }
 
 function openExternal(url) {
@@ -579,7 +576,6 @@ let pendingUpdateInfo = null;
 let auxiliaryModalRefCount = 0;
 /** @type {Map<string, { fullText: string, resolve: Function, reject: Function, timeout: NodeJS.Timeout, lastEventAt: number }>} */
 const pendingMeetingRuns = new Map();
-let meetingEngine = null;
 let meetingBriefingRunning = false;
 let meetingBriefingCancelled = false;
 /** 当前会议群聊 session（与私聊 main session 隔离） */
@@ -651,6 +647,19 @@ const automationFeature = createAutomationFeature({
     await client.waitForConnect();
     return client.request(method, params, { timeoutMs: 25000 });
   },
+  gatewayRetryable: (err) => {
+    let client;
+    try {
+      client = ensureGateway();
+    } catch {
+      return false;
+    }
+    return isRetryableGatewayDisconnect(err, {
+      connected: client.connected === true,
+      socketRetiring: client.socketRetiring === true,
+      readyState: client.ws?.readyState,
+    });
+  },
   onAutomationAlert: (failed) => {
     composerAlerts.automation = failed === true;
     publishComposerAlerts();
@@ -717,6 +726,11 @@ if (process.env.QIZI_DEVTOOLS_PORT) {
 // 抑制 Chromium 后台连 Google 等服务的 SSL 握手重试日志（不影响 Gateway 业务连接）
 app.commandLine.appendSwitch('disable-background-networking');
 app.commandLine.appendSwitch('disable-component-update');
+// 主窗口经常停在另一块屏幕上。长时间不点会被当成后台或被挡住，
+// 拉新消息的定时器停住，要点一下界面积压的消息才一起出来。
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,IntensiveWakeUpThrottling');
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
@@ -841,23 +855,6 @@ async function fetchAgentMainSessionModels(client, mainKey = 'main') {
   return map;
 }
 
-async function fetchSessionCurrentModel(client, sessionKey, defaults = {}) {
-  try {
-    const result = await client.request('chat.history', { sessionKey, limit: 1 });
-    const sessionInfo = result?.sessionInfo || {};
-    const modelProvider = sessionInfo.modelProvider ?? defaults.modelProvider ?? null;
-    const model = sessionInfo.model ?? defaults.model ?? null;
-    if (!model) return null;
-    return {
-      modelProvider,
-      model,
-      qualified: modelProvider && model ? `${modelProvider}/${model}` : model,
-    };
-  } catch {
-    return null;
-  }
-}
-
 function buildAgentSessionKey(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
   return `agent:${agentId}:${mainKey}`;
 }
@@ -865,10 +862,6 @@ function buildAgentSessionKey(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
 function parseAgentIdFromSessionKey(sessionKey) {
   const match = /^agent:([^:]+):/.exec(sessionKey || '');
   return match ? match[1] : 'main';
-}
-
-function pinnedSessionKeyForAgent(agentId, mainKey = SHELL_SESSION_MAIN_KEY) {
-  return buildAgentSessionKey(agentId, mainKey);
 }
 
 function getPrivateChannels() {
@@ -1274,11 +1267,6 @@ async function resolveAgentAvatarDataUrl(agentId, avatarValue, avatarStatus) {
   } catch {
     return null;
   }
-}
-
-/** @deprecated alias */
-async function fetchAgentAvatarDataUrl(agentId, avatarPath, avatarStatus) {
-  return resolveAgentAvatarDataUrl(agentId, avatarPath, avatarStatus);
 }
 
 async function enrichAgentEntry(client, agent, meta = {}) {
@@ -1797,6 +1785,7 @@ function sanitizeCopyEditDraft(raw) {
     originalText,
     baseText,
     patches,
+    postscript: typeof raw.postscript === 'string' ? raw.postscript.trim().slice(0, COPY_EDIT_MAX_CHARS) : '',
     preview: typeof raw.preview === 'string' ? raw.preview.replace(/\s+/g, ' ').trim().slice(0, 120) : '',
     savedAt: Date.now(),
   };
@@ -2572,18 +2561,6 @@ function sendStreamErrorToRenderer(run, clientRunId, error) {
   }
 }
 
-function sendChatSegmentToRenderer(run, clientRunId, text) {
-  const payload = {
-    runId: clientRunId,
-    sessionKey: run?.sessionKey || getSessionKey(),
-    text,
-  };
-  sendToMainRenderer('openclaw:chat-segment', payload);
-  if (run?.sender) {
-    safeSendTo(run.sender, 'openclaw:chat-segment', payload);
-  }
-}
-
 function broadcastToRenderers(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     safeSendTo(mainWindow.webContents, channel, payload);
@@ -2740,18 +2717,6 @@ function deliveryMirrorModelName(model) {
   return '';
 }
 
-function rawAssistantText(message) {
-  if (!message) return '';
-  if (typeof message === 'string') return message;
-  if (typeof message.content === 'string') return message.content;
-  if (!Array.isArray(message.content)) return '';
-  return message.content.map((block) => {
-    if (typeof block === 'string') return block;
-    if (typeof block?.text === 'string') return block.text;
-    return '';
-  }).filter(Boolean).join('\n');
-}
-
 /** 官方识别：provider=openclaw 且 model 为 delivery-mirror / gateway-injected，或带 openclawDeliveryMirror。channel-final 是已投递正文的镜像，要留下。 */
 function deliveryMirrorKind(message) {
   if (!message || typeof message !== 'object') return '';
@@ -2808,16 +2773,6 @@ function isDeliveryMirrorNotice(message) {
 
 function isDeliveryMirrorEvent(payload) {
   return shouldOmitConciseClientEvent(payload);
-}
-
-function conciseDisplayText(run) {
-  const committed = String(run?.conciseProcess || '').trim();
-  const live = String(run?.conciseLive || '').trim();
-  if (!committed) return live;
-  if (!live || committed.endsWith(live) || live.startsWith(committed)) {
-    return live.startsWith(committed) ? live : committed;
-  }
-  return `${committed}\n\n${live}`;
 }
 
 function compactStreamText(value) {
@@ -2965,6 +2920,7 @@ function convertHistoryMessages(serverMessages) {
       const displayTime = sent.time
         ? sent.time.match(/\d{2}:\d{2}/)?.[0] || sent.time
         : '';
+      const serverId = rawChatHistoryIdentity(m);
       return {
         who: role === 'user' ? 'me' : 'them',
         text: resolvedText,
@@ -2973,6 +2929,7 @@ function convertHistoryMessages(serverMessages) {
         time: displayTime,
         sentTime: sent.time || undefined,
         sentAtMs: sent.sentAtMs ?? undefined,
+        serverId: serverId || undefined,
         stopReason: assistantStopReason(m) || undefined,
         streaming: false,
       };
@@ -3140,25 +3097,6 @@ function stopMeetingHistoryPoll() {
     clearInterval(meetingHistoryPollTimer);
     meetingHistoryPollTimer = null;
   }
-}
-
-function startMeetingHistoryPoll() {
-  stopMeetingHistoryPoll();
-  if (!activeMeetingSessionKey || !activeMeetingMeta) return;
-
-  const poll = async () => {
-    if (!activeMeetingSessionKey || !activeMeetingMeta) return;
-    try {
-      const messages = await fetchMeetingHistory(activeMeetingSessionKey, activeMeetingMeta);
-      broadcastMeetingHistory(messages);
-    } catch {
-      // ignore background poll errors
-    }
-  };
-
-  void poll();
-  meetingHistoryPollTimer = setInterval(poll, 3000);
-  meetingHistoryPollTimer.unref?.();
 }
 
 function setActiveMeetingMeta(meta) {
@@ -3373,18 +3311,6 @@ function suspendActiveRuns() {
   }
 }
 
-async function fetchLatestAssistantText() {
-  const client = gateway;
-  if (!client?.connected) return null;
-  const result = await client.request('chat.history', {
-    sessionKey: getSessionKey(),
-    limit: 80,
-    maxChars: CHAT_HISTORY_TEXT_MAX_CHARS,
-  });
-  const msgs = convertHistoryMessages(result?.messages || []);
-  return [...msgs].reverse().find((m) => m.who === 'them')?.text || null;
-}
-
 async function recoverActiveRunsAfterReconnect() {
   if (activeRuns.size === 0) return;
   for (const [clientRunId, run] of activeRuns.entries()) {
@@ -3415,12 +3341,6 @@ function stripPriorAssistantPrefix(run, text) {
   next = stripOneTextPrefix(next, String(run.priorAssistantText || ''));
   next = stripOneTextPrefix(next, String(run.committedInRunText || ''));
   return next;
-}
-
-function recordCommittedSegment(run, segmentText) {
-  const part = String(segmentText || '');
-  if (!part) return;
-  run.committedInRunText = `${run.committedInRunText || ''}${part}`;
 }
 
 const ASSISTANT_SNAPSHOT_SLICE = 48;
@@ -4152,18 +4072,6 @@ async function runMeetingBriefingFlow(config) {
   }
 }
 
-function ensureMeetingEngine() {
-  if (!meetingEngine) {
-    const { MeetingEngine } = require('./meeting-engine');
-    meetingEngine = new MeetingEngine({
-      chatTurn: runMeetingChatTurn,
-      onEvent: (event) => broadcastMeetingEvent(event),
-      saveRecord: saveMeetingRecord,
-    });
-  }
-  return meetingEngine;
-}
-
 function handleSessionsChangedEvent(payload) {
   const keys = new Set();
   if (payload?.key) keys.add(payload.key);
@@ -4741,6 +4649,7 @@ function applyComposerVisibility() {
 function adoptComposerWindow(win) {
   if (!win || win.isDestroyed()) return;
   composerWindow = win;
+  win.webContents.setBackgroundThrottling(false);
   try { win.setParentWindow(null); } catch { /* already top-level */ }
   win.setMenu(null);
   placeComposerWindow(win);
@@ -4813,9 +4722,11 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
+      backgroundThrottling: false,
       devTools: Boolean(process.env.QIZI_DEVTOOLS_PORT),
     },
   });
+  mainWindow.webContents.setBackgroundThrottling(false);
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     setImmediate(() => recoverChatRenderer(details));
@@ -6578,7 +6489,7 @@ async function resolveMeetingLaunch(config) {
 ipcMain.handle('qizi-meeting:start', async (event, config) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   try {
-    if (meetingBriefingRunning || (meetingEngine && meetingEngine.running)) {
+    if (meetingBriefingRunning) {
       return { ok: false, error: '已有会议在进行中' };
     }
     const launch = await resolveMeetingLaunch(config);
@@ -6593,7 +6504,6 @@ ipcMain.handle('qizi-meeting:start', async (event, config) => {
 ipcMain.handle('qizi-meeting:cancel', async (event) => {
   if (!getAuthorizedMainWindow(event)) return forbiddenSenderResult();
   meetingBriefingCancelled = true;
-  if (meetingEngine) meetingEngine.cancel();
   let forwardResult = null;
   if (activeMeetingForwardConfig?.postMeetingExecAgentId && activeMeetingTranscript.length > 0) {
     forwardResult = await maybeForwardMeetingConclusion(
@@ -6637,7 +6547,7 @@ ipcMain.handle('qizi-meeting:status', (event) => {
     ok: true,
     snapshot: {
       mode: 'a2a_transcript_v1',
-      running: meetingBriefingRunning || Boolean(meetingEngine?.running),
+      running: meetingBriefingRunning,
     },
   };
 });
@@ -7417,8 +7327,21 @@ ipcMain.handle('openclaw:history:poke', (event) => {
 
 ipcMain.handle('openclaw:history:read-local', async (event, payload) => {
   if (!getAuthorizedHistoryWindow(event)) return forbiddenSenderResult();
-  const messages = await readLocalMessagesFromMainWindow(payload?.sessionKey);
-  return { ok: true, messages };
+  const key = String(payload?.sessionKey || '').trim();
+  const local = await readLocalMessagesFromMainWindow(key);
+  if (!key) return { ok: true, messages: local };
+  try {
+    const client = ensureGateway();
+    await client.waitForConnect();
+    const raw = await loadDisplayChatHistory(client, key);
+    const server = presentChatHistory(raw);
+    if (server.length > 0) {
+      return { ok: true, messages: composeServerTranscript(server, local) };
+    }
+  } catch (err) {
+    console.warn('[qizi] history window server read failed:', err?.message || err);
+  }
+  return { ok: true, messages: local };
 });
 
 ipcMain.handle('openclaw:archive:list', (event) => {

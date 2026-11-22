@@ -65,10 +65,25 @@
     }).join('');
   }
 
+  function statusText(error) {
+    const message = String(error || '');
+    if (
+      message.startsWith('gateway closed (')
+      || message === 'gateway not connected'
+      || message === 'gateway connect timeout'
+      || message.startsWith('gateway request timeout')
+    ) {
+      return '和 Gateway 的连接中断了，正在重试';
+    }
+    return message || '没有取到自动化任务';
+  }
+
   async function refresh() {
     const result = await window.automation.list();
+    clearTimeout(refreshTimer);
     if (!result?.ok) {
-      statusEl.textContent = result?.error || '没有取到自动化任务';
+      statusEl.textContent = statusText(result?.error);
+      refreshTimer = setTimeout(refresh, 4000);
       return;
     }
     statusEl.textContent = '';
@@ -79,7 +94,6 @@
       if (job && !job.running) running.delete(id);
     }
     render(jobs);
-    clearTimeout(refreshTimer);
     refreshTimer = setTimeout(refresh, jobs.some((job) => job.running) || running.size ? 4000 : 20000);
   }
 

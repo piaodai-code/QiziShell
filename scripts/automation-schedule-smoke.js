@@ -1,4 +1,4 @@
-const { formatSchedule, presentJobs, jobFailure } = require('../automation-main');
+const { formatSchedule, presentJobs, jobFailure, callGatewayWithRetry } = require('../automation-main');
 const { platformKeepaliveLost } = require('../keepalive-main');
 
 let passed = 0;
@@ -33,4 +33,28 @@ check(platformKeepaliveLost(lost) === true, 'a logged-out platform lights the Ke
 check(platformKeepaliveLost(missing) === false, 'a missing script does not light the Keep-alive button');
 check(platformKeepaliveLost(paused) === false, 'a paused platform does not light the Keep-alive button');
 
-console.log(`automation schedule smoke ok (${passed})`);
+(async () => {
+  let calls = 0;
+  const listed = await callGatewayWithRetry(async () => {
+    calls += 1;
+    if (calls === 1) throw new Error('gateway closed (1006): ');
+    return { jobs: [{ id: 'a' }] };
+  }, 'cron.list', {});
+  check(calls === 2 && listed.jobs.length === 1, 'a closed gateway is read once more');
+
+  let once = 0;
+  let rejected = false;
+  try {
+    await callGatewayWithRetry(async () => {
+      once += 1;
+      throw new Error('任务无效');
+    }, 'cron.list', {});
+  } catch (err) {
+    rejected = err.message === '任务无效';
+  }
+  check(once === 1 && rejected, 'a normal failure is not retried');
+  console.log(`automation schedule smoke ok (${passed})`);
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

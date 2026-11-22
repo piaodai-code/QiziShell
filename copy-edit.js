@@ -5,8 +5,14 @@ const sideList = document.getElementById('ce-side-list');
 const metaEl = document.getElementById('ce-meta');
 const statusEl = document.getElementById('ce-status');
 const sendBtn = document.getElementById('ce-send');
+const postscriptOpenBtn = document.getElementById('ce-postscript-open');
+const postscriptLayer = document.getElementById('ce-postscript-layer');
+const postscriptForm = document.getElementById('ce-postscript');
+const postscriptInput = document.getElementById('ce-postscript-input');
+const postscriptCancelBtn = document.getElementById('ce-postscript-cancel');
 const stashBtn = document.getElementById('ce-stash');
 const discardBtn = document.getElementById('ce-discard');
+const dropTextBtn = document.getElementById('ce-drop-text');
 const floatEl = document.getElementById('ce-float');
 const dropCaretEl = document.getElementById('ce-drop-caret');
 const popEl = document.getElementById('ce-pop');
@@ -31,6 +37,9 @@ let doc = Model.createDocument('');
 let view = 'markup';
 let meta = { agentLabel: '', sessionKey: '' };
 let draftId = '';
+let silentDropped = false;
+let postscript = '';
+let baselinePostscript = '';
 let busy = false;
 let reportedDirty = null;
 let composing = false;
@@ -94,7 +103,7 @@ function patchKey(patch) {
 }
 
 function docsEqual(a, b) {
-  if (a.baseText !== b.baseText || a.patches.length !== b.patches.length) return false;
+  if (a.baseText !== b.baseText || a.originalText !== b.originalText || a.patches.length !== b.patches.length) return false;
   for (let index = 0; index < a.patches.length; index += 1) {
     if (patchKey(a.patches[index]) !== patchKey(b.patches[index])) return false;
   }
@@ -405,8 +414,10 @@ function updateChrome() {
   metaEl.textContent = `${who}${doc.originalText.length} 字 · ${pending} 条待处理${draftNote}`;
   const touched = isDirty() || Boolean(draftId);
   stashBtn.disabled = busy || !touched;
-  discardBtn.disabled = busy || !touched;
+  discardBtn.disabled = busy || (!touched && !silentDropped);
   sendBtn.disabled = busy || pending === 0;
+  postscriptOpenBtn.disabled = busy;
+  postscriptOpenBtn.classList.toggle('is-set', Boolean(postscript.trim()));
   reportDirty();
   document.querySelectorAll('.ce-view').forEach((button) => {
     const active = button.dataset.view === view;
@@ -496,6 +507,9 @@ function applyPayload(payload) {
     agentLabel: String(payload?.agentLabel || ''),
     sessionKey: String(payload?.sessionKey || ''),
   };
+  postscript = String(draft?.postscript || '');
+  baselinePostscript = postscript;
+  silentDropped = false;
   view = 'markup';
   busy = false;
   undoStack = [];
@@ -503,6 +517,7 @@ function applyPayload(payload) {
   hidePop();
   hideNote();
   hideMenu();
+  closePostscript();
   setStatus(draft
     ? '已载入暂存的修改，可以继续编辑或发送。'
     : '输入即新增。选中后删除、再输入就是替换，拖动选区可以调整语序。');
@@ -517,12 +532,15 @@ function draftSnapshot() {
     originalText: doc.originalText,
     baseText: doc.baseText,
     patches: doc.patches,
+    postscript,
     preview: Model.finalText(doc),
   };
 }
 
 function isDirty() {
-  return doc.baseText !== doc.originalText || Model.pendingCount(doc) > 0;
+  return doc.baseText !== doc.originalText
+    || Model.pendingCount(doc) > 0
+    || postscript.trim() !== baselinePostscript.trim();
 }
 
 function reportDirty() {
@@ -543,6 +561,7 @@ async function handleCloseAction(action) {
   hidePop();
   hideMenu();
   hideNote();
+  closePostscript();
   setStatus(discarding ? '正在放弃…' : '正在暂存…');
   updateChrome();
   try {
@@ -626,17 +645,105 @@ discardBtn.addEventListener('click', () => {
   void runBusy('正在放弃…', () => window.qiziCopyEdit.discard({ draftId }));
 });
 
+dropTextBtn.addEventListener('mousedown', (event) => {
+  event.preventDefault();
+});
+
+dropTextBtn.addEventListener('click', () => {
+  if (busy) return;
+  if (view !== 'markup') {
+    setStatus('先回到「修订」，再选择要丢掉的文字。', true);
+    return;
+  }
+  const range = readRange();
+  if (!range || range.collapsed) {
+    setStatus('先在正文里选中要丢掉的文字。', true);
+    return;
+  }
+  const result = withUndo(() => Model.dropSelection(doc, range.start, range.end), range);
+  if (!result?.ok) {
+    setStatus(result?.reason === 'move'
+      ? '移动标记不能直接丢掉，请先撤销这条移动。'
+      : '这块没法直接丢掉。', true);
+    return;
+  }
+  silentDropped = true;
+  hideFloat();
+  hidePop();
+  hideNote();
+  hideMenu();
+  setStatus('已丢掉选中的文字，没有留下修订。');
+  render({ caret: result.caret });
+});
+
 sendBtn.addEventListener('click', () => {
   if (!Model.pendingCount(doc)) {
     setStatus('还没有待处理的修订或批注。', true);
     return;
   }
-  const prompt = Model.exportToAgentPrompt(doc.baseText, doc.patches);
+  const prompt = Model.withPostscript(
+    Model.exportToAgentPrompt(doc.baseText, doc.patches),
+    postscript,
+  );
   void runBusy('正在发给当前对话…', () => window.qiziCopyEdit.sendToAgent({
     text: prompt,
     sessionKey: meta.sessionKey,
     draftId,
   }));
+});
+
+function sizePostscriptInput() {
+  const style = getComputedStyle(postscriptInput);
+  const min = Number.parseFloat(style.minHeight) || 0;
+  const max = Number.parseFloat(style.maxHeight) || postscriptInput.scrollHeight;
+  postscriptInput.style.height = 'auto';
+  const next = Math.min(max, Math.max(min, postscriptInput.scrollHeight));
+  postscriptInput.style.height = `${next}px`;
+  postscriptInput.style.overflowY = postscriptInput.scrollHeight > max ? 'auto' : 'hidden';
+}
+
+function openPostscript() {
+  hideFloat();
+  hidePop();
+  hideNote();
+  hideMenu();
+  postscriptInput.value = postscript;
+  postscriptLayer.hidden = false;
+  sizePostscriptInput();
+  postscriptInput.focus();
+  const end = postscriptInput.value.length;
+  postscriptInput.setSelectionRange(end, end);
+}
+
+function closePostscript() {
+  postscriptLayer.hidden = true;
+  postscriptInput.value = '';
+}
+
+postscriptOpenBtn.addEventListener('click', () => {
+  if (busy) return;
+  openPostscript();
+});
+
+postscriptCancelBtn.addEventListener('click', () => {
+  closePostscript();
+});
+
+postscriptForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  postscript = postscriptInput.value.trim();
+  closePostscript();
+  updateChrome();
+  setStatus(postscript ? '附言已记下，发送时会放在消息最后。' : '附言已清掉。');
+});
+
+postscriptInput.addEventListener('input', sizePostscriptInput);
+
+postscriptLayer.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  event.stopPropagation();
+  closePostscript();
 });
 
 sideList.addEventListener('click', (event) => {

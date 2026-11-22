@@ -190,4 +190,38 @@ Model.addComment(commentOnly, caret(commentOnly, 0, 0), endCaret(commentOnly), '
 assert.strictEqual(Model.undoPatch(commentOnly, commentOnly.patches[0].id), false);
 assert.strictEqual(commentOnly.patches.length, 1);
 
+assert.strictEqual(Model.withPostscript('正文', ''), '正文');
+assert.strictEqual(Model.withPostscript('正文\n', '  语气再克制  '), '正文\n\n---\n\n附言\n\n语气再克制');
+
+const dropped = Model.createDocument('说明：正文。就这些。');
+const dropResult = Model.dropSelection(dropped, caret(dropped, 0, 0), caret(dropped, 0, 3));
+assert.strictEqual(dropResult.ok, true);
+assert.strictEqual(dropped.baseText, '正文。就这些。');
+assert.strictEqual(dropped.originalText, '正文。就这些。');
+assert.strictEqual(dropped.patches.length, 0);
+assert.strictEqual(Model.finalText(dropped), '正文。就这些。');
+assert.strictEqual(Model.markupText(dropped), '正文。就这些。');
+
+const shifted = Model.createDocument('说明：正文');
+Model.insertText(shifted, caret(shifted, 0, 5), '好');
+Model.dropSelection(shifted, caret(shifted, 0, 0), caret(shifted, 0, 3));
+assert.strictEqual(shifted.baseText, '正文');
+assert.strictEqual(Model.finalText(shifted), '正文好');
+assert.strictEqual(shifted.patches.filter((patch) => patch.status === 'pending').length, 1);
+assert.strictEqual(shifted.patches[0].startOffset, 2);
+
+const struck = Model.createDocument('保留删掉');
+Model.deleteSelection(struck, caret(struck, 0, 2), caret(struck, 0, 4));
+const struckPieces = Model.buildPieces(struck);
+const delPiece = struckPieces.findIndex((piece) => piece.kind === 'del');
+Model.dropSelection(
+  struck,
+  { pieceIndex: delPiece, offset: 0 },
+  { pieceIndex: delPiece, offset: struckPieces[delPiece].text.length },
+);
+assert.strictEqual(struck.baseText, '保留');
+assert.strictEqual(struck.originalText, '保留');
+assert.strictEqual(Model.pendingCount(struck), 0);
+assert.strictEqual(Model.markupText(struck), '保留');
+
 console.log('copy-edit model smoke ok');

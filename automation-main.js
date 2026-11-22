@@ -86,6 +86,23 @@ function formatSchedule(schedule, formatInstant) {
   return '—';
 }
 
+function automationCallShouldRetry(err, retryable) {
+  if (typeof retryable === 'function') return retryable(err) === true;
+  const message = String(err?.message || '');
+  return message.startsWith('gateway closed (')
+    || message === 'gateway not connected'
+    || message === 'gateway connect timeout';
+}
+
+async function callGatewayWithRetry(gatewayRequest, method, params, retryable) {
+  try {
+    return await gatewayRequest(method, params);
+  } catch (err) {
+    if (!automationCallShouldRetry(err, retryable)) throw err;
+    return gatewayRequest(method, params);
+  }
+}
+
 function jobFailure(job) {
   const status = String(job?.state?.lastRunStatus || job?.lastRunStatus || '').toLowerCase();
   const at = Number(job?.state?.lastRunAtMs || job?.lastRunAtMs || 0);
@@ -141,6 +158,7 @@ function createAutomationFeature({
   syncDockVisibility,
   isMaintainingWindowSender,
   gatewayRequest,
+  gatewayRetryable,
   onAutomationAlert,
   openBesideMaintainer,
 }) {
@@ -181,7 +199,7 @@ function createAutomationFeature({
     const jobs = [];
     let offset = 0;
     for (let page = 0; page < 10; page += 1) {
-      const result = await gatewayRequest('cron.list', { limit: 200, offset });
+      const result = await callGatewayWithRetry(gatewayRequest, 'cron.list', { limit: 200, offset }, gatewayRetryable);
       jobs.push(...(Array.isArray(result?.jobs) ? result.jobs : []));
       if (!result?.hasMore) break;
       offset = Number(result.nextOffset);
@@ -189,7 +207,7 @@ function createAutomationFeature({
     }
     let agents = [];
     try {
-      const listed = await gatewayRequest('agents.list', {});
+      const listed = await callGatewayWithRetry(gatewayRequest, 'agents.list', {}, gatewayRetryable);
       agents = Array.isArray(listed?.agents) ? listed.agents : [];
     } catch {
       agents = [];
@@ -306,4 +324,5 @@ module.exports = {
   formatSchedule,
   presentJobs,
   jobFailure,
+  callGatewayWithRetry,
 };

@@ -367,15 +367,6 @@ function applyGatewayToolEvent(payload) {
   ensureChatTimeline().enqueueTool({ payload, runId: activeRunId });
 }
 
-function applyChatSegment(payload) {
-  if (!payload) return;
-  const sessionKey = ownedEventSessionKey(payload);
-  if (sessionKey && sessionKey !== currentSessionKey) {
-    applyBackgroundOwnedSegment(sessionKey, payload.runId, payload.text);
-    return;
-  }
-  ensureChatTimeline().enqueueSegment({ runId: payload.runId, text: payload.text });
-}
 let busy = false;
 let connected = false;
 // 待发送的图片（dataUrl 列表）
@@ -646,10 +637,6 @@ function renderPendingAttachments() {
     composerPendingEl.appendChild(chip);
   });
   updateComposerSendBtn();
-}
-
-function renderPendingImages() {
-  renderPendingAttachments();
 }
 
 function escapeHtml(text) {
@@ -1575,6 +1562,7 @@ function messageIsForward(msg) {
 
 function userMessagesSameEvent(a, b) {
   if (!a || !b || a.who !== 'me' || b.who !== 'me') return false;
+  if (a.serverId && b.serverId) return a.serverId === b.serverId;
   if (messageIsForward(a) || messageIsForward(b)) {
     return historyForwardFingerprintsMatch(a, b);
   }
@@ -2783,11 +2771,6 @@ function hideComposerContextMenu() {
   composerContextMenuTarget = null;
 }
 
-function hideAllContextMenus() {
-  hideMessageContextMenu();
-  hideComposerContextMenu();
-}
-
 function showComposerContextMenu(x, y, target) {
   if (!composerContextMenuEl || !target) return;
   hideMessageContextMenu();
@@ -2935,12 +2918,13 @@ function assistantTextsMatch(a, b) {
  *    refreshSessionFromGateway：以 Gateway chat.history 为准（同 webchat）
  *
  * 3. 切换 Agent / 重连 / session.changed
- *    先拿网关最新一页，把本地还没有的绿气泡补上；
- *    更早的页在这之后补齐。本地归档只是上次对账的副本。
+ *    用带服务器编号的整本历史替换当前列表。
+ *    最新一页只补上没见过的编号，不把更早的消息抽掉。
  *
  * 4. 本地归档
- *    打开时先画出来。附件仍从本地贴回网关消息。
- *    对账结果写回归档，下次打开不用再等整本历史。
+ *    打开时先画出上次见过的服务器副本。
+ *    图片、文件、引用按服务器编号贴回，不再靠正文去对。
+ *    还没进历史的发送，和正在生成的回复，先留在列表末尾。
  *
  * 转发 = 对目标 session 的 chat.send，成功后 refreshSessionFromGateway；
  * agent 回复由 session-chat 流式写入，结束后 sync 落盘。
@@ -2963,21 +2947,6 @@ function getLastFinalizedAssistantText() {
     }
   }
   return '';
-}
-
-function stripPriorAssistantReplay(target, text) {
-  const priorRaw = String(getAssistantMessageBeforeTarget(target)?.text || '');
-  const prior = priorRaw.trim();
-  let next = String(text || '');
-  if (!prior) return next;
-  if (next.trim() === prior) return '';
-  if (priorRaw && next.startsWith(priorRaw) && next.length > priorRaw.length) {
-    return next.slice(priorRaw.length);
-  }
-  if (next.startsWith(prior) && next.length > prior.length) {
-    return next.slice(prior.length);
-  }
-  return next;
 }
 
 /** 是否用 Gateway 历史刷新当前流式气泡（排除上一轮已完成回复） */
@@ -3083,6 +3052,10 @@ function dedupeAssistantMessages(list) {
     }
     const prev = out.length > 0 ? out[out.length - 1] : null;
     if (prev?.who === 'them' && assistantTextsMatch(prev, msg) && !prev.streaming && !msg.streaming) {
+      if (prev.serverId && msg.serverId && prev.serverId !== msg.serverId) {
+        out.push(msg);
+        continue;
+      }
       if (!prev.runId && msg.runId) {
         out[out.length - 1] = { ...msg, streaming: false };
       }
@@ -3105,6 +3078,10 @@ function collapseAssistantPrefixes(list) {
     const text = String(msg.text || '').trim();
     const prev = out.length > 0 ? out[out.length - 1] : null;
     const prevText = prev?.who === 'them' && !prev.streaming ? String(prev.text || '').trim() : '';
+    if (prev?.serverId && msg.serverId && prev.serverId !== msg.serverId) {
+      out.push(msg);
+      continue;
+    }
     if (prevText && text && prevText !== text && (prevText.startsWith(text) || text.startsWith(prevText))) {
       if (text.length > prevText.length) out[out.length - 1] = msg;
       continue;
@@ -3362,9 +3339,16 @@ function archiveRecordFromMessage(msg) {
     forward: m.forward || undefined,
     sentTime: m.sentTime || undefined,
     sentAtMs: m.sentAtMs ?? undefined,
+    serverId: m.serverId || undefined,
+    pendingSend: m.pendingSend === true ? true : undefined,
     images: Array.isArray(m.images) && m.images.length > 0 ? m.images : undefined,
     files: Array.isArray(m.files) && m.files.length > 0
-      ? m.files.map(({ name, mimeType, size }) => ({ name, mimeType, size }))
+      ? m.files.map(({ name, mimeType, size, dataUrl }) => ({
+        name,
+        mimeType,
+        size,
+        ...(dataUrl ? { dataUrl } : {}),
+      }))
       : undefined,
     time: m.time,
     runId: m.runId,
@@ -3528,6 +3512,7 @@ async function hydrateMessageArchives() {
 
 function historyMessagesMatch(a, b) {
   if (!a || !b || a.who !== b.who) return false;
+  if (a.serverId && b.serverId) return a.serverId === b.serverId;
   if (historyForwardFingerprintsMatch(a, b)) return true;
   if (a.who === 'me' && b.who === 'me') return userMessagesSameEvent(a, b);
   const at = String(a.text || '').trim();
@@ -3539,98 +3524,12 @@ function historyMessagesMatch(a, b) {
   return false;
 }
 
-function isLocalPrefixOfServer(local, server) {
-  if (!local.length || server.length < local.length) return false;
-  for (let i = 0; i < local.length; i += 1) {
-    if (!historyMessagesMatch(local[i], server[i])) return false;
-  }
-  return true;
-}
-
-function isServerPrefixOfLocal(local, server) {
-  if (!server.length || local.length < server.length) return false;
-  for (let i = 0; i < server.length; i += 1) {
-    if (!historyMessagesMatch(local[i], server[i])) return false;
-  }
-  return true;
-}
-
-function refreshLocalFromServerPrefix(local, server) {
-  return local.map((m, i) => {
-    if (i >= server.length) {
-      return m.streaming ? { ...m } : m;
-    }
-    const overlaid = overlayLocalAttachmentsOntoServerHistory([server[i]], [m]);
-    const next = overlaid[0] || m;
-    if (!m.streaming) return next;
-    return {
-      ...next,
-      streaming: true,
-      runId: m.runId,
-      external: m.external,
-      gatewayRunId: m.gatewayRunId,
-      queued: m.queued,
-      queuedAt: m.queuedAt,
-    };
-  });
-}
-
-function stripHeadOverlappingMerged(head, merged) {
-  if (!head.length || !merged.length) return head;
-  return head.filter((m) => {
-    if (m?.who === 'me') return true;
-    return !isKnownInHistory(m, merged);
-  });
-}
-
-function findSuffixPrefixOverlap(local, server) {
-  const max = Math.min(local.length, server.length);
-  for (let k = max; k > 0; k -= 1) {
-    let ok = true;
-    for (let i = 0; i < k; i += 1) {
-      if (!historyMessagesMatch(local[local.length - k + i], server[i])) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return k;
-  }
-  return 0;
-}
-
-function findTrailingOverlapLength(local, server) {
-  const max = Math.min(local.length, server.length);
-  for (let k = max; k > 0; k -= 1) {
-    let ok = true;
-    for (let i = 0; i < k; i += 1) {
-      if (!historyMessagesMatch(local[local.length - k + i], server[server.length - k + i])) {
-        ok = false;
-        break;
-      }
-    }
-    if (ok) return k;
-  }
-  return 0;
-}
-
 function isKnownInHistory(msg, list) {
   if (!msg || !Array.isArray(list)) return false;
   for (const item of list) {
     if (historyMessagesMatch(item, msg)) return true;
   }
   return false;
-}
-
-function filterUnknownServerMessages(serverMessages, localMessages) {
-  const local = Array.isArray(localMessages) ? localMessages : [];
-  return (Array.isArray(serverMessages) ? serverMessages : []).filter((sm) => {
-    if (isKnownInHistory(sm, local)) return false;
-    if (sm?.who !== 'me') return true;
-    for (const item of local) {
-      if (historyForwardFingerprintsMatch(item, sm)) return false;
-    }
-    return true;
-  });
 }
 
 /** Gateway 历史可能比本地短（如隔日 session 被截断）；合并时以本地为归档，只追加/刷新服务端新内容 */
@@ -3676,68 +3575,15 @@ function reattachInFlightStreaming(merged, inflightPrior) {
   return out;
 }
 
-function mergeGatewayHistory(localMessages, serverMessages) {
-  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => (
-    m.streaming ? { ...m } : { ...m, streaming: false }
-  ));
-  const server = dedupeForwardUserMessages(
-    (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
-  );
-  if (!server.length) return finalizeHistoryMessages(local);
-  if (!local.length) {
-    return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, []));
-  }
-
-  if (isLocalPrefixOfServer(local, server)) {
-    return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
-  }
-
-  if (isServerPrefixOfLocal(local, server)) {
-    return finalizeHistoryMessages(refreshLocalFromServerPrefix(local, server));
-  }
-
-  const suffixPrefixK = findSuffixPrefixOverlap(local, server);
-  if (suffixPrefixK > 0) {
-    const head = stripHeadOverlappingMerged(
-      local.slice(0, local.length - suffixPrefixK),
-      server,
-    );
-    const localTail = local.slice(local.length - suffixPrefixK);
-    const merged = overlayLocalAttachmentsOntoServerHistory(server, localTail);
-    return finalizeHistoryMessages([...head, ...merged]);
-  }
-
-  const suffixK = findTrailingOverlapLength(local, server);
-  if (suffixK === server.length) {
-    const merged = overlayLocalAttachmentsOntoServerHistory(
-      server,
-      local.slice(local.length - suffixK),
-    );
-    const head = stripHeadOverlappingMerged(
-      local.slice(0, local.length - suffixK),
-      merged,
-    );
-    return finalizeHistoryMessages([...head, ...merged]);
-  }
-
-  const unknownServer = filterUnknownServerMessages(server, local);
-  if (!unknownServer.length) return finalizeHistoryMessages(local);
-  const appended = overlayLocalAttachmentsOntoServerHistory(unknownServer, []);
-  return finalizeHistoryMessages([...local, ...appended]);
-}
-
-/** 最新一页先补进当前列表。不拿这一页替换整本，避免更早的消息先被抽掉。 */
+/** 最新一页里编号没见过的行补上。不拿这一页替换整本。 */
 function absorbServerMessages(localMessages, serverMessages) {
-  const base = (Array.isArray(localMessages) ? localMessages : []).map((message) => (
-    message.streaming ? { ...message } : { ...message, streaming: false }
+  const base = Array.isArray(localMessages) ? localMessages.map((message) => ({ ...message })) : [];
+  const have = new Set(base.map((message) => message.serverId).filter(Boolean));
+  const added = (Array.isArray(serverMessages) ? serverMessages : []).filter((message) => (
+    message?.serverId && !have.has(message.serverId)
   ));
-  const server = dedupeForwardUserMessages(
-    (Array.isArray(serverMessages) ? serverMessages : []).map((message) => normalizeUserMessageRecord(message)),
-  );
-  for (const message of server) {
-    if (!isKnownInHistory(message, base)) base.push(message);
-  }
-  return finalizeHistoryMessages(base);
+  if (!added.length) return finalizeHistoryMessages(base);
+  return finalizeHistoryMessages(base.concat(added));
 }
 
 function storedMessageIdentity(msg) {
@@ -3756,7 +3602,7 @@ function rememberReconciledHistory(sessionKey, list) {
   for (const raw of list) {
     const record = archiveRecordFromMessage(raw);
     if (!record) continue;
-    const id = storedMessageIdentity(record);
+    const id = record.serverId || storedMessageIdentity(record);
     if (seen.has(id)) continue;
     seen.add(id);
     records.push(record);
@@ -3772,133 +3618,12 @@ function syncedArchiveList(sessionKey, serverMessages, localMessages) {
   return buildDisplayHistoryFromGateway(serverMessages, localMessages || readRawStoredMessagesForSession(sessionKey));
 }
 
-/** 以 Gateway 历史为底，overlay 本地附件 / 元数据（webchat 同源） */
+/** 以带编号的服务器历史为底，只把本地附件贴回去。 */
 function buildDisplayHistoryFromGateway(serverMessages, localMessages) {
-  const local = (Array.isArray(localMessages) ? localMessages : []).map((m) => (
-    m.streaming ? { ...m } : { ...m, streaming: false }
-  ));
-  const server = dedupeForwardUserMessages(
-    (Array.isArray(serverMessages) ? serverMessages : []).map((m) => normalizeUserMessageRecord(m)),
-  );
-  if (!server.length) {
-    return finalizeHistoryMessages(stripInboundExternalMessages(local));
-  }
-  return finalizeHistoryMessages(overlayLocalAttachmentsOntoServerHistory(server, local));
-}
-
-function rebuildMessagesFromGateway(serverMessages, localMessages) {
-  return buildDisplayHistoryFromGateway(serverMessages, localMessages);
-}
-
-function localMessageHasAttachments(message) {
-  return message?.who === 'me' && (
-    (Array.isArray(message.images) && message.images.length > 0)
-    || (Array.isArray(message.files) && message.files.length > 0)
-  );
-}
-
-function attachmentNames(message) {
-  return (Array.isArray(message?.files) ? message.files : [])
-    .map((file) => String(file?.name || ''))
-    .filter(Boolean);
-}
-
-function sameAttachmentNames(a, b) {
-  const left = attachmentNames(a);
-  const right = attachmentNames(b);
-  return left.length > 0 && left.length === right.length && left.every((name, index) => name === right[index]);
-}
-
-function sentTimesClose(a, b) {
-  if (a?.sentAtMs == null || b?.sentAtMs == null) return false;
-  return Math.abs(Number(a.sentAtMs) - Number(b.sentAtMs)) < 10000;
-}
-
-function overlayLocalAttachmentsOntoServerHistory(serverMessages, localMessages) {
-  if (!Array.isArray(serverMessages)) return [];
-  const localList = Array.isArray(localMessages) ? localMessages : [];
-  const used = new Set();
-
-  function claim(predicate) {
-    for (let index = 0; index < localList.length; index += 1) {
-      if (used.has(index) || !predicate(localList[index])) continue;
-      used.add(index);
-      return localList[index];
-    }
-    return null;
-  }
-
-  function claimBest(scoreOf) {
-    let bestIndex = -1;
-    let bestScore = Infinity;
-    for (let index = 0; index < localList.length; index += 1) {
-      if (used.has(index)) continue;
-      const score = scoreOf(localList[index]);
-      if (score == null || score >= bestScore) continue;
-      bestScore = score;
-      bestIndex = index;
-    }
-    if (bestIndex < 0) return null;
-    used.add(bestIndex);
-    return localList[bestIndex];
-  }
-
-  return serverMessages.map((server) => {
-    const serverText = String(server?.text || '').trim();
-    let local = null;
-    // 只带文件、正文为空的新消息，不能去配历史里第一条带图的旧消息。
-    // 旧消息的文字会被抄上来，刚传的文件就从气泡里消失。
-    if (server?.who === 'me' && !messageIsForward(server)) {
-      local = claimBest((candidate) => {
-        if (!localMessageHasAttachments(candidate) || messageIsForward(candidate)) return null;
-        if (sameAttachmentNames(server, candidate)) return 0;
-        if (
-          sentTimesClose(server, candidate)
-          && (
-            isAttachmentPlaceholder(serverText)
-            || String(candidate.text || '').trim() === serverText
-          )
-        ) {
-          return Math.abs(Number(server.sentAtMs) - Number(candidate.sentAtMs));
-        }
-        return null;
-      });
-    }
-    if (!local) {
-      local = claim((candidate) => Boolean(findLocalUserMessageForServer(server, [candidate])));
-    }
-    if (!local && server?.who === 'me' && !messageIsForward(server) && isAttachmentPlaceholder(serverText)) {
-      local = claim((candidate) => (
-        localMessageHasAttachments(candidate)
-        && !messageIsForward(candidate)
-        && isAttachmentPlaceholder(candidate.text)
-      ));
-    }
-    if (!local && localList.length === 1 && server?.who === 'me' && localMessageHasAttachments(localList[0])) {
-      local = localList[0];
-    }
-
-    const copy = normalizeUserMessageRecord(server, local);
-    if (local?.images?.length) copy.images = local.images;
-    if (local?.files?.length) {
-      copy.files = local.files.map(({ name, mimeType, size, dataUrl }) => ({
-        name,
-        mimeType,
-        size,
-        ...(dataUrl ? { dataUrl } : {}),
-      }));
-    }
-    const localText = String(local?.text || '').trim();
-    const sameSend = Boolean(local) && (
-      sameAttachmentNames(server, local)
-      || sentTimesClose(server, local)
-      || (localList.length === 1 && local === localList[0])
-    );
-    if (sameSend && isAttachmentPlaceholder(serverText) && localText && !isAttachmentPlaceholder(localText)) {
-      copy.text = local.text;
-    }
-    return copy;
-  });
+  const composed = window.MessageCompose
+    ? window.MessageCompose.composeServerTranscript(serverMessages, localMessages)
+    : (Array.isArray(serverMessages) ? serverMessages : []);
+  return finalizeHistoryMessages(composed);
 }
 
 function clearStaleStreamingState(options = {}) {
@@ -4609,18 +4334,10 @@ function setStatus(text, kind) {
   statusEl.dataset.kind = kind || '';
 }
 
-function writeMessagesToStorageKey(sessionKey, items) {
-  return writeMessageArchive(sessionKey, items);
-}
-
 function syncMemoryToArchive(sessionKey = currentSessionKey) {
   if (!ENABLE_LOCAL_MESSAGE_SAVE) return;
   const completed = messages.filter((m) => !m.streaming && !m.queued && m.kind !== 'tool');
   appendCompletedMessagesToArchive(sessionKey, completed);
-}
-
-function writeMessagesToStorage(items) {
-  return writeMessagesToStorageKey(currentSessionKey, items);
 }
 
 function loadMessages() {
@@ -4830,7 +4547,6 @@ function composerHasFocus() {
   const active = document.activeElement;
   if (active && composerEl && composerEl.contains(active)) return true;
   // 输入框被挪进独立窗口后，焦点在那个窗口里，主窗口的 activeElement 看不出来。
-  // 看不出来就会继续整页重拉历史，渲染进程就一直占着。
   const popup = composerPopupWindow;
   if (!popup || popup.closed) return false;
   try {
@@ -4838,6 +4554,19 @@ function composerHasFocus() {
   } catch {
     return false;
   }
+}
+
+let lastComposerEditAt = 0;
+const COMPOSER_EDIT_QUIET_MS = 1500;
+
+function noteComposerEdit() {
+  lastComposerEditAt = Date.now();
+}
+
+// 只有正在打字时才停整页重拉。输入窗一直挂着焦点、人已经离开时仍要收新消息。
+function composerIsBeingEdited() {
+  if (!composerHasFocus()) return false;
+  return Date.now() - lastComposerEditAt < COMPOSER_EDIT_QUIET_MS;
 }
 
 async function tickSessionWatch() {
@@ -4848,8 +4577,8 @@ async function tickSessionWatch() {
   // 本机流式走 IPC。这时再拉 chat.history 会整表重绘，输入跟着卡，
   // 网关空闲标志一闪还会把还在跑的回合收掉。
   if (isLocalOwnedActiveRun()) return;
-  // 光标在输入区时不要拉历史。整表重绘会把正在打的字卡住，回复进行中也一样。
-  if (composerHasFocus()) return;
+  // 正在打字时不要整页重拉。整表重绘会把正在打的字卡住。
+  if (composerIsBeingEdited()) return;
 
   const nowMs = Date.now();
   if (nowMs - lastSessionSyncAt < SESSION_SYNC_MIN_MS) return;
@@ -5023,29 +4752,6 @@ async function applyGatewaySessionChat(payload) {
   }
 }
 
-async function handleExternalSessionChat(payload) {
-  return applyGatewaySessionChat(payload);
-}
-
-function isMessageInCurrentChatScope(message) {
-  if (!message) return false;
-  if (message.sessionKey && message.sessionKey !== currentSessionKey) return false;
-  if (message.chatEpoch != null && message.chatEpoch !== chatScopeEpoch) return false;
-  return true;
-}
-
-function findScopedAssistantByRunId(runId, { requireStreaming = false } = {}) {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const candidate = messages[i];
-    if (candidate.who !== 'them' || isToolTimelineMessage(candidate)) continue;
-    if (!runIdsMatch(candidate.runId, runId)) continue;
-    if (requireStreaming && !candidate.streaming) continue;
-    if (!isMessageInCurrentChatScope(candidate)) continue;
-    return candidate;
-  }
-  return null;
-}
-
 function findAssistantStreamTarget(runId) {
   return ensureChatTimeline().findStreaming(runId ?? activeRunId);
 }
@@ -5069,14 +4775,6 @@ function paintStreamingBubble(runId) {
 
 function scheduleStreamingUpdate(runId) {
   paintStreamingBubble(runId);
-}
-
-function isPriorAssistantReplay(target, incomingText) {
-  const prevThem = getAssistantMessageBeforeTarget(target);
-  if (!prevThem) return false;
-  const prevText = String(prevThem.text || '').trim();
-  const incoming = String(incomingText || '').trim();
-  return Boolean(prevText && incoming && incoming === prevText);
 }
 
 function applyStreamingDelta(delta, runId, replace) {
@@ -5491,18 +5189,6 @@ function formatCatalogEntryQualified(entry) {
 
 function setModelBadgeText(text) {
   if (modelBadge) modelBadge.textContent = text || '—';
-}
-
-function formatTokenCount(value) {
-  if (value == null || Number.isNaN(Number(value))) return '—';
-  const n = Number(value);
-  if (n >= 1_000_000) {
-    const m = n / 1_000_000;
-    return `${m >= 10 ? Math.round(m) : m.toFixed(1).replace(/\.0$/, '')}M`;
-  }
-  if (n >= 10_000) return `${Math.round(n / 1000)}K`;
-  if (n >= 1000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}K`;
-  return String(n);
 }
 
 const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * 6.5;
@@ -6171,10 +5857,6 @@ async function switchToAgent(agentId) {
   }
 }
 
-function buildAgentSessionKeyFallback(agentId) {
-  return `agent:${agentId}:main`;
-}
-
 async function refreshAgentTitleFromGateway() {
   try {
     currentSessionKey = await window.qizi.getSessionKey();
@@ -6188,12 +5870,6 @@ async function refreshAgentTitleFromGateway() {
 function setSessionControlsBadgeText(text) {
   if (!sessionControlsBadge) return;
   sessionControlsBadge.textContent = text || '—';
-}
-
-function labelForSessionControlOption(options, currentId) {
-  const id = currentId === undefined || currentId === null ? '' : String(currentId);
-  const match = (options || []).find((o) => String(o.id) === id);
-  return match?.label || (id ? id : '默认');
 }
 
 function formatSessionControlsBadge(data) {
@@ -7725,6 +7401,8 @@ async function send() {
     time: now(),
     sentTime: formatGatewayEnvelopeTime(sentAtMs),
     sentAtMs,
+    serverId: undefined,
+    pendingSend: true,
     sessionKey: currentSessionKey,
     chatEpoch: chatScopeEpoch,
   };
@@ -7868,10 +7546,6 @@ function applyBackgroundOwnedText(sessionKey, runId, text, replace) {
   if (agentId) markAgentUnread(agentId);
 }
 
-function applyBackgroundOwnedSegment(sessionKey, runId, text) {
-  applyBackgroundOwnedText(sessionKey, runId, text, false);
-}
-
 function applyBackgroundOwnedTerminal(payload) {
   const sessionKey = String(payload?.sessionKey || '').trim();
   if (!sessionKey || sessionKey === currentSessionKey) return;
@@ -8011,12 +7685,6 @@ if (window.qizi.onAgentLifecycle) {
   });
 }
 
-if (window.qizi.onChatSegment) {
-  window.qizi.onChatSegment((payload) => {
-    applyChatSegment(payload);
-  });
-}
-
 if (window.qizi.onHistoryMessageAction) {
   window.qizi.onHistoryMessageAction((payload) => {
     void applyHistoryMessageAction(payload);
@@ -8028,7 +7696,7 @@ if (window.qizi.onSessionChanged) {
     debugEvent('session', 'session_changed_event', { sessionKey: currentSessionKey });
     scheduleSessionPermissionRefresh();
     dismissBtwSideCard();
-    if (!isLocalOwnedActiveRun() && !composerHasFocus()) {
+    if (!isLocalOwnedActiveRun() && !composerIsBeingEdited()) {
       syncHistoryFromGateway({ preserveExternalStream: true });
     }
   });
@@ -8337,6 +8005,7 @@ function scheduleComposerInputHeight() {
 }
 
 inputEl.addEventListener('input', () => {
+  noteComposerEdit();
   if (!inputHistorySuppressInput && inputHistoryIndex !== -1) {
     inputHistoryIndex = -1;
     inputHistoryDraft = '';

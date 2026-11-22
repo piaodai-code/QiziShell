@@ -923,6 +923,133 @@
     ].join('\n');
   }
 
+  function withPostscript(prompt, note) {
+    const text = String(note || '').trim();
+    if (!text) return String(prompt || '');
+    return `${String(prompt || '').replace(/\s+$/, '')}\n\n---\n\n附言\n\n${text}`;
+  }
+
+  function dropBaseRange(doc, start, end) {
+    if (end <= start) return;
+    const removed = doc.baseText.slice(start, end);
+    const next = [];
+    for (const patch of doc.patches) {
+      if (patch.status !== 'pending') {
+        next.push(patch);
+        continue;
+      }
+      if (patch.type === 'insert') {
+        patch.startOffset = mapOffsetAfterDelete(patch.startOffset, start, end);
+        patch.endOffset = patch.startOffset;
+        next.push(patch);
+        continue;
+      }
+      if (patch.type === 'comment' && patch.hostPatchId) {
+        next.push(patch);
+        continue;
+      }
+      if (patch.type === 'comment') {
+        if (patch.endOffset <= start || patch.startOffset >= end) {
+          patch.startOffset = mapOffsetAfterDelete(patch.startOffset, start, end);
+          patch.endOffset = mapOffsetAfterDelete(patch.endOffset, start, end);
+          next.push(patch);
+          continue;
+        }
+        if (patch.startOffset >= start && patch.endOffset <= end) continue;
+        const length = end - start;
+        if (patch.startOffset < start && patch.endOffset > end) {
+          patch.endOffset -= length;
+          next.push(patch);
+          continue;
+        }
+        if (patch.startOffset < start) {
+          patch.endOffset = start;
+        } else {
+          patch.startOffset = start;
+          patch.endOffset -= length;
+        }
+        if (patch.endOffset > patch.startOffset) next.push(patch);
+        continue;
+      }
+      const from = patch.startOffset;
+      const to = patch.endOffset;
+      if (to <= start || from >= end) {
+        shiftPatchAfterDelete(patch, start, end);
+        next.push(patch);
+        continue;
+      }
+      if (from >= start && to <= end) continue;
+      const length = end - start;
+      const old = patch.oldText || '';
+      if (from < start && to > end) {
+        patch.oldText = old.slice(0, start - from) + old.slice(end - from);
+        patch.endOffset = to - length;
+      } else if (from < start) {
+        patch.oldText = old.slice(0, start - from);
+        patch.endOffset = start;
+      } else {
+        patch.oldText = old.slice(end - from);
+        patch.startOffset = start;
+        patch.endOffset = to - length;
+      }
+      if (patch.type === 'move') {
+        patch.moveTargetOffset = mapOffsetAfterDelete(patch.moveTargetOffset, start, end);
+      }
+      if (patch.endOffset > patch.startOffset) next.push(patch);
+    }
+    const ids = new Set(next.map((patch) => patch.id));
+    doc.patches = next.filter((patch) => !patch.hostPatchId || ids.has(patch.hostPatchId));
+    doc.baseText = doc.baseText.slice(0, start) + doc.baseText.slice(end);
+    if (doc.originalText.slice(start, end) === removed) {
+      doc.originalText = doc.originalText.slice(0, start) + doc.originalText.slice(end);
+    }
+  }
+
+  function dropSelection(doc, startPos, endPos) {
+    const pieces = buildPieces(doc);
+    const range = orderedRange(pieces, startPos, endPos);
+    if (comparePos(range.start, range.end) === 0) return { ok: false, reason: 'empty' };
+    const slices = iterSlices(pieces, range);
+    if (!slices.length) return { ok: false, reason: 'empty' };
+    if (slices.some((slice) => slice.piece.kind === 'moveSrc')) return { ok: false, reason: 'move' };
+    const textEdits = [];
+    const baseCuts = [];
+    for (const slice of slices) {
+      if (slice.piece.kind === 'base' || slice.piece.kind === 'del') {
+        if (slice.baseEnd > slice.baseStart) baseCuts.push([slice.baseStart, slice.baseEnd]);
+      } else if (slice.piece.kind === 'ins' || slice.piece.kind === 'repl' || slice.piece.kind === 'moveDst') {
+        textEdits.push({
+          kind: slice.piece.kind,
+          patchId: slice.piece.patchId,
+          base: slice.piece.baseStart,
+          start: slice.charStart,
+          end: slice.charEnd,
+        });
+      }
+    }
+    if (!textEdits.length && !baseCuts.length) return { ok: false, reason: 'empty' };
+    textEdits.sort((a, b) => b.start - a.start);
+    for (const edit of textEdits) {
+      editPatchText(doc, {
+        kind: edit.kind,
+        patchId: edit.patchId,
+        baseStart: edit.base,
+      }, edit.start, edit.end);
+    }
+    baseCuts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const merged = [];
+    for (const cut of baseCuts) {
+      const last = merged[merged.length - 1];
+      if (last && cut[0] <= last[1]) last[1] = Math.max(last[1], cut[1]);
+      else merged.push([cut[0], cut[1]]);
+    }
+    const caretAt = merged.length ? merged[0][0] : (textEdits[0]?.base || 0);
+    for (let index = merged.length - 1; index >= 0; index -= 1) {
+      dropBaseRange(doc, merged[index][0], merged[index][1]);
+    }
+    return { ok: true, caret: { pieceKind: 'base', offset: caretAt } };
+  }
+
   function pendingCount(doc) {
     return pendingPatches(doc).length;
   }
@@ -938,6 +1065,7 @@
     deleteBackward,
     deleteForward,
     deleteSelection,
+    dropSelection,
     replaceSelection,
     moveSelection,
     addComment,
@@ -950,6 +1078,7 @@
     markupText,
     selectedFragment,
     exportToAgentPrompt,
+    withPostscript,
     pendingCount,
   };
 });
