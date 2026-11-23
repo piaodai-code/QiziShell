@@ -254,7 +254,7 @@ async function main() {
       keep_alive: { interval_minutes: 1, jitter_minutes: 0 },
     });
     check(res.status === 200 && res.body.platform.lock_ttl_minutes === 10, 'platform is created with a 10 minute lock by default', res.body);
-    res = await api('POST', '/api/platforms', { platform_id: 'dup', entry_url: site.url, cdp_port: cdpPort });
+    res = await api('POST', '/api/platforms', { platform_id: 'dup', browser: 'chrome', entry_url: site.url, cdp_port: cdpPort });
     check(res.status === 409, 'a second platform cannot take the same CDP port', res.body);
     res = await api('PUT', '/api/platforms/fake_01', { lock_ttl_minutes: 45 });
     check(res.body.platform?.lock_ttl_minutes === 45, 'lock expiry is configurable per platform', res.body);

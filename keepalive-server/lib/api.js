@@ -133,6 +133,7 @@ function createApi({ hub, store, notifier, log }) {
     if (pathname === '/api/window/show' && method === 'POST') return hub.showWindow();
     if (pathname === '/api/platforms' && method === 'GET') return { platforms: hub.snapshot().platforms };
     if (pathname === '/api/platforms' && method === 'POST') return { platform: hub.addPlatform(body).snapshot() };
+    if (pathname === '/api/settings/cdp' && method === 'PUT') return hub.setCdpPort(body.cdp_port);
     if (pathname === '/api/settings/notify' && method === 'PUT') {
       store.updateNotify(body);
       hub.changed();

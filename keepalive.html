@@ -11,10 +11,10 @@
   <header class="ka-top">
     <form class="ka-server" id="ka-server-form">
       <label for="ka-server-url">保活服务</label>
-      <input type="text" id="ka-server-url" spellcheck="false" autocomplete="off" placeholder="服务器地址，例如 192.168.1.20">
-      <button type="submit" class="ka-connect" id="ka-server-connect" aria-label="连接"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3A5 5 0 0 0 11 21.07l1.71-1.71"/><path d="m8 16 8-8"/></svg></button>
+      <input type="text" id="ka-server-url" spellcheck="false" autocomplete="off" readonly placeholder="服务器地址，例如 192.168.1.20">
+      <button type="button" class="ka-connect" id="ka-server-connect" aria-label="编辑保活服务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3A5 5 0 0 0 11 21.07l1.71-1.71"/><path d="m8 16 8-8"/></svg></button>
     </form>
-    <p class="ka-link" id="ka-link" data-state="connecting">正在连接…</p>
+    <p class="ka-link" id="ka-link" data-state="connecting"></p>
   </header>
 
   <main class="ka-main">
@@ -44,8 +44,6 @@
       <input type="text" id="ka-f-name" autocomplete="off">
       <label for="ka-f-url">入口网址</label>
       <input type="text" id="ka-f-url" spellcheck="false" autocomplete="off" placeholder="创作者后台的地址">
-      <label for="ka-f-port">CDP 端口</label>
-      <input type="number" id="ka-f-port" min="1024" max="65535">
       <label for="ka-f-profile">沙盒目录</label>
       <input type="text" id="ka-f-profile" spellcheck="false" autocomplete="off" placeholder="留空则放在保活服务的数据目录下">
       <label for="ka-f-interval">保活间隔</label>
@@ -73,7 +71,23 @@
     </form>
   </dialog>
 
+  <dialog class="ka-dialog" id="ka-link-dialog" tabindex="-1">
+    <form class="ka-form" id="ka-link-form" method="dialog">
+      <h2 class="ka-section-title">保活服务</h2>
+      <label for="ka-link-url">服务链接</label>
+      <input type="text" id="ka-link-url" spellcheck="false" autocomplete="off" placeholder="例如 http://192.168.1.20:18990">
+      <label for="ka-link-port">CDP 端口</label>
+      <input type="number" id="ka-link-port" min="1024" max="65535">
+      <p class="ka-form-error" id="ka-link-error" hidden></p>
+      <div class="ka-form-actions">
+        <button type="button" class="ka-btn" id="ka-link-cancel">取消</button>
+        <button type="submit" class="ka-btn ka-btn-primary" id="ka-link-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
   <div class="ka-toast" id="ka-toast" hidden role="status"></div>
+  <script src="message-time.js"></script>
   <script src="keepalive.js"></script>
 </body>
 </html>

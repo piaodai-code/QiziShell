@@ -79,7 +79,7 @@ function numberInRange(value, min, max, label) {
   return number;
 }
 
-function normalizePlatform(raw, { dataDir, others, listenPort, previous }) {
+function normalizePlatform(raw, { dataDir, others, listenPort, previous, sharedPort = 9333 }) {
   const input = raw && typeof raw === 'object' ? raw : {};
   const platformId = previous ? previous.platform_id : String(input.platform_id || '').trim();
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(platformId)) {
@@ -101,17 +101,21 @@ function normalizePlatform(raw, { dataDir, others, listenPort, previous }) {
     throw new InputError('入口网址要以 http:// 或 https:// 开头');
   }
 
-  const cdpPort = intInRange(pick('cdp_port', 9333), 1024, 65535, 'CDP 端口');
-  if (cdpPort === listenPort) throw new InputError(`CDP 端口不能和保活服务的端口 ${listenPort} 相同`);
-  const clash = others.find((item) => item.platform_id !== platformId && item.cdp_port === cdpPort);
-  if (clash) throw new InputError(`CDP 端口 ${cdpPort} 已经分给 ${clash.name || clash.platform_id}`, 409);
-
   const platformType = String(pick('platform_type', 'custom') || 'custom').trim().slice(0, 40) || 'custom';
   const browserRaw = input.browser !== undefined ? input.browser : previous?.browser;
   const browser = String(browserRaw === undefined || browserRaw === null || browserRaw === ''
     ? 'shell'
     : browserRaw).trim();
   if (browser !== 'chrome' && browser !== 'shell') throw new InputError('浏览器只能是 chrome 或 shell');
+
+  const cdpPort = browser === 'shell'
+    ? sharedPort
+    : intInRange(pick('cdp_port', sharedPort), 1024, 65535, 'CDP 端口');
+  if (cdpPort === listenPort) throw new InputError(`CDP 端口不能和保活服务的端口 ${listenPort} 相同`);
+  if (browser !== 'shell') {
+    const clash = others.find((item) => item.platform_id !== platformId && item.browser !== 'shell' && item.cdp_port === cdpPort);
+    if (clash) throw new InputError(`CDP 端口 ${cdpPort} 已经分给 ${clash.name || clash.platform_id}`, 409);
+  }
 
   const profileDir = path.resolve(expandHome(pick('profile_dir', '')) || path.join(dataDir, 'profiles', platformId));
   const profileClash = others.find((item) => item.platform_id !== platformId && item.profile_dir === profileDir);
@@ -163,6 +167,11 @@ class Store {
       port: Number(overrides.port) || Number(saved.listen?.port) || DEFAULT_PORT,
     };
     this.chromePath = String(saved.chrome_path || '').trim();
+    try {
+      this.cdpPort = intInRange(saved.cdp_port ?? 9333, 1024, 65535, 'CDP 端口');
+    } catch {
+      this.cdpPort = 9333;
+    }
     this.configNotes = [];
     const savedPassword = String(saved.notify?.password || '');
     const password = savedPassword.trim();
@@ -186,6 +195,7 @@ class Store {
           dataDir: this.dataDir,
           others: this.platforms,
           listenPort: this.listen.port,
+          sharedPort: this.cdpPort,
         }));
       } catch (err) {
         console.error(`config.json: skipped platform ${raw?.platform_id || '(no id)'}: ${err.message}`);
@@ -201,6 +211,7 @@ class Store {
     writeJsonAtomic(this.configPath, {
       listen: saved.listen || { host: this.listen.host, port: this.listen.port },
       ...(this.chromePath ? { chrome_path: this.chromePath } : {}),
+      cdp_port: this.cdpPort,
       notify: this.notify,
       platforms: this.platforms,
     });
@@ -234,6 +245,7 @@ class Store {
       dataDir: this.dataDir,
       others: this.platforms,
       listenPort: this.listen.port,
+      sharedPort: this.cdpPort,
     });
     this.platforms.push(platform);
     this.saveConfig();
@@ -248,6 +260,7 @@ class Store {
       dataDir: this.dataDir,
       others: this.platforms,
       listenPort: this.listen.port,
+      sharedPort: this.cdpPort,
       previous,
     });
   }
@@ -265,6 +278,16 @@ class Store {
     this.platforms.splice(index, 1);
     this.saveConfig();
     this.dropPlatformState(platformId);
+  }
+
+  setCdpPort(port) {
+    const next = intInRange(port, 1024, 65535, 'CDP 端口');
+    if (next === this.listen.port) {
+      throw new InputError(`CDP 端口不能和保活服务的端口 ${this.listen.port} 相同`);
+    }
+    this.cdpPort = next;
+    this.saveConfig();
+    return next;
   }
 
   updateNotify(raw) {

@@ -104,6 +104,7 @@ const OPERATIONS = {
   chrome: (id, payload) => ['POST', `/api/platforms/${id}/chrome`, { on: payload?.on === true }],
   pause: (id, payload) => ['POST', `/api/platforms/${id}/pause`, { paused: payload?.paused === true }],
   check: (id) => ['POST', `/api/platforms/${id}/check`, {}],
+  'settings.cdp': (_id, payload) => ['PUT', '/api/settings/cdp', { cdp_port: payload?.cdp_port }],
 };
 
 /**

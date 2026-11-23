@@ -1,128 +1,15 @@
 (function initMessageTime(root, moduleObj) {
-  const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-  function currentZoneSnapshot() {
+  function localParts(ms) {
     if (typeof require === 'function') {
       try {
-        const loaded = require('./system-local-time').loadSnapshot();
-        if (loaded) return loaded;
+        return require('./system-local-time').localParts(ms);
       } catch {
-        // Renderer has no filesystem. The preload snapshot is the fallback.
+        // Renderer cannot spawn the system clock. Ask the main process.
       }
     }
-    const bridged = root && root.qiziLocalTime && root.qiziLocalTime.snapshot;
-    return bridged && Array.isArray(bridged.transitions) ? bridged : null;
-  }
-
-  function isLeapYear(year) {
-    return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-  }
-
-  function nthWeekday(year, month, week, dow) {
-    if (week === 5) {
-      const lastDate = new Date(Date.UTC(year, month, 0)).getUTCDate();
-      const lastDow = new Date(Date.UTC(year, month - 1, lastDate)).getUTCDay();
-      return lastDate - ((lastDow - dow + 7) % 7);
-    }
-    const firstDow = new Date(Date.UTC(year, month - 1, 1)).getUTCDay();
-    return 1 + ((dow - firstDow + 7) % 7) + (week - 1) * 7;
-  }
-
-  function monthDayFromDayNumber(year, dayNumber, zeroBased) {
-    const leap = isLeapYear(year);
-    const lengths = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    let remaining = dayNumber;
-    if (!zeroBased) remaining -= 1;
-    if (!zeroBased && leap && remaining >= 59) remaining += 1;
-    for (let month = 1; month <= 12; month += 1) {
-      if (remaining < lengths[month - 1]) {
-        return { month, day: remaining + 1 };
-      }
-      remaining -= lengths[month - 1];
-    }
-    return { month: 12, day: 31 };
-  }
-
-  function ruleInstantUtc(year, dateSpec, timeSeconds, offsetSeconds) {
-    let month = 1;
-    let day = 1;
-    if (dateSpec.type === 'M') {
-      month = dateSpec.month;
-      day = nthWeekday(year, dateSpec.month, dateSpec.week, dateSpec.dow);
-    } else if (dateSpec.type === 'J') {
-      const found = monthDayFromDayNumber(year, dateSpec.day, false);
-      month = found.month;
-      day = found.day;
-    } else {
-      const found = monthDayFromDayNumber(year, dateSpec.day, true);
-      month = found.month;
-      day = found.day;
-    }
-    return Math.floor(Date.UTC(year, month - 1, day) / 1000) + timeSeconds - offsetSeconds;
-  }
-
-  function posixOffset(rule, unixSeconds) {
-    if (!rule) return null;
-    if (!rule.dstName || !rule.start || !rule.end) {
-      return { utoff: rule.stdOff, abbr: rule.stdName };
-    }
-    const year = new Date(unixSeconds * 1000).getUTCFullYear();
-    for (const candidate of [year - 1, year, year + 1]) {
-      const start = ruleInstantUtc(candidate, rule.start, rule.startTime, rule.stdOff);
-      const end = ruleInstantUtc(candidate, rule.end, rule.endTime, rule.dstOff);
-      const inDst = start < end
-        ? unixSeconds >= start && unixSeconds < end
-        : unixSeconds >= start || unixSeconds < end;
-      if (inDst) return { utoff: rule.dstOff, abbr: rule.dstName };
-    }
-    return { utoff: rule.stdOff, abbr: rule.stdName };
-  }
-
-  function transitionOffset(snapshot, unixSeconds) {
-    const transitions = snapshot.transitions || [];
-    if (!transitions.length) {
-      return posixOffset(snapshot.posix, unixSeconds) || snapshot.initial || null;
-    }
-    const last = transitions[transitions.length - 1];
-    if (unixSeconds >= last.time && snapshot.posix) {
-      return posixOffset(snapshot.posix, unixSeconds) || last;
-    }
-    if (unixSeconds < transitions[0].time) return snapshot.initial || transitions[0];
-    let lo = 0;
-    let hi = transitions.length - 1;
-    let found = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (transitions[mid].time <= unixSeconds) {
-        found = mid;
-        lo = mid + 1;
-      } else {
-        hi = mid - 1;
-      }
-    }
-    return transitions[found];
-  }
-
-  function localParts(ms) {
-    const snapshot = currentZoneSnapshot();
-    if (!snapshot) return null;
-    const instant = Number(ms);
-    if (!Number.isFinite(instant)) return null;
-    const info = transitionOffset(snapshot, Math.floor(instant / 1000));
-    if (!info || !Number.isFinite(info.utoff)) return null;
-    const shifted = new Date(instant + info.utoff * 1000);
-    if (Number.isNaN(shifted.getTime())) return null;
-    return {
-      year: shifted.getUTCFullYear(),
-      month: shifted.getUTCMonth() + 1,
-      day: shifted.getUTCDate(),
-      hour: shifted.getUTCHours(),
-      minute: shifted.getUTCMinutes(),
-      second: shifted.getUTCSeconds(),
-      weekday: WEEKDAYS[shifted.getUTCDay()],
-      abbr: info.abbr || '',
-      offsetSeconds: info.utoff,
-    };
+    const bridge = root && root.qiziLocalTime;
+    if (bridge && typeof bridge.parts === 'function') return bridge.parts(ms);
+    return null;
   }
 
   function pad2(value) {
@@ -135,12 +22,24 @@
     return `${core} ${parts.abbr}`;
   }
 
+  function msFromLocalClock(hours, minutes, seconds = 0) {
+    const today = localParts(Date.now());
+    if (!today || !Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+    return Date.UTC(today.year, today.month - 1, today.day, hours, minutes, seconds) - today.offsetSeconds * 1000;
+  }
+
+  /** Local midnight after the system-clock day that contains ms. */
+  function nextLocalMidnight(ms) {
+    const parts = localParts(ms);
+    if (!parts) return null;
+    const start = Date.UTC(parts.year, parts.month - 1, parts.day) - parts.offsetSeconds * 1000;
+    return start + 24 * 60 * 60 * 1000;
+  }
+
   function formatClock(ms) {
     const parts = localParts(ms);
-    if (parts) return `${pad2(parts.hour)}:${pad2(parts.minute)}`;
-    const date = new Date(ms);
-    if (Number.isNaN(date.getTime())) return '';
-    return `${pad2(date.getHours())}:${pad2(date.getMinutes())}`;
+    if (!parts) return '';
+    return `${pad2(parts.hour)}:${pad2(parts.minute)}`;
   }
 
   function messageClockLabel(msg) {
@@ -177,8 +76,9 @@
             minute: minutes,
           }, true);
         }
-        date = new Date();
-        date.setHours(hours, minutes, 0, 0);
+        const clockMs = msFromLocalClock(hours, minutes, 0);
+        if (clockMs == null) return trimmed;
+        date = new Date(clockMs);
       } else {
         const parsed = Date.parse(trimmed);
         if (Number.isNaN(parsed)) return trimmed;
@@ -191,27 +91,7 @@
     if (!date || Number.isNaN(date.getTime())) return '';
 
     const local = localParts(date.getTime());
-    if (local) return formatLocalParts(local, true);
-
-    const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'short' }).format(date);
-    const parts = new Intl.DateTimeFormat('en-US', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: false,
-      timeZoneName: 'short',
-    }).formatToParts(date);
-
-    const year = parts.find((part) => part.type === 'year')?.value || '';
-    const month = parts.find((part) => part.type === 'month')?.value || '';
-    const day = parts.find((part) => part.type === 'day')?.value || '';
-    const hour = parts.find((part) => part.type === 'hour')?.value || '';
-    const minute = parts.find((part) => part.type === 'minute')?.value || '';
-    const timeZone = parts.find((part) => part.type === 'timeZoneName')?.value || '';
-    const core = `${weekday} ${year}-${month}-${day} ${hour}:${minute}`;
-    return timeZone ? `${core} ${timeZone}` : core;
+    return local ? formatLocalParts(local, true) : '';
   }
 
   function parseLeadingEnvelopeTimestamp(text) {
@@ -238,15 +118,16 @@
     if (typeof value === 'string') {
       const trimmed = value.trim();
       if (!trimmed) return null;
-      if (/^[A-Za-z]{3} \d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(trimmed)) {
-        const parsed = Date.parse(trimmed.replace(/^([A-Za-z]{3}) /, ''));
-        return Number.isNaN(parsed) ? null : parsed;
+      const wall = trimmed.match(/^[A-Za-z]{3} (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?/);
+      if (wall) {
+        const guess = Date.UTC(Number(wall[1]), Number(wall[2]) - 1, Number(wall[3]), Number(wall[4]), Number(wall[5]), Number(wall[6] || 0));
+        const parts = localParts(guess);
+        if (!parts) return null;
+        return guess - parts.offsetSeconds * 1000;
       }
       if (/^\d{1,2}:\d{2}$/.test(trimmed)) {
         const [hours, minutes] = trimmed.split(':').map((part) => Number(part));
-        const date = new Date();
-        date.setHours(hours, minutes, 0, 0);
-        return date.getTime();
+        return msFromLocalClock(hours, minutes, 0);
       }
       if (/^\d+$/.test(trimmed)) {
         const numeric = Number(trimmed);
@@ -328,6 +209,7 @@
     formatClock,
     messageClockLabel,
     localParts,
+    nextLocalMidnight,
     parseLeadingEnvelopeTimestamp,
     stripLeadingEnvelopeTimestamp,
     stripSenderUntrustedMetadata,

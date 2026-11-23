@@ -22,6 +22,45 @@
   const running = new Set();
   const holding = new Set();
   let refreshTimer = null;
+  let latestJobs = [];
+  let sortKey = 'next';
+  let sortDir = 'asc';
+
+  function compareText(a, b) {
+    return String(a || '').localeCompare(String(b || ''), 'zh');
+  }
+
+  function compareTime(a, b) {
+    const av = Number(a) || 0;
+    const bv = Number(b) || 0;
+    if (!av && !bv) return 0;
+    if (!av) return 1;
+    if (!bv) return -1;
+    return sortDir === 'asc' ? av - bv : bv - av;
+  }
+
+  function sortedJobs(jobs) {
+    const dir = sortDir === 'desc' ? -1 : 1;
+    return jobs.slice().sort((a, b) => {
+      let result = 0;
+      if (sortKey === 'agent') result = compareText(a.agentName, b.agentName);
+      else if (sortKey === 'task') result = compareText(a.name, b.name);
+      else if (sortKey === 'schedule') result = compareText(a.scheduleLabel, b.scheduleLabel);
+      else if (sortKey === 'next') result = compareTime(a.nextRunAtMs, b.nextRunAtMs);
+      else if (sortKey === 'last') result = compareTime(a.lastRunAtMs, b.lastRunAtMs);
+      if (result) return sortKey === 'next' || sortKey === 'last' ? result : result * dir;
+      return compareText(a.agentName, b.agentName) || compareText(a.name, b.name);
+    });
+  }
+
+  function paintSortHeaders() {
+    document.querySelectorAll('.auto-sort').forEach((button) => {
+      const on = button.dataset.sort === sortKey;
+      button.classList.toggle('is-active', on);
+      button.dataset.dir = on ? sortDir : '';
+      button.closest('th')?.setAttribute('aria-sort', on ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none');
+    });
+  }
 
   function escapeHtml(text) {
     return String(text)
@@ -56,12 +95,11 @@
       if (!at || at <= Date.now()) return soonest;
       return soonest && soonest < at ? soonest : at;
     }, 0);
-    const endOfToday = new Date();
-    endOfToday.setHours(24, 0, 0, 0);
-    const todayLeft = enabled.filter((job) => {
+    const endOfToday = window.MessageTime?.nextLocalMidnight?.(Date.now());
+    const todayLeft = endOfToday ? enabled.filter((job) => {
       const at = Number(job.nextRunAtMs);
-      return at > Date.now() && at < endOfToday.getTime();
-    }).length;
+      return at > Date.now() && at < endOfToday;
+    }).length : 0;
     statRunningEl.innerHTML = `${enabled.length} <small>个</small>`;
     statNextEl.innerHTML = nextAt ? valueWithUnit(formatDistance(nextAt, '后')) : '—';
     statTodayEl.innerHTML = `${todayLeft} <small>个</small>`;
@@ -89,7 +127,7 @@
       return;
     }
     const colors = agentColors(jobs);
-    rowsEl.innerHTML = jobs.map((job) => {
+    rowsEl.innerHTML = sortedJobs(jobs).map((job) => {
       const busy = running.has(job.id) || job.running;
       const off = job.enabled ? '' : ' is-off';
       const taskText = `${job.name}${job.enabled ? '' : '（已停用）'}`;
@@ -134,6 +172,7 @@
     }
     statusEl.textContent = '';
     const jobs = result.jobs || [];
+    latestJobs = jobs;
     for (const id of [...running]) {
       if (holding.has(id)) continue;
       const job = jobs.find((item) => item.id === id);
@@ -178,6 +217,19 @@
     const next = event.relatedTarget?.closest?.('.clip');
     if (next && rowsEl.contains(next)) return;
     hideClipTip();
+  });
+
+  document.querySelector('.auto-table thead').addEventListener('click', (event) => {
+    const button = event.target.closest('.auto-sort');
+    if (!button) return;
+    const key = button.dataset.sort;
+    if (key === sortKey) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+    else {
+      sortKey = key;
+      sortDir = key === 'last' ? 'desc' : 'asc';
+    }
+    paintSortHeaders();
+    render(latestJobs);
   });
 
   rowsEl.addEventListener('click', async (event) => {

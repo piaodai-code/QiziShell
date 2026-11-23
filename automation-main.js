@@ -1,3 +1,5 @@
+const { localParts } = require('./message-time');
+
 const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 function pad2(value) {
@@ -130,13 +132,11 @@ function presentJobs(jobs, agents) {
       agentName: names.get(agentId) || (agentId ? agentId : '未指定'),
       name: String(job.name || job.id || '未命名任务'),
       enabled: job.enabled !== false,
-      scheduleLabel: formatSchedule(job.schedule, (at) => new Intl.DateTimeFormat('zh-CN', {
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        hourCycle: 'h23',
-      }).format(at)),
+      scheduleLabel: formatSchedule(job.schedule, (at) => {
+        const parts = localParts(at);
+        if (!parts) return '';
+        return `${pad2(parts.month)}-${pad2(parts.day)} ${pad2(parts.hour)}:${pad2(parts.minute)}`;
+      }),
       nextRunAtMs: Number(job.state?.nextRunAtMs || job.nextRunAtMs || 0),
       lastRunAtMs,
       lastOk,

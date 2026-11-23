@@ -147,8 +147,10 @@
   function formatPriorDate(iso) {
     const date = new Date(iso);
     if (Number.isNaN(date.getTime())) return '';
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    const parts = window.MessageTime?.localParts?.(date.getTime());
+    if (!parts) return '';
+    const month = String(parts.month).padStart(2, '0');
+    const day = String(parts.day).padStart(2, '0');
     return `${month}-${day}`;
   }
 

@@ -27,13 +27,15 @@
 
   const pad = (n) => String(n).padStart(2, '0');
 
-  /** 13:02:11 today, 11-18 13:02 on another day. */
+  /** 13:02:11 today, 11-18 13:02 on another day. Follows the Mac menu-bar clock. */
   function clock(ms, { seconds = true } = {}) {
     if (!ms) return '';
-    const date = new Date(ms);
-    const time = `${pad(date.getHours())}:${pad(date.getMinutes())}${seconds ? `:${pad(date.getSeconds())}` : ''}`;
-    if (date.toDateString() === new Date().toDateString()) return time;
-    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    const parts = window.MessageTime?.localParts?.(ms);
+    const today = window.MessageTime?.localParts?.(Date.now());
+    if (!parts || !today) return '';
+    const time = `${pad(parts.hour)}:${pad(parts.minute)}${seconds ? `:${pad(parts.second)}` : ''}`;
+    if (parts.year === today.year && parts.month === today.month && parts.day === today.day) return time;
+    return `${pad(parts.month)}-${pad(parts.day)} ${pad(parts.hour)}:${pad(parts.minute)}`;
   }
 
   function toast(text, tone) {
@@ -177,14 +179,8 @@
     const busy = pending.has(id) || Boolean(s.transition);
     const locked = !connected() || busy;
     const expanded = cardExpanded(id);
-    const shownPort = s.cdp_port || platform.cdp_port;
-    const browser = s.browser_alive
-      ? `运行中，CDP 端口 ${shownPort}${s.shared_window ? '（各平台共用）' : ''}${s.chrome_pid ? `，进程 ${s.chrome_pid}` : ''}`
-      : `没在运行，CDP 端口 ${shownPort}`;
     const facts = [
-      ['浏览器', browser],
       ['登录状态', sessionFact(platform)],
-      ['最后心跳', s.last_heartbeat_at ? clock(s.last_heartbeat_at) : '—'],
       ['上次保活', lastKeepaliveFact(s.last_keepalive)],
       ['下次保活', nextKeepaliveFact(platform)],
       ['占用锁', lockFact(platform)],
@@ -248,25 +244,20 @@
     $('ka-add').disabled = !connected();
   }
 
-  function channelFact() {
-    const notify = state?.notify;
-    if (!notify?.hermes_url) return '';
-    if (notify.reachable === true) return '通知通道正常';
-    if (notify.reachable === false) return `通知通道坏了：${notify.last_error || '发送失败'}`;
-    return '通知通道还没发过';
-  }
-
   function renderLink() {
-    linkEl.dataset.state = link.state;
-    const channel = channelFact();
-    if (link.state === 'connected') {
-      const base = state ? `已连接，保活服务 ${state.server.version}` : '已连接';
-      linkEl.textContent = channel ? `${base}。${channel}` : base;
-    } else if (link.state === 'offline') {
-      linkEl.textContent = `${link.error}${state ? '。下面是断开前的状态' : ''}`;
-    } else {
-      linkEl.textContent = '正在连接…';
-    }
+    const port = servicePort();
+    const pid = servicePid();
+    const beat = serviceHeartbeat();
+    const conn = link.state === 'connected'
+      ? '已连接'
+      : link.state === 'offline'
+        ? (link.error || '没连上')
+        : '正在连接…';
+    linkEl.innerHTML = `
+      <span class="ka-conn" data-state="${escapeHtml(link.state)}"><i></i>${escapeHtml(conn)}</span>
+      <span>CDP端口 ${port ? escapeHtml(port) : '—'}</span>
+      <span>进程 ${pid ? escapeHtml(pid) : '—'}</span>
+      <span>最后心跳 ${beat || '—'}</span>`;
   }
 
   function render() {
@@ -340,19 +331,74 @@
     else openEventLists.delete(id);
   }, true);
 
-  // ---- server address ----
+  // ---- server address and the shared CDP port ----
 
-  $('ka-server-form').addEventListener('submit', async (event) => {
+  function servicePort() {
+    if (state?.server?.cdp_port) return state.server.cdp_port;
+    const live = (state?.platforms || []).find((item) => item.status?.cdp_port);
+    return live?.status?.cdp_port || '';
+  }
+
+  function servicePid() {
+    const platforms = state?.platforms || [];
+    const live = platforms.find((item) => item.status?.browser_alive && item.status?.chrome_pid);
+    return live?.status?.chrome_pid || '';
+  }
+
+  function serviceHeartbeat() {
+    const stamps = (state?.platforms || [])
+      .map((item) => item.status?.last_heartbeat_at)
+      .filter((at) => at);
+    if (!stamps.length) return '';
+    return clock(Math.max(...stamps));
+  }
+
+  function linkError(text) {
+    const error = $('ka-link-error');
+    error.textContent = text || '';
+    error.hidden = !text;
+  }
+
+  function openLinkDialog() {
+    $('ka-link-url').value = $('ka-server-url').value;
+    $('ka-link-port').value = servicePort();
+    linkError('');
+    $('ka-link-dialog').showModal();
+  }
+
+  $('ka-server-form').addEventListener('submit', (event) => {
     event.preventDefault();
-    const button = $('ka-server-connect');
+    openLinkDialog();
+  });
+  $('ka-server-connect').addEventListener('click', openLinkDialog);
+  $('ka-link-cancel').addEventListener('click', () => $('ka-link-dialog').close());
+  $('ka-link-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const button = $('ka-link-save');
     button.disabled = true;
-    const result = await window.keepalive.setServer($('ka-server-url').value);
-    button.disabled = false;
+    linkError('');
+    const result = await window.keepalive.setServer($('ka-link-url').value);
     if (!result.ok) {
-      toast(result.error, 'bad');
+      button.disabled = false;
+      linkError(result.error || '没保存成功');
       return;
     }
     applyBoot(result);
+    const port = Number($('ka-link-port').value);
+    if (result.link?.state === 'connected' && port) {
+      const saved = await window.keepalive.op('settings.cdp', '', { cdp_port: port });
+      if (!saved.ok) {
+        button.disabled = false;
+        linkError(saved.error || 'CDP 端口没保存成功');
+        return;
+      }
+      if (saved.cdp_port && state?.server) {
+        state.server.cdp_port = saved.cdp_port;
+        render();
+      }
+    }
+    button.disabled = false;
+    $('ka-link-dialog').close();
   });
 
   function applyBoot(result) {
@@ -384,7 +430,6 @@
     field('id').value = preset?.platform_id || '';
     field('name').value = preset?.name || '';
     field('url').value = preset?.entry_url || '';
-    field('port').value = preset?.cdp_port || '';
     field('interval').value = preset?.keep_alive.interval_minutes ?? 15;
     field('jitter').value = preset?.keep_alive.jitter_minutes ?? 3;
   }
@@ -403,7 +448,6 @@
       field('id').value = platform.platform_id;
       field('name').value = platform.name;
       field('url').value = platform.entry_url;
-      field('port').value = platform.cdp_port;
       field('profile').value = platform.profile_dir;
       field('interval').value = platform.keep_alive.interval_minutes;
       field('jitter').value = platform.keep_alive.jitter_minutes;
@@ -441,7 +485,6 @@
       platform_type: field('type').value,
       name: field('name').value.trim(),
       entry_url: field('url').value.trim(),
-      cdp_port: Number(field('port').value),
       profile_dir: field('profile').value.trim(),
       keep_alive: {
         interval_minutes: Number(field('interval').value),

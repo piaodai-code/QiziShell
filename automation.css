@@ -120,6 +120,21 @@ body {
   font-weight: 600;
   border-bottom: 1px solid #e7e7eb;
 }
+.auto-sort {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.auto-sort.is-active::after {
+  content: '↑';
+  margin-left: 3px;
+}
+.auto-sort.is-active[data-dir="desc"]::after { content: '↓'; }
 .auto-table td {
   height: 44px;
   border-bottom: 1px solid #f0f0f3;

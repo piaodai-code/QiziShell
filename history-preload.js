@@ -1,15 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-function readSystemZoneSnapshot() {
-  try {
-    return ipcRenderer.sendSync('qizi:local-time-zone');
-  } catch {
-    return null;
-  }
-}
-
 contextBridge.exposeInMainWorld('qiziLocalTime', {
-  snapshot: readSystemZoneSnapshot(),
+  parts: (ms) => {
+    try {
+      return ipcRenderer.sendSync('qizi:local-time-parts', ms);
+    } catch {
+      return null;
+    }
+  },
 });
 
 contextBridge.exposeInMainWorld('qiziHistory', {

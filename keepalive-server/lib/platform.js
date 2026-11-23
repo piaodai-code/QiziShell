@@ -34,6 +34,16 @@ function firstLine(err) {
   return String(err?.message || err || '').split('\n')[0];
 }
 
+function systemClock(ms) {
+  const sec = Math.floor(Number(ms) / 1000);
+  if (!Number.isFinite(sec)) return '';
+  try {
+    return require('child_process').execFileSync('/bin/date', ['-r', String(sec), '+%H:%M:%S'], { encoding: 'utf8' }).trim();
+  } catch {
+    return '';
+  }
+}
+
 /** One platform: its sandbox Chrome, its keep-alive timer, its lock and its login state. */
 class PlatformRuntime {
   constructor(config, ctx) {
@@ -155,7 +165,7 @@ class PlatformRuntime {
       const started = shell
         ? await chrome.startShell({
           dataDir: this.ctx.store.dataDir,
-          port: chrome.shellDebugPort() || this.config.cdp_port,
+          port: chrome.shellDebugPort() || this.ctx.store.cdpPort,
           entryUrl: this.config.entry_url,
           name: this.config.name,
           platformId: this.config.platform_id,
@@ -577,7 +587,7 @@ class PlatformRuntime {
       const now = Date.now();
       const held = this.lockInfo && now < this.lockInfo.expires_at ? this.lockInfo : null;
       if (held && held.owner !== name) {
-        throw new InputError(`${held.owner} 正在占用，最晚 ${new Date(held.expires_at).toLocaleTimeString()} 自动解除`, 409);
+        throw new InputError(`${held.owner} 正在占用，最晚 ${systemClock(held.expires_at)} 自动解除`, 409);
       }
       this.lockInfo = {
         owner: name,

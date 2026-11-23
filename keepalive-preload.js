@@ -1,5 +1,15 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+contextBridge.exposeInMainWorld('qiziLocalTime', {
+  parts: (ms) => {
+    try {
+      return ipcRenderer.sendSync('qizi:local-time-parts', ms);
+    } catch {
+      return null;
+    }
+  },
+});
+
 function subscribe(channel, callback) {
   const handler = (_event, payload) => callback(payload);
   ipcRenderer.on(channel, handler);

@@ -88,10 +88,10 @@ const https = require('https');
 const http = require('http');
 const { GatewayWsClient, isRetryableGatewayDisconnect } = require('./gateway-ws');
 const { extractMessageSentTimeFromRaw, stripLeadingEnvelopeTimestamp, stripSenderUntrustedMetadata } = require('./message-time');
-const { loadSnapshot: loadSystemZoneSnapshot } = require('./system-local-time');
+const { localParts: systemLocalParts } = require('./system-local-time');
 
-ipcMain.on('qizi:local-time-zone', (event) => {
-  event.returnValue = loadSystemZoneSnapshot();
+ipcMain.on('qizi:local-time-parts', (event, ms) => {
+  event.returnValue = systemLocalParts(ms);
 });
 const {
   initSttManager,
@@ -2249,6 +2249,11 @@ function openAbout() {
     width: 360,
     height: 440,
     title: 'About QiziShell',
+    backgroundColor: '#1a2421',
+    ...(process.platform === 'darwin' ? {
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: 12, y: 14 },
+    } : {}),
   });
   aboutWindow.loadFile(path.join(__dirname, 'about.html'), {
     query: { version },
@@ -2277,6 +2282,11 @@ function openUpdate() {
     width: 400,
     height: 580,
     title: 'Update QiziShell',
+    backgroundColor: '#1a2421',
+    ...(process.platform === 'darwin' ? {
+      titleBarStyle: 'hidden',
+      trafficLightPosition: { x: 12, y: 14 },
+    } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'update-preload.js'),
     },

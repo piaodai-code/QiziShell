@@ -10,6 +10,12 @@ body {
   color: #f2f2f2;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  -webkit-app-region: drag;
+}
+
+button,
+.update-notes {
+  -webkit-app-region: no-drag;
 }
 
 .update {

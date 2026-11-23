@@ -1080,8 +1080,10 @@ const PRIOR_TOPIC_MAX_ENTRIES = 8;
 function formatPriorTopicDate(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return String(iso || '').slice(0, 10);
+  const parts = require('./message-time').localParts(date.getTime());
+  if (!parts) return '';
   const pad = (n) => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
 }
 
 function clipPriorSummary(text) {

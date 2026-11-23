@@ -54,10 +54,13 @@ h2, p, dl, dd, ol { margin: 0; }
 .ka-server input {
   width: 100%;
   height: 36px;
-  padding: 0 11px;
-  border: 1px solid #dedee4;
-  border-radius: 9px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   font-size: 12px;
+  color: #1d1d1f;
 }
 .ka-connect {
   width: 32px;
@@ -75,22 +78,31 @@ h2, p, dl, dd, ol { margin: 0; }
 .ka-connect:disabled { opacity: 0.45; cursor: default; }
 .ka-connect svg { width: 19px; height: 19px; }
 
-.ka-link { display: flex; align-items: center; gap: 7px; margin-top: 8px; font-size: 11px; color: #77777e; }
-.ka-link::before {
-  content: '';
+.ka-link {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #55555c;
+}
+.ka-conn { display: inline-flex; align-items: center; gap: 6px; }
+.ka-conn i {
   width: 8px;
   height: 8px;
   flex: none;
   border-radius: 50%;
   background: #bbb;
 }
-.ka-link[data-state="connected"]::before {
+.ka-conn[data-state="connected"] { color: #1d1d1f; }
+.ka-conn[data-state="connected"] i {
   background: #55ad7c;
   box-shadow: 0 0 0 0 rgba(85, 173, 124, 0.38);
   animation: ka-breathe 2.1s ease-out infinite;
 }
-.ka-link[data-state="offline"] { color: var(--bad); }
-.ka-link[data-state="offline"]::before { background: var(--bad); animation: none; }
+.ka-conn[data-state="offline"] { color: var(--bad); }
+.ka-conn[data-state="offline"] i { background: var(--bad); animation: none; }
 
 .ka-main {
   flex: 1;
@@ -190,7 +202,7 @@ h2, p, dl, dd, ol { margin: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ka-lamp[data-state="ok"],
-  .ka-link[data-state="connected"]::before { animation: none; }
+  .ka-conn[data-state="connected"] i { animation: none; }
 }
 
 .ka-badge {
@@ -291,19 +303,20 @@ h2, p, dl, dd, ol { margin: 0; }
 .ka-btn {
   height: 28px;
   padding: 0 12px;
-  border: 1px solid #d4d4d4;
+  border: 1px solid #d8d8de;
   border-radius: 6px;
-  background: #fff;
+  background: #ececef;
+  color: #333;
   cursor: pointer;
   white-space: nowrap;
   flex-shrink: 0;
 }
-.ka-btn:hover { background: #f5f5f5; }
+.ka-btn:hover { background: #e2e2e6; }
 .ka-btn:disabled { opacity: 0.45; cursor: default; }
-.ka-btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-.ka-btn-primary:hover { background: #12408a; }
-.ka-btn-danger { color: var(--bad); border-color: #e9b9b5; }
-.ka-btn-danger:hover { background: var(--bad-bg); }
+.ka-btn-primary { background: #1f9d55; border-color: #1f9d55; color: #fff; }
+.ka-btn-primary:hover { background: #188a49; }
+.ka-btn-danger { background: #ececef; border-color: #d8d8de; color: #333; }
+.ka-btn-danger:hover { background: #e2e2e6; }
 .ka-text-btn {
   border: none;
   background: transparent;
@@ -325,16 +338,29 @@ input[type="text"], input[type="password"], input[type="number"], select {
 }
 .ka-server input[type="text"] {
   height: 36px;
-  padding: 0 11px;
-  border-color: #dedee4;
-  border-radius: 9px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   font-size: 12px;
+  color: #1d1d1f;
+}
+.ka-server input:focus,
+.ka-server input:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 input:focus-visible, select:focus-visible, .ka-btn:focus-visible, .ka-text-btn:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+.ka-dialog :focus,
+.ka-dialog :focus-visible {
+  outline: none;
+  box-shadow: none;
+}
 input:read-only { background: #f5f5f5; color: #666; }
+.ka-server input:read-only { background: transparent; color: #1d1d1f; }
 
 .ka-section-title { font-size: 14px; font-weight: 600; }
 .ka-help { margin-top: 4px; color: var(--muted); font-size: 12px; }
@@ -352,6 +378,7 @@ input:read-only { background: #f5f5f5; color: #666; }
 .ka-inline { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; color: #555; }
 .ka-inline input { width: 72px; }
 .ka-check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.ka-dialog .ka-check input { accent-color: #1f9d55; width: 15px; height: 15px; }
 .ka-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 .ka-spacer { flex: 1; }
 .ka-form-error { color: var(--bad); background: var(--bad-bg); border-radius: 6px; padding: 6px 8px; }

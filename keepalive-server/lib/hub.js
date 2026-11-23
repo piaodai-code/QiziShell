@@ -86,6 +86,7 @@ class Hub {
         version,
         now: Date.now(),
         port: this.store.listen.port,
+        cdp_port: chrome.shellDebugPort() || this.store.cdpPort,
         data_dir: this.store.dataDir,
         scripts_dir: this.store.scriptsDir,
       },
@@ -102,6 +103,21 @@ class Hub {
     const runtime = this.runtimes.get(platformId);
     if (!runtime) throw new InputError(`没有平台 ${platformId}`, 404);
     return runtime;
+  }
+
+  setCdpPort(port) {
+    const live = chrome.shellDebugPort();
+    const browserUp = [...this.runtimes.values()].some((runtime) => runtime.chromeOn || runtime.browserAlive);
+    if (browserUp && Number(port) !== (live || this.store.cdpPort)) {
+      throw new InputError('先关闭保活窗口，再改 CDP 端口', 409);
+    }
+    const next = this.store.setCdpPort(port);
+    for (const runtime of this.runtimes.values()) {
+      if (runtime.config.browser === 'shell') runtime.config.cdp_port = next;
+    }
+    this.store.saveConfig();
+    this.changed();
+    return { cdp_port: chrome.shellDebugPort() || next };
   }
 
   addPlatform(raw) {

@@ -152,7 +152,6 @@ async function main() {
     await shot('02-add-dialog');
     await page(`
       document.getElementById("ka-f-url").value = ${JSON.stringify(`${site.url}/platform`)};
-      document.getElementById("ka-f-port").value = ${cdpPort};
       document.getElementById("ka-f-args").value = "--headless=new";
       document.getElementById("ka-f-lock").value = 45;
       document.getElementById("ka-f-jitter").value = 5;
@@ -171,7 +170,7 @@ async function main() {
     await shot('03-stopped');
 
     console.log('chrome on');
-    await api('PUT', '/api/platforms/channels_01', { browser: 'chrome' });
+    await api('PUT', '/api/platforms/channels_01', { browser: 'chrome', cdp_port: cdpPort });
     await page('document.querySelector(\'input[data-act="chrome"]\').click()');
     await waitUntil(async () => (await text('.ka-badge')) === '缺保活脚本', 40000, 'Chrome to start');
     check((await text('.ka-facts')).includes('.json'), 'the card says where the agent\'s script goes');
@@ -225,10 +224,12 @@ async function main() {
     await page('document.querySelector(\'button[data-act="edit"]\').click()');
     check(await page('document.getElementById("ka-f-id").readOnly'), 'the platform ID cannot be changed');
     await shot('07-edit-dialog');
-    await page('document.getElementById("ka-f-port").value = 9999; document.getElementById("ka-f-save").click();');
-    await waitUntil(async () => (await page('document.getElementById("ka-f-error").hidden')) === false, 5000, 'the port change to be refused');
-    check((await text('#ka-f-error')).includes('先关闭沙盒 Chrome'), 'the port cannot change under a running Chrome');
     await page('document.getElementById("ka-f-cancel").click()');
+    await page('document.getElementById("ka-server-connect").click()');
+    await page('document.getElementById("ka-link-port").value = 9999; document.getElementById("ka-link-save").click();');
+    await waitUntil(async () => (await page('document.getElementById("ka-link-error").hidden')) === false, 5000, 'the port change to be refused');
+    check((await text('#ka-link-error')).includes('先关闭保活窗口'), 'the port cannot change under a running window');
+    await page('document.getElementById("ka-link-cancel").click()');
 
     console.log('chrome off, server gone');
     await page('document.querySelector(\'input[data-act="chrome"]\').click()');

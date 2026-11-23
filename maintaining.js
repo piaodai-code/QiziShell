@@ -65,11 +65,8 @@
   }
 
   function nowLabel() {
-    if (typeof window.MessageTime?.formatClock === 'function') {
-      const clock = window.MessageTime.formatClock(Date.now());
-      if (clock) return clock;
-    }
-    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    if (typeof window.MessageTime?.formatClock === 'function') return window.MessageTime.formatClock(Date.now());
+    return '';
   }
 
   function formatFileSize(bytes) {
@@ -442,9 +439,9 @@
     `).join('');
     const chips = pendingFiles.map((file, index) => `
       <div class="pending-file">
+        <button type="button" class="pending-file-remove" data-remove="file" data-index="${index}" aria-label="Remove">×</button>
         <span class="pending-file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</span>
         <span class="pending-file-size">${escapeHtml(formatFileSize(file.size))}</span>
-        <button type="button" class="pending-file-remove" data-remove="file" data-index="${index}" aria-label="Remove">×</button>
       </div>
     `).join('');
     pendingEl.hidden = pendingImages.length === 0 && pendingFiles.length === 0;

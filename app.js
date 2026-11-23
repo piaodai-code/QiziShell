@@ -631,9 +631,9 @@ function renderPendingAttachments() {
       pendingFiles.splice(idx, 1);
       renderPendingAttachments();
     });
+    chip.appendChild(removeBtn);
     chip.appendChild(nameEl);
     chip.appendChild(sizeEl);
-    chip.appendChild(removeBtn);
     composerPendingEl.appendChild(chip);
   });
   updateComposerSendBtn();
@@ -2442,25 +2442,14 @@ function clipDraftPreview(text) {
 function formatDraftTime(ms) {
   const parts = typeof MessageTimeApi.localParts === 'function' ? MessageTimeApi.localParts(ms || 0) : null;
   const todayParts = typeof MessageTimeApi.localParts === 'function' ? MessageTimeApi.localParts(Date.now()) : null;
-  if (parts && todayParts) {
-    const hm = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
-    const todayKey = Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day);
-    const dayKey = Date.UTC(parts.year, parts.month - 1, parts.day);
-    const days = Math.round((todayKey - dayKey) / 86400000);
-    if (days === 0) return hm;
-    if (days === 1) return `昨天 ${hm}`;
-    return `${parts.month}月${parts.day}日 ${hm}`;
-  }
-  const date = new Date(ms || 0);
-  const hm = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dayStart = new Date(date);
-  dayStart.setHours(0, 0, 0, 0);
-  const days = Math.round((today - dayStart) / 86400000);
+  if (!parts || !todayParts) return '';
+  const hm = `${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
+  const todayKey = Date.UTC(todayParts.year, todayParts.month - 1, todayParts.day);
+  const dayKey = Date.UTC(parts.year, parts.month - 1, parts.day);
+  const days = Math.round((todayKey - dayKey) / 86400000);
   if (days === 0) return hm;
   if (days === 1) return `昨天 ${hm}`;
-  return `${date.getMonth() + 1}月${date.getDate()}日 ${hm}`;
+  return `${parts.month}月${parts.day}日 ${hm}`;
 }
 
 function hideDraftCapsuleMenu() {
@@ -3961,13 +3950,8 @@ function messageClockLabel(msg) {
 }
 
 function now() {
-  if (typeof MessageTimeApi.formatClock === 'function') {
-    const clock = MessageTimeApi.formatClock(Date.now());
-    if (clock) return clock;
-  }
-  const d = new Date();
-  return d.getHours().toString().padStart(2, '0') + ':' +
-         d.getMinutes().toString().padStart(2, '0');
+  if (typeof MessageTimeApi.formatClock === 'function') return MessageTimeApi.formatClock(Date.now());
+  return '';
 }
 
 function messagesStorageKey(sessionKey = currentSessionKey) {
