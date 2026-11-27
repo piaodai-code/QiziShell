@@ -79,6 +79,16 @@ function packServerProgram(destDir) {
   }
 }
 
+const PROBE_STALE_MS = 25000;
+
+function keepaliveLinkDown(link, state, now = Date.now()) {
+  if (link?.state === 'offline') return true;
+  if (link?.state !== 'connected') return false;
+  const stamps = (state?.platforms || []).map((item) => item.status?.last_heartbeat_at).filter(Boolean);
+  if (!stamps.length) return false;
+  return now - Math.max(...stamps) > PROBE_STALE_MS;
+}
+
 function platformKeepaliveLost(platform) {
   const status = platform?.status;
   if (!status?.chrome_on || status.paused) return false;
@@ -234,14 +244,27 @@ function createKeepaliveFeature({
     }
   }
 
+  let keepaliveAlertOn = null;
+  function publishKeepaliveAlert() {
+    if (typeof onKeepaliveAlert !== 'function') return;
+    const lost = (lastState?.platforms || []).some(platformKeepaliveLost);
+    const on = lost || keepaliveLinkDown(client.link, lastState);
+    if (on === keepaliveAlertOn) return;
+    keepaliveAlertOn = on;
+    onKeepaliveAlert(on);
+  }
+
   client.on('state', (state) => {
     push('keepalive:state', state);
     considerRelay(state);
-    if (typeof onKeepaliveAlert === 'function') {
-      onKeepaliveAlert((state?.platforms || []).some(platformKeepaliveLost));
-    }
+    publishKeepaliveAlert();
   });
-  client.on('link', (link) => push('keepalive:link', link));
+  client.on('link', (link) => {
+    push('keepalive:link', link);
+    publishKeepaliveAlert();
+  });
+  const alertTimer = setInterval(publishKeepaliveAlert, 1000);
+  if (typeof alertTimer.unref === 'function') alertTimer.unref();
 
   function loadBounds() {
     const saved = readSettings().bounds || {};
@@ -398,4 +421,4 @@ function createKeepaliveFeature({
   };
 }
 
-module.exports = { createKeepaliveFeature, platformKeepaliveLost };
+module.exports = { createKeepaliveFeature, platformKeepaliveLost, keepaliveLinkDown };

@@ -91,6 +91,32 @@ async function checkRuntimeRules() {
     check(runtime.notice.text === noticeText, 'the same streak is reported once');
     runtime.trackTrouble(false, { status: 'alive' });
     check(runtime.troubleRounds === 0, 'a clean round ends the streak');
+
+    console.log('shell heartbeat ignores a control-port miss');
+    const chromeApi = require('../lib/chrome');
+    const originalQuery = chromeApi.shellTabQuery;
+    runtime.config.browser = 'shell';
+    runtime.chromeOn = true;
+    runtime.browserAlive = true;
+    runtime.session = { status: 'alive', reason: '', reason_text: '', detail: '', checked_at: 1 };
+    runtime.probeMisses = 0;
+    runtime.nextRestartAt = 0;
+    chromeApi.shellTabQuery = async () => ({ ok: false, tabs: [], reason: 'control' });
+    try {
+      await runtime.heartbeat(Date.now());
+      check(runtime.session.status === 'alive' && runtime.browserAlive === true && runtime.probeMisses === 0,
+        'a control-port failure is not a missing tab');
+      chromeApi.shellTabQuery = async () => ({ ok: true, tabs: [], reason: '' });
+      for (let i = 0; i < 4; i += 1) await runtime.heartbeat(Date.now());
+      check(runtime.session.status === 'alive' && runtime.browserAlive === true && runtime.probeMisses === 4,
+        'four confirmed missing tabs do not rebuild the page');
+      runtime.nextRestartAt = Date.now() + 60000;
+      await runtime.heartbeat(Date.now());
+      check(runtime.session.status === 'alive' && runtime.queued === 0,
+        'a fifth miss still waits out the restart gap');
+    } finally {
+      chromeApi.shellTabQuery = originalQuery;
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

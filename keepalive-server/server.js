@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 'use strict';
 
-const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Store } = require('./lib/store');
@@ -38,11 +37,10 @@ const options = parseArgs(process.argv.slice(2));
 const dataDir = options.dataDir || process.env.QIZI_KEEPALIVE_DIR || path.join(os.homedir(), '.qizi-keepalive');
 const store = new Store(dataDir, { host: options.host, port: options.port });
 
-const logStream = fs.createWriteStream(path.join(store.dataDir, 'keepalive.log'), { flags: 'a' });
 function log(text) {
-  const line = `${new Date().toISOString()} ${text}`;
-  console.log(line);
-  logStream.write(`${line}\n`);
+  // stdout is already appended to keepalive.log by the launcher. Writing the
+  // file here as well put every line in the log twice.
+  console.log(`${new Date().toISOString()} ${text}`);
 }
 
 for (const note of store.configNotes) log(note);
@@ -77,7 +75,7 @@ function shutdown() {
   log('stopping; sandbox Chrome is left running');
   hub.stop();
   api.close();
-  logStream.end(() => process.exit(0));
+  process.exit(0);
 }
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

@@ -8,6 +8,10 @@ const { InputError } = require('./store');
 
 const HEARTBEAT_MS = 10000;
 const MISSES_BEFORE_DEAD = 2;
+// A missing tab has to stay missing across several heartbeats before the page
+// is torn down. One control-port miss is not a missing tab.
+const SHELL_MISSES_BEFORE_RESTART = 5;
+const SHELL_RESTART_GAP_MS = 60000;
 const FIRST_CHECK_DELAY_MS = 15000;
 const LOGGED_OUT_RECHECK_MS = 60000;
 const CHECK_TIMEOUT_MS = 60000;
@@ -24,6 +28,7 @@ const REASON_TEXT = {
   no_alive_signal: '没看到后台页面的特征',
   no_platform_tab: '没有这个平台的页签',
   alive_ui_matched: '看到了后台页面的特征',
+  check_failed: '检测没跑成，上一次的已登录结果不再沿用',
 };
 
 function reasonText(reason) {
@@ -253,22 +258,34 @@ class PlatformRuntime {
   async heartbeat(now) {
     this.lastProbeAt = now;
     if (this.config.browser === 'shell') {
-      const hasTab = await chrome.shellHasTab(this.config.platform_id);
-      if (hasTab) {
-        this.browserAlive = await chrome.shellTabReady(this.config.platform_id, this.config.entry_url);
-        this.chromePid = this.chromePid || null;
-        this.chromeError = '';
-        this.probeMisses = 0;
-        this.lastHeartbeatAt = now;
+      const port = chrome.shellDebugPort() || this.config.cdp_port;
+      const query = await chrome.shellTabQuery(port);
+      this.lastHeartbeatAt = now;
+      if (!query.ok) {
+        // The debugging port is up and only the control request failed.
+        // Leaving the page alone is safer than rebuilding it.
+        if (query.reason !== 'cdp-down') {
+          this.ctx.changed();
+          return;
+        }
+        this.probeMisses += 1;
+        this.considerShellRestart(now, '保活窗口没有响应');
         this.ctx.changed();
         return;
       }
-      this.browserAlive = false;
-      this.probeMisses += 1;
-      this.lastHeartbeatAt = now;
-      if (this.chromeOn && this.probeMisses >= 2 && !this.transition && this.queued === 0 && now >= (this.nextRestartAt || 0)) {
-        this.enqueue(() => this.startChrome('auto')).catch(() => {});
+      const hasTab = query.tabs.some((tab) => tab.id === this.config.platform_id && tab.group === 'keepalive');
+      if (hasTab) {
+        const host = chrome.hostOf(this.config.entry_url);
+        const tab = query.tabs.find((item) => item.id === this.config.platform_id && item.group === 'keepalive');
+        this.browserAlive = Boolean(tab && host && chrome.hostOf(tab.url) === host);
+        this.chromePid = this.chromePid || null;
+        this.chromeError = this.browserAlive ? '' : '保活窗口还在，但这个平台的页面不在入口地址上';
+        this.probeMisses = 0;
+        this.ctx.changed();
+        return;
       }
+      this.probeMisses += 1;
+      this.considerShellRestart(now, '保活窗口还在，但这个平台的页签没有响应，正在重新打开');
       this.ctx.changed();
       return;
     }
@@ -309,6 +326,17 @@ class PlatformRuntime {
         : '沙盒 Chrome 进程不在了（崩溃或被手动关掉）。自动重启已关，需要手动打开');
     }
     this.ctx.changed();
+  }
+
+  considerShellRestart(now, message) {
+    if (this.probeMisses < SHELL_MISSES_BEFORE_RESTART) return;
+    if (!this.chromeOn || this.transition || this.queued > 0 || now < (this.nextRestartAt || 0)) return;
+    this.browserAlive = false;
+    this.chromeError = message;
+    this.markSessionUnchecked(message);
+    this.probeMisses = 0;
+    this.nextRestartAt = now + SHELL_RESTART_GAP_MS;
+    this.enqueue(() => this.startChrome('auto')).catch(() => {});
   }
 
   // ---- timer ----
@@ -356,8 +384,26 @@ class PlatformRuntime {
 
   // ---- visits ----
 
+  markSessionUnchecked(detail) {
+    if (this.session?.status !== 'alive') return;
+    this.session = {
+      ...this.session,
+      status: 'unknown',
+      reason: 'check_failed',
+      reason_text: reasonText('check_failed'),
+      detail: detail || '',
+      checked_at: Date.now(),
+    };
+    this.note(`登录状态改为未知：${detail || reasonText('check_failed')}`);
+    this.ctx.changed();
+  }
+
   requireBrowser() {
-    if (!this.browserAlive) throw new InputError('沙盒 Chrome 没在运行，先打开它', 409);
+    if (this.browserAlive) return;
+    const label = this.config.browser === 'shell' ? '保活窗口' : '沙盒 Chrome';
+    const message = this.chromeError || `${label}没在运行，先打开它`;
+    this.markSessionUnchecked(message);
+    throw new InputError(message, 409);
   }
 
   /** Read-only: looks at the page, clicks nothing. */
@@ -383,6 +429,7 @@ class PlatformRuntime {
       await this.applyDetection(result.detection, source);
       return result.detection;
     } catch (err) {
+      this.markSessionUnchecked(firstLine(err));
       this.note(`检测没跑成：${firstLine(err)}`);
       throw new InputError(`检测没跑成：${firstLine(err)}`, 502);
     } finally {
@@ -435,6 +482,7 @@ class PlatformRuntime {
       if (scheduled) await this.trackTrouble(failed, result.detection);
     } catch (err) {
       this.lastKeepalive = { at: Date.now(), source, result: 'error', error: firstLine(err) };
+      this.markSessionUnchecked(firstLine(err));
       this.note(`这一轮保活出错：${firstLine(err)}`);
       if (scheduled) await this.trackTrouble(true, null);
     } finally {

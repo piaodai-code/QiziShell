@@ -13,6 +13,11 @@ const os = require('os');
 const path = require('path');
 const { execFileSync, spawn } = require('child_process');
 const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { localParts: systemLocalParts } = require('../system-local-time');
+
+ipcMain.on('qizi:local-time-parts', (event, ms) => {
+  event.returnValue = systemLocalParts(ms);
+});
 const { startFakeSite } = require('../keepalive-server/test/fake-site');
 const { createKeepaliveFeature } = require('../keepalive-main');
 
@@ -166,14 +171,14 @@ async function main() {
     check(await page('Boolean(document.getElementById("ka-add").compareDocumentPosition(document.getElementById("ka-platforms")) & Node.DOCUMENT_POSITION_FOLLOWING)'), 'add platform sits above the cards');
     check(await page('Math.round(document.querySelector(".ka-card").getBoundingClientRect().width)') <= 540, 'a platform card stays within the side-panel width');
     check(await page('document.querySelector(".ka-lamp").hidden') === true, 'a stopped platform shows no lamp');
-    check((await text('.ka-facts')).includes('占用后 45 分钟自动解除'), 'the configured lock expiry is shown');
+    check((await text('.ka-lock-count')) === '', 'an open lock shows no countdown');
     await shot('03-stopped');
 
     console.log('chrome on');
     await api('PUT', '/api/platforms/channels_01', { browser: 'chrome', cdp_port: cdpPort });
     await page('document.querySelector(\'input[data-act="chrome"]\').click()');
-    await waitUntil(async () => (await text('.ka-badge')) === '缺保活脚本', 40000, 'Chrome to start');
-    check((await text('.ka-facts')).includes('.json'), 'the card says where the agent\'s script goes');
+    await waitUntil(async () => (await text('.ka-badge')) === '待确认', 40000, 'Chrome to start');
+    check((await text('.ka-alert')).includes('脚本未就绪'), 'a missing script stops the later checks');
     check(await page('document.querySelector(".ka-lamp").dataset.state') === 'warn', 'a missing script shows a steady yellow lamp');
     check(await page('getComputedStyle(document.querySelector(".ka-lamp")).animationName') === 'none', 'the yellow lamp does not breathe or flash');
     await shot('04-no-script');
@@ -196,16 +201,20 @@ async function main() {
     check(await page('getComputedStyle(document.querySelector(".ka-lamp")).animationName') === 'ka-breathe', 'the green lamp breathes');
     await api('POST', '/api/platforms/channels_01/keepalive');
     await api('POST', '/api/platforms/channels_01/lock', { owner: 'maintainer', reason: '发布视频' });
-    await waitUntil(async () => (await text('.ka-facts')).includes('maintainer 占用中'), 5000, 'the lock to show');
+    await waitUntil(async () => /^\d+:\d{2}/.test(await text('.ka-lock-count')), 5000, 'the lock countdown to show');
+    check(await page('document.querySelector(".ka-lock").classList.contains("is-locked")'), 'a held lock is red');
     await page('document.querySelector(".ka-events summary").click()');
     await shot('05-alive-locked');
     await api('POST', '/api/platforms/channels_01/unlock', { owner: 'maintainer' });
+    // Unlock schedules a DOM-only check. If that check runs after the API-style
+    // logout below, it sees the dashboard and clears the logout. Let it finish first.
+    await sleep(8000);
 
     console.log('pause');
     await page('document.querySelector(\'input[data-act="pause"]\').click()');
-    await waitUntil(async () => (await text('.ka-badge')) === '已登录，保活暂停', 5000, 'pause to show');
-    check((await text('.ka-facts')).includes('已暂停'), 'next keep-alive reads as paused');
-    check(await page('document.querySelector(".ka-lamp").hidden') === true, 'pause hides the lamp');
+    await waitUntil(async () => (await text('.ka-status')).includes('已暂停'), 5000, 'pause to show');
+    check((await text('.ka-badge')) === '已登录', 'pause keeps the logged-in badge');
+    check(await page('document.querySelector(".ka-lamp").dataset.state') === 'ok', 'pause keeps the green lamp');
     await page('document.querySelector(\'input[data-act="pause"]\').click()');
     await waitUntil(async () => (await text('.ka-badge')) === '已登录', 5000, 'resume to show');
 
@@ -213,11 +222,12 @@ async function main() {
     site.state.loggedIn = false;
     site.state.logoutStyle = 'api';
     await api('POST', '/api/platforms/channels_01/keepalive');
-    await waitUntil(async () => (await text('.ka-badge')) === '需重新登录', 10000, 'the logout to show');
+    await waitUntil(async () => (await text('.ka-badge')) === '已掉线', 10000, 'the logout to show');
     check((await text('.ka-alert')).includes('平台接口返回未登录'), 'the card says why it counts as logged out');
     check(await page('document.querySelector(".ka-lamp").dataset.state') === 'lost', 'a failed keep-alive flashes red');
     check(await page('getComputedStyle(document.querySelector(".ka-lamp")).animationName') === 'ka-flash', 'the red lamp flashes');
-    check((await text('.ka-facts')).includes('待通过本机已登录的 Maintainer 发出'), 'an unsent notice waits for the Maintainer session');
+    await waitUntil(async () => (await text('.ka-alert')).includes('待通过本机已登录的 Maintainer 发出'), 5000, 'the logout notice to be pending');
+    check(true, 'an unsent notice waits for the Maintainer session');
     await shot('06-logged-out');
 
     console.log('edit dialog');
@@ -226,7 +236,7 @@ async function main() {
     await shot('07-edit-dialog');
     await page('document.getElementById("ka-f-cancel").click()');
     await page('document.getElementById("ka-server-connect").click()');
-    await page('document.getElementById("ka-link-port").value = 9999; document.getElementById("ka-link-save").click();');
+    await page('document.getElementById("ka-link-port").value = "9999"; document.getElementById("ka-link-save").click();');
     await waitUntil(async () => (await page('document.getElementById("ka-link-error").hidden')) === false, 5000, 'the port change to be refused');
     check((await text('#ka-link-error')).includes('先关闭保活窗口'), 'the port cannot change under a running window');
     await page('document.getElementById("ka-link-cancel").click()');

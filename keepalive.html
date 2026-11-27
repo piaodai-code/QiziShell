@@ -14,11 +14,27 @@
       <input type="text" id="ka-server-url" spellcheck="false" autocomplete="off" readonly placeholder="服务器地址，例如 192.168.1.20">
       <button type="button" class="ka-connect" id="ka-server-connect" aria-label="编辑保活服务"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3A5 5 0 0 0 11 21.07l1.71-1.71"/><path d="m8 16 8-8"/></svg></button>
     </form>
-    <p class="ka-link" id="ka-link" data-state="connecting"></p>
+    <div class="ka-heart" id="ka-heart" data-state="hold">
+      <div class="ka-heart-head"><span>服务端心跳</span><strong>实时</strong></div>
+      <svg class="ka-ecg" viewBox="0 0 600 48" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <clipPath id="ka-ecg-clip"><rect class="ka-ecg-reveal" x="0" y="0" width="0" height="48"></rect></clipPath>
+        </defs>
+        <path class="ka-ecg-trace" clip-path="url(#ka-ecg-clip)" d="M0 25 H58 L68 24 L76 26 H94 L100 23 L106 28 L114 8 L123 39 L131 20 L139 25 H258 L268 24 L276 26 H294 L300 23 L306 28 L314 8 L323 39 L331 20 L339 25 H458 L468 24 L476 26 H494 L500 23 L506 28 L514 8 L523 39 L531 20 L539 25 H600"></path>
+      </svg>
+      <div class="ka-heart-times">
+        <span data-beat="0"></span>
+        <span data-beat="1"></span>
+        <span class="latest" data-beat="2"></span>
+      </div>
+    </div>
+    <div class="ka-summary">
+      <p class="ka-link" id="ka-link" data-state="connecting"></p>
+      <button type="button" class="ka-add" id="ka-add" hidden><span aria-hidden="true">＋</span> 添加平台</button>
+    </div>
   </header>
 
   <main class="ka-main">
-    <button type="button" class="ka-btn" id="ka-add" hidden>添加平台</button>
     <section id="ka-platforms" aria-live="polite"></section>
   </main>
 

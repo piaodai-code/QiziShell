@@ -32,12 +32,23 @@ app.commandLine.appendSwitch('disable-renderer-backgrounding');
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
 
 let quitting = false;
+let layingOut = false;
 let tray = null;
 let win = null;
 let bar = null;
 let activeId = '';
 let barMode = 'keepalive';
 const tabs = new Map();
+
+function noteCrash(kind, err) {
+  const text = err && err.stack ? err.stack : String(err?.message || err || '');
+  const line = `${new Date().toISOString()} ${kind}: ${text}\n`;
+  console.error(`[shell] ${line.trim()}`);
+  try { fs.appendFileSync(path.join(profileDir, 'shell.log'), line); } catch { /* log dir not ready */ }
+}
+
+process.on('uncaughtException', (err) => noteCrash('uncaughtException', err));
+process.on('unhandledRejection', (err) => noteCrash('unhandledRejection', err));
 
 function trayIcon() {
   const icon = nativeImage.createFromPath(path.join(__dirname, 'shell-icon.png'));
@@ -131,22 +142,86 @@ function nextVisibleId(excluding) {
   return found ? found.id : '';
 }
 
-function layout() {
-  if (!win || win.isDestroyed()) return;
-  const [width, height] = win.getContentSize();
-  bar.setBounds({ x: 0, y: 0, width, height: BAR_HEIGHT });
-  const bounds = { x: 0, y: BAR_HEIGHT, width, height: Math.max(0, height - BAR_HEIGHT) };
-  for (const tab of tabs.values()) tab.view.setBounds(bounds);
-  const active = tabs.get(activeId);
-  if (active) win.contentView.addChildView(active.view);
-  else if (cover) {
-    cover.setBounds(bounds);
-    win.contentView.addChildView(cover);
+function childAlive(view) {
+  if (!view) return false;
+  try {
+    const contents = view.webContents;
+    return Boolean(contents && !contents.isDestroyed());
+  } catch {
+    return false;
   }
-  win.contentView.addChildView(bar);
+}
+
+function place(view, bounds, attach) {
+  if (!childAlive(view) || !win || win.isDestroyed()) return false;
+  try {
+    view.setBounds(bounds);
+    if (attach) win.contentView.addChildView(view);
+    return true;
+  } catch (err) {
+    noteCrash('layout', err);
+    return false;
+  }
+}
+
+function mountBar() {
+  const view = new WebContentsView({
+    webPreferences: { preload: barPreload, contextIsolation: true, backgroundThrottling: false },
+  });
+  view.webContents.on('render-process-gone', (_event, details) => {
+    if (details?.reason === 'clean-exit') return;
+    noteCrash('bar render-process-gone', details?.reason || 'gone');
+    if (bar === view) bar = null;
+  });
+  view.webContents.on('destroyed', () => {
+    noteCrash('bar destroyed', 'tab bar webContents destroyed');
+    if (bar === view) bar = null;
+    setImmediate(() => layout());
+  });
+  view.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(barHtml())}`);
+  bar = view;
+  return view;
+}
+
+function ensureCover() {
+  if (childAlive(cover)) return cover;
+  cover = new WebContentsView({ webPreferences: { backgroundThrottling: false } });
+  cover.webContents.loadURL('data:text/html;charset=utf-8,<body style="margin:0;background:%23f4f4f5">');
+  return cover;
+}
+
+function dropDeadTabs() {
+  for (const [id, tab] of [...tabs.entries()]) {
+    if (childAlive(tab.view)) continue;
+    noteCrash('drop tab', `${id} webContents gone`);
+    tabs.delete(id);
+    try { win.contentView.removeChildView(tab.view); } catch { /* already gone */ }
+    if (activeId === id) activeId = nextVisibleId(id);
+  }
+}
+
+function layout() {
+  if (layingOut || !win || win.isDestroyed()) return;
+  layingOut = true;
+  try {
+    dropDeadTabs();
+    const [width, height] = win.getContentSize();
+    const bounds = { x: 0, y: BAR_HEIGHT, width, height: Math.max(0, height - BAR_HEIGHT) };
+    for (const tab of tabs.values()) place(tab.view, bounds, false);
+    const active = tabs.get(activeId);
+    if (active) place(active.view, bounds, true);
+    else place(ensureCover(), bounds, true);
+    const top = childAlive(bar) ? bar : mountBar();
+    if (!place(top, { x: 0, y: 0, width, height: BAR_HEIGHT }, true) && bar === top) {
+      bar = null;
+    }
+  } finally {
+    layingOut = false;
+  }
 }
 
 function renderBar() {
+  if (!childAlive(bar)) return;
   const items = [...tabs.values()].map((tab) => ({
     id: tab.id,
     title: tab.title,
@@ -185,12 +260,25 @@ function attachOpenHandler(contents) {
 }
 
 function addTab({ id, url, title, group }) {
+  const found = tabs.get(id);
+  if (found && !childAlive(found.view)) {
+    tabs.delete(id);
+    try { win.contentView.removeChildView(found.view); } catch { /* already gone */ }
+  }
   const existing = tabs.get(id);
   if (existing) {
     existing.title = title || existing.title;
-    if (url && existing.view.webContents.getURL() !== url) existing.view.webContents.loadURL(url);
-    showTab(id);
-    return;
+    try {
+      if (url && existing.view.webContents.getURL() !== url) existing.view.webContents.loadURL(url);
+    } catch (err) {
+      noteCrash(`reload ${id}`, err);
+      tabs.delete(id);
+      try { win.contentView.removeChildView(existing.view); } catch { /* already gone */ }
+    }
+    if (tabs.has(id)) {
+      showTab(id);
+      return;
+    }
   }
   const view = new WebContentsView({
     webPreferences: {
@@ -208,9 +296,15 @@ function addTab({ id, url, title, group }) {
     tab.title = pageTitle || tab.title;
     renderBar();
   });
+  view.webContents.on('render-process-gone', (_event, details) => {
+    if (details?.reason === 'clean-exit') return;
+    noteCrash(`render-process-gone ${id}`, details?.reason || 'gone');
+    try { if (!view.webContents.isDestroyed()) view.webContents.destroy(); } catch { /* already gone */ }
+  });
   view.webContents.on('destroyed', () => {
     const tab = tabs.get(id);
-    if (!tab || tab.group === 'keepalive') return;
+    if (!tab) return;
+    noteCrash('tab destroyed', `${id} group=${tab.group}`);
     tabs.delete(id);
     try { win.contentView.removeChildView(tab.view); } catch { /* already gone */ }
     if (activeId === id) activeId = nextVisibleId(id);
@@ -223,12 +317,16 @@ function addTab({ id, url, title, group }) {
   showTab(id);
 }
 
+function releaseTab(tab) {
+  try { win.contentView.removeChildView(tab.view); } catch { /* already gone */ }
+  try { tab.view.webContents?.close({ waitForBeforeUnload: false }); } catch { /* already gone */ }
+}
+
 function closeTab(id) {
   const tab = tabs.get(id);
   if (!tab || tab.group === 'keepalive') return;
   tabs.delete(id);
-  win.contentView.removeChildView(tab.view);
-  tab.view.webContents.close({ waitForBeforeUnload: false });
+  releaseTab(tab);
   if (activeId === id) activeId = nextVisibleId(id);
   layout();
   renderBar();
@@ -238,8 +336,7 @@ function removeKeepaliveTab(id) {
   const tab = tabs.get(id);
   if (!tab) return false;
   tabs.delete(id);
-  win.contentView.removeChildView(tab.view);
-  tab.view.webContents.close({ waitForBeforeUnload: false });
+  releaseTab(tab);
   if (activeId === id) activeId = nextVisibleId(id);
   layout();
   renderBar();
@@ -311,12 +408,19 @@ function startControl() {
       const url = new URL(req.url, 'http://127.0.0.1');
       if (req.method === 'GET' && url.pathname === '/tabs') {
         send(res, 200, {
-          tabs: [...tabs.values()].map((tab) => ({
-            id: tab.id,
-            title: tab.title,
-            group: tab.group,
-            url: tab.view.webContents.getURL(),
-          })),
+          tabs: [...tabs.values()].flatMap((tab) => {
+            if (!childAlive(tab.view)) return [];
+            try {
+              return [{
+                id: tab.id,
+                title: tab.title,
+                group: tab.group,
+                url: tab.view.webContents.getURL(),
+              }];
+            } catch {
+              return [];
+            }
+          }),
         });
         return;
       }
@@ -380,13 +484,8 @@ app.whenReady().then(async () => {
     title: '保活',
     webPreferences: { backgroundThrottling: false },
   });
-  bar = new WebContentsView({
-    webPreferences: { preload: barPreload, contextIsolation: true, backgroundThrottling: false },
-  });
-  win.contentView.addChildView(bar);
-  cover = new WebContentsView({ webPreferences: { backgroundThrottling: false } });
-  cover.webContents.loadURL('data:text/html;charset=utf-8,<body style="margin:0;background:%23f4f4f5">');
-  bar.webContents.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(barHtml())}`);
+  mountBar();
+  ensureCover();
   win.on('resize', layout);
   win.on('close', (event) => {
     if (quitting) return;

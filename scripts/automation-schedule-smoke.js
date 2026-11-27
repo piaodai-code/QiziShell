@@ -1,5 +1,5 @@
 const { formatSchedule, presentJobs, jobFailure, callGatewayWithRetry } = require('../automation-main');
-const { platformKeepaliveLost } = require('../keepalive-main');
+const { platformKeepaliveLost, keepaliveLinkDown } = require('../keepalive-main');
 
 let passed = 0;
 function check(condition, label) {
@@ -32,6 +32,10 @@ const paused = { status: { ...lost.status, paused: true } };
 check(platformKeepaliveLost(lost) === true, 'a logged-out platform lights the Keep-alive button');
 check(platformKeepaliveLost(missing) === false, 'a missing script does not light the Keep-alive button');
 check(platformKeepaliveLost(paused) === false, 'a paused platform does not light the Keep-alive button');
+const fresh = { platforms: [{ status: { last_heartbeat_at: 10_000 } }] };
+check(keepaliveLinkDown({ state: 'connected' }, fresh, 20_000) === false, 'a fresh heartbeat keeps the Keep-alive button quiet');
+check(keepaliveLinkDown({ state: 'connected' }, fresh, 40_000) === true, 'a stale heartbeat lights the Keep-alive button');
+check(keepaliveLinkDown({ state: 'offline' }, fresh, 11_000) === true, 'an offline keep-alive service lights the Keep-alive button');
 
 (async () => {
   let calls = 0;

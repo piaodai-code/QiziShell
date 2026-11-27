@@ -368,36 +368,74 @@ async function startShell({ dataDir, port, entryUrl, name, platformId }) {
   return { pid: runtime.pid, adopted: runtime.adopted };
 }
 
+async function pidAlive(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Our window is listening, but CDP or the tab list no longer answers. */
+async function retireOwnShell(port, pid) {
+  signal(pid, 'SIGTERM');
+  if (!await waitFor(async () => !(await pidAlive(pid)), 4000)) signal(pid, 'SIGKILL');
+  await waitFor(async () => !(await pidAlive(pid)) && (await pidsListeningOn(port)).length === 0, 4000);
+}
+
+async function shellControlHealthy(dir) {
+  const control = readControlPort(dir);
+  if (!control) return false;
+  try {
+    const body = await controlRequest(control, 'GET', '/tabs');
+    return Array.isArray(body?.tabs);
+  } catch {
+    return false;
+  }
+}
+
 async function openShell(dataDir, port) {
   const dir = sharedShellDir(dataDir);
   const listenPort = shellRuntime?.port || port;
-  if (shellRuntime && await probe(listenPort) && await ownerPid(listenPort, dir)) {
-    shellRuntime.adopted = true;
-    return shellRuntime;
-  }
   const legacyDir = path.join(dataDir, 'profiles', 'channels_01', 'shell');
   if (legacyDir !== dir && await ownerPid(listenPort, legacyDir)) {
     await stop({ port: listenPort, profileDir: legacyDir, pid: null });
   }
-  if (await probe(listenPort)) {
-    const pid = await ownerPid(listenPort, dir);
-    if (!pid) throw new Error(`端口 ${listenPort} 上已经有另一个浏览器在用调试端口，换一个 CDP 端口或先关掉它`);
-    shellRuntime = { port: listenPort, dir, controlPort: readControlPort(dir), pid, adopted: true };
+  const ownPid = await ownerPid(listenPort, dir);
+  if (ownPid && await probe(listenPort) && await shellControlHealthy(dir)) {
+    shellRuntime = {
+      port: listenPort,
+      dir,
+      controlPort: readControlPort(dir),
+      pid: ownPid,
+      adopted: true,
+    };
     return shellRuntime;
   }
-  const squatters = await pidsListeningOn(listenPort);
-  if (squatters.length > 0) {
-    throw new Error(`端口 ${listenPort} 被别的程序占着（进程 ${squatters.join(', ')}），换一个 CDP 端口`);
+  if (ownPid) {
+    await retireOwnShell(listenPort, ownPid);
+    shellRuntime = null;
+  } else if (await probe(listenPort)) {
+    throw new Error(`端口 ${listenPort} 上已经有另一个浏览器在用调试端口，换一个 CDP 端口或先关掉它`);
+  } else {
+    const squatters = await pidsListeningOn(listenPort);
+    if (squatters.length > 0) {
+      throw new Error(`端口 ${listenPort} 被别的程序占着（进程 ${squatters.join(', ')}），换一个 CDP 端口`);
+    }
   }
   try { fs.unlinkSync(path.join(dir, 'control.json')); } catch { /* first launch */ }
   const env = { ...process.env };
   delete env.ELECTRON_RUN_AS_NODE;
+  const logFd = fs.openSync(path.join(dir, 'shell.log'), 'a');
   const child = spawn(await ensureElectronBinary(), [
     `--user-data-dir=${dir}`,
     `--remote-debugging-port=${listenPort}`,
     '--remote-debugging-address=127.0.0.1',
     path.join(__dirname, '..', 'shell.js'),
-  ], { detached: true, stdio: 'ignore', env });
+  ], { detached: true, stdio: ['ignore', logFd, logFd], env });
+  fs.closeSync(logFd);
   let spawnError = null;
   child.on('error', (err) => { spawnError = err; });
   child.unref();
@@ -420,15 +458,28 @@ async function closeShellTab(platformId) {
   await controlRequest(control, 'DELETE', `/tabs?id=${encodeURIComponent(platformId)}`);
 }
 
-async function shellTabs() {
-  if (!shellRuntime || !(await probe(shellRuntime.port))) return [];
+/**
+ * Tab list, with the failure kept separate from "this platform has no tab".
+ * reason `control`: the window's CDP is up but the control port did not answer.
+ * reason `cdp-down`: nothing is answering the debugging port.
+ */
+async function shellTabQuery(fallbackPort) {
+  const port = shellRuntime?.port || fallbackPort;
+  if (!port || !(await probe(port))) return { ok: false, tabs: [], reason: 'cdp-down' };
+  if (!shellRuntime) return { ok: false, tabs: [], reason: 'control' };
   try {
     const control = await shellControl();
     const body = await controlRequest(control, 'GET', '/tabs');
-    return body?.tabs || [];
+    if (!Array.isArray(body?.tabs)) return { ok: false, tabs: [], reason: 'control' };
+    return { ok: true, tabs: body.tabs, reason: '' };
   } catch {
-    return [];
+    return { ok: false, tabs: [], reason: 'control' };
   }
+}
+
+async function shellTabs() {
+  const result = await shellTabQuery();
+  return result.ok ? result.tabs : [];
 }
 
 async function shellHasTab(platformId) {
@@ -488,7 +539,7 @@ async function stopShellIfEmpty() {
     const body = await controlRequest(control, 'GET', '/tabs');
     tabs = (body?.tabs || []).filter((tab) => tab.group === 'keepalive');
   } catch {
-    tabs = [];
+    return;
   }
   if (tabs.length > 0) return;
   const { port, dir, pid } = shellRuntime;
@@ -629,6 +680,7 @@ module.exports = {
   shellDebugPort,
   debugPort,
   closeShellTab,
+  shellTabQuery,
   shellHasTab,
   shellTabReady,
   listPlatformPages,

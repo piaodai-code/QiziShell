@@ -116,8 +116,8 @@ let maintainerSideKind = '';
 let maintainerSideWidth = 0;
 let maintainerSideApplying = false;
 const AUTOMATION_SIDE_WIDTH = 640;
-// One keep-alive card at 540px, plus the panel's 12px page inset, 1px border and 16px card padding on each side.
-const KEEPALIVE_SIDE_WIDTH = 598;
+// Narrowed to three quarters of the previous 598px panel.
+const KEEPALIVE_SIDE_WIDTH = 449;
 const maintainerSideWidths = { keepalive: KEEPALIVE_SIDE_WIDTH, automation: AUTOMATION_SIDE_WIDTH };
 const maintainerSideViews = {};
 let maintainingSession = null;
